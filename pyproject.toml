@@ -9,6 +9,7 @@ description = "Hexagonal core for a serverless AI agent engine."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "httpx>=0.28.0,<1.0.0",
     "openai>=1.30.0,<2.0.0",
     "pydantic>=2.7.0,<3.0.0",
 ]
@@ -24,4 +25,4 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
-include = ["core*"]
+include = ["core*", "platforms*"]

@@ -8,8 +8,8 @@ import pytest
 from pydantic import BaseModel
 
 from core.agent import DEFAULT_FALLBACK_MESSAGE, NexusAgent
-from core.plugins import BasePlugin
-from core.skills import BaseSkill
+from core.plugins import BasePlugin, HistorySnapshot, PluginEvent
+from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
 
 @dataclass
@@ -57,24 +57,41 @@ class FakePlugin(BasePlugin):
     def __init__(
         self,
         *,
-        event_id: str = "evt-1",
-        message: str = "hello",
-        history: list[dict[str, str]] | None = None,
+        event: PluginEvent | None = None,
+        history_messages: list[dict[str, str]] | None = None,
+        subconscious: dict[str, Any] | None = None,
     ) -> None:
-        self._event_id = event_id
-        self._message = message
-        self._history = list(history or [])
-        self.sent_replies: list[tuple[str, str]] = []
+        self._event = event or PluginEvent(
+            event_id="evt-1",
+            message="hello",
+            author="octocat",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+        )
+        self._history_messages = list(history_messages or [])
+        self._subconscious = dict(subconscious or {})
+        self.sent_replies: list[tuple[PluginEvent, str, dict[str, Any] | None]] = []
 
-    def parse_event(self, raw_payload: Any) -> dict[str, Any]:
-        return {"event_id": self._event_id, "message": self._message, "raw": raw_payload}
+    def parse_event(self, raw_payload: Any) -> PluginEvent:
+        return self._event
 
-    async def fetch_history(self, event_id: str) -> list[dict[str, str]]:
-        assert event_id == self._event_id
-        return list(self._history)
+    async def fetch_history(self, event: PluginEvent) -> HistorySnapshot:
+        assert event == self._event
+        return HistorySnapshot(
+            messages=list(self._history_messages),
+            subconscious=dict(self._subconscious),
+        )
 
-    async def send_reply(self, event_id: str, content: str) -> None:
-        self.sent_replies.append((event_id, content))
+    async def send_reply(
+        self,
+        event: PluginEvent,
+        content: str,
+        subconscious: dict[str, Any] | None = None,
+    ) -> None:
+        self.sent_replies.append((event, content, subconscious))
 
 
 class EchoArgs(BaseModel):
@@ -91,6 +108,21 @@ class EchoSkill(BaseSkill):
         return f"echo:{args.text}"
 
 
+class ContextAwareSkill(BaseSkill):
+    name = "read_context"
+    description = "Inspect runtime context."
+    args_model = BaseModel
+
+    async def execute(self, **kwargs: Any) -> dict[str, Any]:
+        context = get_skill_context()
+        return {
+            "owner": context["owner"],
+            "repo": context["repo"],
+            "issue_number": context["issue_number"],
+            "subconscious": context["subconscious"],
+        }
+
+
 def build_response(message: FakeMessage) -> FakeResponse:
     return FakeResponse(choices=[FakeChoice(message=message)])
 
@@ -102,8 +134,18 @@ async def test_run_sends_direct_reply_without_tool_calls() -> None:
     )
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
     plugin = FakePlugin(
-        history=[{"role": "assistant", "content": "Previous reply"}],
-        message="Need help",
+        history_messages=[{"role": "assistant", "content": "Previous reply"}],
+        subconscious={"mode": "reflective"},
+        event=PluginEvent(
+            event_id="evt-1",
+            message="Need help",
+            author="octocat",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+        ),
     )
     agent = NexusAgent(
         persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
@@ -114,7 +156,9 @@ async def test_run_sends_direct_reply_without_tool_calls() -> None:
 
     await agent.run(raw_event={"payload": "ignored"})
 
-    assert plugin.sent_replies == [("evt-1", "Final answer")]
+    assert plugin.sent_replies == [
+        (plugin.parse_event(None), "Final answer", {"mode": "reflective"})
+    ]
     assert fake_completions.calls[0]["messages"] == [
         {"role": "system", "content": "You are helpful."},
         {"role": "assistant", "content": "Previous reply"},
@@ -150,7 +194,9 @@ async def test_run_executes_tool_call_then_sends_final_reply() -> None:
 
     await agent.run(raw_event={"payload": "ignored"})
 
-    assert plugin.sent_replies == [("evt-1", "Done")]
+    assert plugin.sent_replies == [
+        (plugin.parse_event(None), "Done", {})
+    ]
     second_call_messages = fake_completions.calls[1]["messages"]
     assert second_call_messages[-2]["tool_calls"][0]["function"]["name"] == "echo"
     assert second_call_messages[-1] == {
@@ -188,7 +234,9 @@ async def test_run_surfaces_unknown_tool_errors_back_into_loop() -> None:
 
     await agent.run(raw_event={})
 
-    assert plugin.sent_replies == [("evt-1", "Recovered")]
+    assert plugin.sent_replies == [
+        (plugin.parse_event(None), "Recovered", {})
+    ]
     assert fake_completions.calls[1]["messages"][-1]["content"].startswith("Tool error:")
     assert "Unknown tool 'missing'" in fake_completions.calls[1]["messages"][-1]["content"]
 
@@ -221,7 +269,9 @@ async def test_run_surfaces_validation_errors_back_into_loop() -> None:
 
     await agent.run(raw_event={})
 
-    assert plugin.sent_replies == [("evt-1", "Recovered")]
+    assert plugin.sent_replies == [
+        (plugin.parse_event(None), "Recovered", {})
+    ]
     assert "Tool error:" in fake_completions.calls[1]["messages"][-1]["content"]
     assert "Validation failed for tool 'echo'" in fake_completions.calls[1]["messages"][-1]["content"]
 
@@ -240,7 +290,7 @@ async def test_run_sends_fallback_after_max_iterations() -> None:
     )
     fake_completions = FakeCompletions([repeated_tool_call for _ in range(5)])
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin()
+    plugin = FakePlugin(subconscious={"mode": "loop"})
     agent = NexusAgent(
         persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
         skills=[EchoSkill()],
@@ -250,4 +300,43 @@ async def test_run_sends_fallback_after_max_iterations() -> None:
 
     await agent.run(raw_event={})
 
-    assert plugin.sent_replies == [("evt-1", DEFAULT_FALLBACK_MESSAGE)]
+    assert plugin.sent_replies == [
+        (plugin.parse_event(None), DEFAULT_FALLBACK_MESSAGE, {"mode": "loop"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_sets_runtime_context_for_skills() -> None:
+    clear_skill_context()
+    fake_completions = FakeCompletions(
+        [
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-ctx",
+                            function=FakeFunction(name="read_context", arguments="{}"),
+                        )
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content="Done")),
+        ]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    plugin = FakePlugin(subconscious={"memory": "sticky"})
+    agent = NexusAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[ContextAwareSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+    )
+
+    await agent.run(raw_event={})
+
+    tool_message = fake_completions.calls[1]["messages"][-1]
+    assert '"owner": "acme"' in tool_message["content"]
+    assert '"repo": "widgets"' in tool_message["content"]
+    assert '"issue_number": 12' in tool_message["content"]
+    assert '"memory": "sticky"' in tool_message["content"]
+    assert get_skill_context() == {}

@@ -4,10 +4,10 @@ import json
 from json import JSONDecodeError
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from .plugins import BasePlugin
-from .skills import BaseSkill
+from .plugins import BasePlugin, HistorySnapshot, PluginEvent
+from .skills import BaseSkill, clear_skill_context, set_skill_context
 
 DEFAULT_FALLBACK_MESSAGE = "I'm sorry, but I couldn't complete your request right now."
 
@@ -34,49 +34,51 @@ class NexusAgent:
 
     async def run(self, raw_event: Any) -> None:
         event = self.plugin.parse_event(raw_event)
-        event_id = self._require_text(event, "event_id")
-        user_message = self._require_text(event, "message")
-
-        history = await self.plugin.fetch_history(event_id)
+        history = await self.plugin.fetch_history(event)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.persona["system_prompt"]},
-            *history,
-            {"role": "user", "content": user_message},
+            *history.messages,
+            {"role": "user", "content": event.message},
         ]
-        tools = [self._build_tool_spec(skill) for skill in self.skills]
+        tools = [skill.get_tool_definition() for skill in self.skills]
+        subconscious = dict(history.subconscious)
+        context_token = set_skill_context(event=event, subconscious=subconscious)
 
-        for _ in range(5):
-            response = await self._create_completion(messages=messages, tools=tools)
-            assistant_message = response.choices[0].message
-            tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
+        try:
+            for _ in range(5):
+                response = await self._create_completion(messages=messages, tools=tools)
+                assistant_message = response.choices[0].message
+                tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
 
-            if tool_calls:
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": self._extract_text_content(assistant_message),
-                        "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
-                    }
-                )
-                for tool_call in tool_calls:
-                    tool_result = await self._execute_tool_call(tool_call)
+                if tool_calls:
                     messages.append(
                         {
-                            "role": "tool",
-                            "tool_call_id": getattr(tool_call, "id", ""),
-                            "content": tool_result,
+                            "role": "assistant",
+                            "content": self._extract_text_content(assistant_message),
+                            "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
                         }
                     )
-                continue
+                    for tool_call in tool_calls:
+                        tool_result = await self._execute_tool_call(tool_call)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": getattr(tool_call, "id", ""),
+                                "content": tool_result,
+                            }
+                        )
+                    continue
 
-            reply_text = self._extract_text_content(assistant_message).strip()
-            if reply_text:
-                await self.plugin.send_reply(event_id, reply_text)
-                return
+                reply_text = self._extract_text_content(assistant_message).strip()
+                if reply_text:
+                    await self.plugin.send_reply(event, reply_text, subconscious)
+                    return
 
-            break
+                break
 
-        await self.plugin.send_reply(event_id, DEFAULT_FALLBACK_MESSAGE)
+            await self.plugin.send_reply(event, DEFAULT_FALLBACK_MESSAGE, subconscious)
+        finally:
+            clear_skill_context(context_token)
 
     async def _create_completion(
         self,
@@ -102,38 +104,23 @@ class NexusAgent:
         try:
             raw_arguments = getattr(getattr(tool_call, "function", None), "arguments", "{}")
             parsed_arguments = self._parse_tool_arguments(raw_arguments)
-            validated_arguments = skill.args_model.model_validate(parsed_arguments)
+            if skill.args_model is BaseModel:
+                validated_arguments = {}
+            else:
+                validated_arguments = skill.args_model.model_validate(parsed_arguments).model_dump()
         except JSONDecodeError as exc:
             return f"Tool error: Invalid JSON for tool '{tool_name}': {exc.msg}."
         except ValidationError as exc:
             return f"Tool error: Validation failed for tool '{tool_name}': {exc}."
 
         try:
-            result = await skill.execute(**validated_arguments.model_dump())
+            result = await skill.execute(**validated_arguments)
         except Exception as exc:  # pragma: no cover - defensive boundary
             return f"Tool error: Execution failed for tool '{tool_name}': {exc}."
 
         if isinstance(result, str):
             return result
         return json.dumps(result, ensure_ascii=False)
-
-    @staticmethod
-    def _build_tool_spec(skill: BaseSkill) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": skill.name,
-                "description": skill.description,
-                "parameters": skill.get_json_schema(),
-            },
-        }
-
-    @staticmethod
-    def _require_text(payload: dict[str, Any], key: str) -> str:
-        value = payload.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"event payload must include non-empty string '{key}'.")
-        return value
 
     @staticmethod
     def _parse_tool_arguments(arguments: Any) -> dict[str, Any]:
