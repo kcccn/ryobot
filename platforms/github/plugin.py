@@ -11,11 +11,11 @@ from core.plugins import BasePlugin, HistorySnapshot, PluginEvent
 from .client import GitHubApiClient
 
 GITHUB_COMMENT_STATE_PATTERN = re.compile(
-    r"<!--\s*nexus_state:\s*(?P<payload>\{.*?\})\s*-->",
+    r"<!--\s*ryo_state:\s*(?P<payload>\{.*?\})\s*-->",
     re.DOTALL,
 )
 GITHUB_COMMENT_MARKER_PATTERN = re.compile(
-    r"<!--\s*nexus_state:.*?-->",
+    r"<!--\s*ryo_state:.*?-->",
     re.DOTALL,
 )
 
@@ -92,7 +92,7 @@ class GitHubPlugin(BasePlugin):
         subconscious: dict[str, Any] | None = None,
     ) -> None:
         state_blob = json.dumps(subconscious or {}, ensure_ascii=False, separators=(",", ":"))
-        body = f"{content}\n<!-- nexus_state: {state_blob} -->"
+        body = f"{content}\n<!-- ryo_state: {state_blob} -->"
         await self._api.post_json(
             f"/repos/{event.owner}/{event.repo}/issues/{event.issue_number}/comments",
             json_body={"body": body},

@@ -79,7 +79,7 @@ async def test_send_reply_posts_comment_with_hidden_state_marker() -> None:
     assert captured["accept"] == "application/vnd.github+json"
     assert captured["auth"] == "Bearer secret-token"
     assert captured["payload"]["body"].endswith(
-        '<!-- nexus_state: {"mode":"reflective"} -->'
+        '<!-- ryo_state: {"mode":"reflective"} -->'
     )
 
 
@@ -93,7 +93,7 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
         },
         {
             "id": 2,
-            "body": 'RyoBot reply\n<!-- nexus_state: {"mode":"draft"} -->',
+            "body": 'RyoBot reply\n<!-- ryo_state: {"mode":"draft"} -->',
             "user": {"login": "ryobot"},
         },
         {
@@ -103,12 +103,12 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
         },
         {
             "id": 3,
-            "body": 'new RyoBot reply\n<!-- nexus_state: {"mode":"final","step":2} -->',
+            "body": 'new RyoBot reply\n<!-- ryo_state: {"mode":"final","step":2} -->',
             "user": {"login": "ryobot"},
         },
         {
             "id": 4,
-            "body": 'broken marker\n<!-- nexus_state: not-json -->',
+            "body": 'broken marker\n<!-- ryo_state: not-json -->',
             "user": {"login": "ryobot"},
         },
     ]
@@ -132,7 +132,7 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
 
 
 def test_comment_state_pattern_matches_expected_marker() -> None:
-    body = 'hello\n<!-- nexus_state: {"mode":"focus"} -->'
+    body = 'hello\n<!-- ryo_state: {"mode":"focus"} -->'
     match = GITHUB_COMMENT_STATE_PATTERN.search(body)
 
     assert match is not None
