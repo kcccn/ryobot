@@ -48,7 +48,7 @@ def clear_skill_context(token: Token[dict[str, Any]] | None = None) -> None:
 
 
 class BaseSkill(ABC):
-    """Port for agent tools and memory capabilities."""
+    """Port for RyoAgent tools and memory capabilities."""
 
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""

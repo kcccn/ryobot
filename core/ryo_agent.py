@@ -12,8 +12,8 @@ from .skills import BaseSkill, clear_skill_context, set_skill_context
 DEFAULT_FALLBACK_MESSAGE = "I'm sorry, but I couldn't complete your request right now."
 
 
-class NexusAgent:
-    """Hexagonal application service that runs a bounded ReAct loop."""
+class RyoAgent:
+    """Hexagonal application service that runs the bounded RyoAgent ReAct loop."""
 
     def __init__(
         self,

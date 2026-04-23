@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ryobot"
 version = "0.1.0"
-description = "Hexagonal core for a serverless AI agent engine."
+description = "Hexagonal core for the RyoBot serverless orchestration engine."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

@@ -93,8 +93,8 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
         },
         {
             "id": 2,
-            "body": 'agent reply\n<!-- nexus_state: {"mode":"draft"} -->',
-            "user": {"login": "bot"},
+            "body": 'RyoBot reply\n<!-- nexus_state: {"mode":"draft"} -->',
+            "user": {"login": "ryobot"},
         },
         {
             "id": 99,
@@ -103,13 +103,13 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
         },
         {
             "id": 3,
-            "body": 'new reply\n<!-- nexus_state: {"mode":"final","step":2} -->',
-            "user": {"login": "bot"},
+            "body": 'new RyoBot reply\n<!-- nexus_state: {"mode":"final","step":2} -->',
+            "user": {"login": "ryobot"},
         },
         {
             "id": 4,
             "body": 'broken marker\n<!-- nexus_state: not-json -->',
-            "user": {"login": "bot"},
+            "user": {"login": "ryobot"},
         },
     ]
 
@@ -124,8 +124,8 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
 
     assert snapshot.messages == [
         {"role": "user", "content": "first user comment"},
-        {"role": "assistant", "content": "agent reply"},
-        {"role": "assistant", "content": "new reply"},
+        {"role": "assistant", "content": "RyoBot reply"},
+        {"role": "assistant", "content": "new RyoBot reply"},
         {"role": "user", "content": "broken marker"},
     ]
     assert snapshot.subconscious == {"mode": "final", "step": 2}

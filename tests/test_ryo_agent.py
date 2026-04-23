@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from core.agent import DEFAULT_FALLBACK_MESSAGE, NexusAgent
+from core.ryo_agent import DEFAULT_FALLBACK_MESSAGE, RyoAgent
 from core.plugins import BasePlugin, HistorySnapshot, PluginEvent
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
@@ -147,14 +147,14 @@ async def test_run_sends_direct_reply_without_tool_calls() -> None:
             repo="widgets",
         ),
     )
-    agent = NexusAgent(
+    ryo_agent = RyoAgent(
         persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
         skills=[EchoSkill()],
         llm_client=llm_client,
         plugin=plugin,
     )
 
-    await agent.run(raw_event={"payload": "ignored"})
+    await ryo_agent.run(raw_event={"payload": "ignored"})
 
     assert plugin.sent_replies == [
         (plugin.parse_event(None), "Final answer", {"mode": "reflective"})
@@ -185,14 +185,14 @@ async def test_run_executes_tool_call_then_sends_final_reply() -> None:
     )
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
     plugin = FakePlugin()
-    agent = NexusAgent(
+    ryo_agent = RyoAgent(
         persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
         skills=[EchoSkill()],
         llm_client=llm_client,
         plugin=plugin,
     )
 
-    await agent.run(raw_event={"payload": "ignored"})
+    await ryo_agent.run(raw_event={"payload": "ignored"})
 
     assert plugin.sent_replies == [
         (plugin.parse_event(None), "Done", {})
@@ -225,14 +225,14 @@ async def test_run_surfaces_unknown_tool_errors_back_into_loop() -> None:
     )
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
     plugin = FakePlugin()
-    agent = NexusAgent(
+    ryo_agent = RyoAgent(
         persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
         skills=[EchoSkill()],
         llm_client=llm_client,
         plugin=plugin,
     )
 
-    await agent.run(raw_event={})
+    await ryo_agent.run(raw_event={})
 
     assert plugin.sent_replies == [
         (plugin.parse_event(None), "Recovered", {})
@@ -260,14 +260,14 @@ async def test_run_surfaces_validation_errors_back_into_loop() -> None:
     )
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
     plugin = FakePlugin()
-    agent = NexusAgent(
+    ryo_agent = RyoAgent(
         persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
         skills=[EchoSkill()],
         llm_client=llm_client,
         plugin=plugin,
     )
 
-    await agent.run(raw_event={})
+    await ryo_agent.run(raw_event={})
 
     assert plugin.sent_replies == [
         (plugin.parse_event(None), "Recovered", {})
@@ -291,14 +291,14 @@ async def test_run_sends_fallback_after_max_iterations() -> None:
     fake_completions = FakeCompletions([repeated_tool_call for _ in range(5)])
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
     plugin = FakePlugin(subconscious={"mode": "loop"})
-    agent = NexusAgent(
+    ryo_agent = RyoAgent(
         persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
         skills=[EchoSkill()],
         llm_client=llm_client,
         plugin=plugin,
     )
 
-    await agent.run(raw_event={})
+    await ryo_agent.run(raw_event={})
 
     assert plugin.sent_replies == [
         (plugin.parse_event(None), DEFAULT_FALLBACK_MESSAGE, {"mode": "loop"})
@@ -325,14 +325,14 @@ async def test_run_sets_runtime_context_for_skills() -> None:
     )
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
     plugin = FakePlugin(subconscious={"memory": "sticky"})
-    agent = NexusAgent(
+    ryo_agent = RyoAgent(
         persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
         skills=[ContextAwareSkill()],
         llm_client=llm_client,
         plugin=plugin,
     )
 
-    await agent.run(raw_event={})
+    await ryo_agent.run(raw_event={})
 
     tool_message = fake_completions.calls[1]["messages"][-1]
     assert '"owner": "acme"' in tool_message["content"]

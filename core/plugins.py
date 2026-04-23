@@ -31,7 +31,7 @@ class BasePlugin(ABC):
 
     @abstractmethod
     def parse_event(self, raw_payload: Any) -> PluginEvent:
-        """Normalize a platform payload into the agent's event shape."""
+        """Normalize a platform payload into the RyoAgent event shape."""
 
     @abstractmethod
     async def fetch_history(self, event: PluginEvent) -> HistorySnapshot:
