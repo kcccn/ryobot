@@ -23,6 +23,26 @@ class ReadCodeDiffArgs(BaseModel):
     pr_number: int = Field(ge=1)
 
 
+class CreateIssueArgs(BaseModel):
+    title: str
+    body: str = ""
+    labels: list[str] = []
+
+
+class AddLabelsArgs(BaseModel):
+    labels: list[str]
+    issue_number: int = 0
+
+
+class CloseIssueArgs(BaseModel):
+    issue_number: int = 0
+
+
+class CommentOnPRArgs(BaseModel):
+    pr_number: int = 0
+    body: str
+
+
 class GitHubSkillBase(BaseSkill):
     """Shared GitHub client plumbing for skills."""
 
@@ -100,3 +120,70 @@ class ReadCodeDiff(GitHubSkillBase):
             f"/repos/{context['owner']}/{context['repo']}/pulls/{args.pr_number}",
             accept="application/vnd.github.v3.diff",
         )
+
+
+class CreateIssue(GitHubSkillBase):
+    name = "create_issue"
+    description = "Create a new GitHub issue in the current repository."
+    args_model = CreateIssueArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        result = await self._api.post_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues",
+            json_body={
+                "title": args.title,
+                "body": args.body,
+                "labels": args.labels,
+            },
+        )
+        return f"Created issue #{result['number']}: {result['title']}"
+
+
+class AddLabels(GitHubSkillBase):
+    name = "add_labels"
+    description = "Add labels to a GitHub issue."
+    args_model = AddLabelsArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        issue_number = args.issue_number if args.issue_number else context["issue_number"]
+        await self._api.post_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}/labels",
+            json_body={"labels": args.labels},
+        )
+        return f"Added labels {args.labels} to issue #{issue_number}"
+
+
+class CloseIssue(GitHubSkillBase):
+    name = "close_issue"
+    description = "Close a GitHub issue."
+    args_model = CloseIssueArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        issue_number = args.issue_number if args.issue_number else context["issue_number"]
+        await self._api.patch_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}",
+            json_body={"state": "closed"},
+        )
+        return f"Closed issue #{issue_number}"
+
+
+class CommentOnPR(GitHubSkillBase):
+    name = "comment_on_pr"
+    description = "Post a comment on a GitHub pull request."
+    args_model = CommentOnPRArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        pr_number = args.pr_number if args.pr_number else context["issue_number"]
+        await self._api.post_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{pr_number}/comments",
+            json_body={"body": args.body},
+        )
+        return f"Commented on PR #{pr_number}"

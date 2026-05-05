@@ -10,7 +10,16 @@ import httpx
 from openai import AsyncOpenAI
 
 from core import RyoAgent
-from platforms.github import GitHubPlugin, ReadCodeDiff, ReadIssueMemory, SearchRepoMemory
+from platforms.github import (
+    AddLabels,
+    CloseIssue,
+    CommentOnPR,
+    CreateIssue,
+    GitHubPlugin,
+    ReadCodeDiff,
+    ReadIssueMemory,
+    SearchRepoMemory,
+)
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 PERSONA = {
@@ -61,6 +70,10 @@ async def _run(
             ReadIssueMemory(token=github_token, client=http_client),
             SearchRepoMemory(token=github_token, client=http_client),
             ReadCodeDiff(token=github_token, client=http_client),
+            CreateIssue(token=github_token, client=http_client),
+            AddLabels(token=github_token, client=http_client),
+            CloseIssue(token=github_token, client=http_client),
+            CommentOnPR(token=github_token, client=http_client),
         ]
         llm_client = AsyncOpenAI(
             api_key=deepseek_api_key,

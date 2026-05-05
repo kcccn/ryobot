@@ -73,6 +73,21 @@ class GitHubApiClient:
         response.raise_for_status()
         return response.json()
 
+    async def patch_json(
+        self,
+        path: str,
+        *,
+        json_body: dict[str, Any],
+        accept: str = "application/vnd.github+json",
+    ) -> Any:
+        response = await self._client.patch(
+            path,
+            json=json_body,
+            headers=self._headers(accept=accept),
+        )
+        response.raise_for_status()
+        return response.json()
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()

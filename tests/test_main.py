@@ -110,6 +110,10 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(main, "ReadIssueMemory", FakeSkill)
     monkeypatch.setattr(main, "SearchRepoMemory", FakeSkill)
     monkeypatch.setattr(main, "ReadCodeDiff", FakeSkill)
+    monkeypatch.setattr(main, "CreateIssue", FakeSkill)
+    monkeypatch.setattr(main, "AddLabels", FakeSkill)
+    monkeypatch.setattr(main, "CloseIssue", FakeSkill)
+    monkeypatch.setattr(main, "CommentOnPR", FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
 
     main.main()
@@ -118,7 +122,7 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     assert captured["openai_kwargs"]["api_key"] == "ds-token"
     assert captured["openai_kwargs"]["base_url"] == "https://api.deepseek.com"
     assert captured["plugin_kwargs"]["token"] == "gh-token"
-    assert len(captured["skill_kwargs"]) == 3
+    assert len(captured["skill_kwargs"]) == 7
     assert captured["ryo_agent_kwargs"]["persona"]["model"] == "deepseek-chat"
     assert "严厉且幽默的顶级架构师" in captured["ryo_agent_kwargs"]["persona"]["system_prompt"]
     assert captured["http_client_closed"] is True
