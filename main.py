@@ -22,8 +22,8 @@ from platforms.github import (
 )
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-chat"
 PERSONA = {
-    "model": "deepseek-chat",
     "system_prompt": (
         "你是一个严厉且幽默的顶级架构师。"
         "你直接、专业、苛刻，不容忍糟糕抽象、重复劳动和含糊表述。"
@@ -63,6 +63,8 @@ async def _run(
     github_token: str,
     deepseek_api_key: str,
 ) -> None:
+    base_url = os.getenv("LLM_BASE_URL", DEEPSEEK_BASE_URL)
+    model = os.getenv("LLM_MODEL", DEFAULT_MODEL)
     http_client = httpx.AsyncClient(base_url="https://api.github.com")
     try:
         plugin = GitHubPlugin(token=github_token, client=http_client)
@@ -77,10 +79,10 @@ async def _run(
         ]
         llm_client = AsyncOpenAI(
             api_key=deepseek_api_key,
-            base_url=DEEPSEEK_BASE_URL,
+            base_url=base_url,
         )
         ryo_agent = RyoAgent(
-            persona=PERSONA,
+            persona={"model": model, **PERSONA},
             skills=skills,
             llm_client=llm_client,
             plugin=plugin,
