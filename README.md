@@ -63,6 +63,7 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
                     |                  |                  |
                     v                  v                  v
              ReadIssueMemory   SearchRepoMemory    ReadCodeDiff
+             CreateIssue       AddLabels    CloseIssue  CommentOnPR
 ```
 
 ### 仓库结构
@@ -71,14 +72,23 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 .
 ├── main.py
 ├── core/
+│   ├── __init__.py
 │   ├── plugins.py
 │   ├── skills.py
 │   └── ryo_agent.py
 ├── platforms/
+│   ├── __init__.py
 │   └── github/
+│       ├── __init__.py
 │       ├── client.py
 │       ├── plugin.py
 │       └── skills.py
+├── tests/
+│   ├── test_main.py
+│   ├── test_skills.py
+│   ├── test_ryo_agent.py
+│   ├── test_github_plugin.py
+│   └── test_github_skills.py
 └── .github/
     └── workflows/
         └── github-ryobot.yml
@@ -87,9 +97,25 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 ### 分层含义
 
 - `core/`：纯业务核心，只定义端口、技能抽象、上下文和 `RyoAgent`
-- `platforms/github/`：GitHub 外部适配器，负责 Issue 评论、搜索、Diff 读取
+- `platforms/github/`：GitHub 外部适配器，负责 Issue/PR 的读取与写入操作
 - `main.py`：组合根，只负责把环境变量、平台层、模型客户端和核心层接起来
 - `.github/workflows/`：把 GitHub 事件转成一次 Serverless 执行
+
+## Agent 能力清单
+
+每个 skill 以 OpenAI 兼容的 tool definition 形式暴露给 LLM，`RyoAgent` 在 ReAct 循环中自行决定调用哪些工具。
+
+| Skill | 类型 | 功能 |
+|---|---|---|
+| `read_issue_memory` | 读 | 读取当前 Issue 详情（标题、状态、正文） |
+| `search_repo_memory` | 读 | 在仓库内搜索相关 Issue |
+| `read_code_diff` | 读 | 读取指定 PR 的 `.diff` 内容 |
+| `create_issue` | 写 | 在仓库中创建新 Issue |
+| `add_labels` | 写 | 为 Issue 添加标签 |
+| `close_issue` | 写 | 关闭 Issue |
+| `comment_on_pr` | 写 | 在 PR 下发布评论 |
+
+Agent 在单次执行中最多进行 5 轮工具调用。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息。
 
 ## Markdown 隐写术（Steganography）记忆系统
 
@@ -169,22 +195,26 @@ Issue comment + hidden ryo_state blob
 
 ## 极简部署指南
 
-这是完整的部署流程，没有隐藏步骤：
+1. **Fork 本仓库**
+2. **配置 Secret**：进入你的 Fork 仓库 → Settings → Secrets and variables → Actions → New repository secret，名称为 `DEEPSEEK_API_KEY`，值为你的 DeepSeek API Key
+3. **启用 Actions**：进入 Actions 标签页，点击 "I understand my workflows, go ahead and enable them"
+4. **触发首次运行**：在任意 Issue 下发一条评论，bot 即被唤醒
 
-1. Fork 本仓库
-2. 进入你的 Fork 仓库：**Settings -> Secrets and variables -> Actions**
-3. 新增一个 Secret：`DEEPSEEK_API_KEY`
-4. 启用 GitHub Actions
+### 如何验证是否成功
 
-到这里就够了。
+- 评论后进入 Actions 标签页，应看到 `github-ryobot` workflow 被触发
+- 点击 workflow run 查看日志，如果看到 bot 回复了你的评论，说明一切正常
+- 如果 bot 没回复，检查 `DEEPSEEK_API_KEY` 是否正确，以及 run log 中的错误信息
 
-为什么只需要这一个 Secret？
+### 触发条件
+
+bot 只在 `issue_comment.created` 事件上触发。创建 Issue、push 代码、开 PR 不会触发它。bot 不会回复类型为 Bot 的账号发出的评论（防死循环）。
+
+### 为什么只需要一个 Secret
 
 - `DEEPSEEK_API_KEY`：你的模型凭证
 - `GITHUB_TOKEN`：由 GitHub Actions 自动提供
 - `EVENT_PAYLOAD`：由 workflow 从 `github.event` 自动注入
-
-换句话说：
 
 > 你自带模型 Key，GitHub 提供算力和事件源，仓库本身只负责描述系统如何运行。
 
