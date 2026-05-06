@@ -19,6 +19,7 @@ from platforms.github import (
     CreateIssue,
     DispatchWorkflow,
     GitHubPlugin,
+    ListOpenIssues,
     ReadCodeDiff,
     ReadIssueMemory,
     ReadWorkflowRun,
@@ -71,8 +72,17 @@ def main() -> None:
         raise SystemExit(0)
 
     if "repository" not in payload:
-        print("Skipping event without repository context (workflow_dispatch / schedule).", file=sys.stderr)
-        raise SystemExit(0)
+        if "schedule" in payload:
+            repo_full = os.getenv("GITHUB_REPOSITORY", "")
+            if "/" not in repo_full:
+                print("Skipping schedule event: GITHUB_REPOSITORY not set.", file=sys.stderr)
+                raise SystemExit(0)
+            owner, repo = repo_full.split("/", 1)
+            payload["repository"] = {"owner": {"login": owner}, "name": repo}
+            payload["_patrol"] = True
+        else:
+            print("Skipping event without repository context.", file=sys.stderr)
+            raise SystemExit(0)
 
     try:
         github_token = _require_env("GITHUB_TOKEN")
@@ -116,6 +126,7 @@ async def _run(
         all_skills = [
             ReadIssueMemory(token=github_token, client=http_client),
             SearchRepoMemory(token=github_token, client=http_client),
+            ListOpenIssues(token=github_token, client=http_client),
             ReadCodeDiff(token=github_token, client=http_client),
             CreateIssue(token=github_token, client=http_client),
             AddLabels(token=github_token, client=http_client),

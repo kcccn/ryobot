@@ -165,6 +165,7 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
     monkeypatch.setattr(main, "ReadIssueMemory", FakeSkill)
     monkeypatch.setattr(main, "SearchRepoMemory", FakeSkill)
+    monkeypatch.setattr(main, "ListOpenIssues", FakeSkill)
     monkeypatch.setattr(main, "ReadCodeDiff", FakeSkill)
     monkeypatch.setattr(main, "CreateIssue", FakeSkill)
     monkeypatch.setattr(main, "AddLabels", FakeSkill)
@@ -182,7 +183,7 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     assert captured["openai_kwargs"]["base_url"] == "https://api.deepseek.com"
     assert captured["plugin_kwargs"]["token"] == "gh-token"
     assert captured["plugin_kwargs"]["identity"] == "architect"
-    assert len(captured["skill_kwargs"]) == 8
+    assert len(captured["skill_kwargs"]) == 9
     assert captured["ryo_agent_kwargs"]["persona"]["model"] == "deepseek-v4-flash"
     assert "严厉且幽默的顶级架构师" in captured["ryo_agent_kwargs"]["persona"]["system_prompt"]
     assert captured["http_client_closed"] is True
@@ -227,8 +228,8 @@ def test_main_includes_dispatch_workflow_only_when_allowlist_is_configured(monke
     monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(main, "AsyncOpenAI", FakeAsyncOpenAI)
     monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
-    for name in ("ReadIssueMemory", "SearchRepoMemory", "ReadCodeDiff",
-                 "CreateIssue", "AddLabels", "CloseIssue",
+    for name in ("ReadIssueMemory", "SearchRepoMemory", "ListOpenIssues",
+                 "ReadCodeDiff", "CreateIssue", "AddLabels", "CloseIssue",
                  "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
@@ -236,7 +237,7 @@ def test_main_includes_dispatch_workflow_only_when_allowlist_is_configured(monke
 
     main.main()
 
-    assert captured["skill_count"] == 9
+    assert captured["skill_count"] == 10
 
 
 def test_readme_brands_project_as_ryo_ghost_engine() -> None:
@@ -302,8 +303,8 @@ def test_reviewer_uses_deepseek_openai_adapter(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(main, "AsyncOpenAI", _FakeOpenAI)
     monkeypatch.setattr(main, "AnthropicAdapter", FakeAnthropicAdapter)
     monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
-    for name in ("ReadIssueMemory", "SearchRepoMemory", "ReadCodeDiff",
-                 "CreateIssue", "AddLabels", "CloseIssue",
+    for name in ("ReadIssueMemory", "SearchRepoMemory", "ListOpenIssues",
+                 "ReadCodeDiff", "CreateIssue", "AddLabels", "CloseIssue",
                  "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
@@ -329,8 +330,10 @@ def test_workflow_passes_github_event_payload_and_secret() -> None:
     assert "BOT_IDENTITY: ${{ matrix.bot }}" in content
 
 
-def test_workflow_does_not_grant_actions_write_by_default() -> None:
+def test_workflow_grants_actions_write_for_patrol_dispatch() -> None:
     content = WORKFLOW_PATH.read_text(encoding="utf-8")
 
-    assert "actions: write" not in content
-    assert "actions: read" in content
+    assert "actions: write" in content
+    assert "schedule" in content
+    assert "GITHUB_REPOSITORY: ${{ github.repository }}" in content
+    assert "RYOBOT_ALLOWED_WORKFLOWS: github-ryobot.yml" in content

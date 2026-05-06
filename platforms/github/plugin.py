@@ -53,6 +53,15 @@ class GitHubPlugin(BasePlugin):
         if not owner or not repo:
             raise ValueError("GitHub event payload is missing repository owner or name.")
 
+        # schedule / workflow_dispatch: no issue/comment/PR keys
+        is_patrol = (
+            "schedule" in raw_payload
+            or raw_payload.get("_patrol")
+            or (raw_payload.get("inputs") and isinstance(raw_payload["inputs"], dict))
+        )
+        if is_patrol:
+            return self._parse_patrol(raw_payload, owner, repo)
+
         # pull_request_review_comment: has both "comment" and "pull_request"
         if "comment" in raw_payload and "pull_request" in raw_payload:
             return self._parse_review_comment(raw_payload, owner, repo, action)
@@ -171,7 +180,46 @@ class GitHubPlugin(BasePlugin):
             repo=str(repo),
         )
 
+    def _parse_patrol(self, raw: dict[str, Any], owner: str, repo: str) -> PluginEvent:
+        # workflow_dispatch with issue_number input: concrete target
+        inputs = raw.get("inputs") or {}
+        if isinstance(inputs, dict):
+            issue_number = int(inputs.get("issue_number", "0") or "0")
+            if issue_number > 0:
+                dispatcher = inputs.get("dispatcher", "system")
+                return PluginEvent(
+                    event_id=f"github:{owner}/{repo}:workflow_dispatch:issue:{issue_number}",
+                    message=(
+                        f"[Patrol dispatch from {dispatcher}: check issue #{issue_number}]"
+                    ),
+                    author="system",
+                    author_association="OWNER",
+                    issue_id=str(issue_number),
+                    issue_number=issue_number,
+                    comment_id=0,
+                    owner=str(owner),
+                    repo=str(repo),
+                )
+        # pure schedule or workflow_dispatch without issue_number: patrol scan
+        return PluginEvent(
+            event_id=f"github:{owner}/{repo}:schedule:{datetime.now(timezone.utc).isoformat()}",
+            message="Patrol: scan the repository for issues and pull requests that need attention. Use list_open_issues to discover work, then dispatch_workflow for items needing action.",
+            author="system",
+            author_association="OWNER",
+            issue_id="",
+            issue_number=0,
+            comment_id=0,
+            owner=str(owner),
+            repo=str(repo),
+        )
+
     async def fetch_history(self, event: PluginEvent) -> HistorySnapshot:
+        if event.issue_number == 0:
+            return HistorySnapshot(
+                messages=[],
+                subconscious={},
+                last_bot_comment_at=None,
+            )
         comments = await self._api.get_json(
             f"/repos/{event.owner}/{event.repo}/issues/{event.issue_number}/comments",
             params={"per_page": 10, "sort": "created", "direction": "desc"},
@@ -219,6 +267,8 @@ class GitHubPlugin(BasePlugin):
         content: str,
         subconscious: dict[str, Any] | None = None,
     ) -> None:
+        if event.issue_number == 0:
+            return
         await asyncio.sleep(random.uniform(1, 5))
         state_blob = json.dumps(subconscious or {}, ensure_ascii=False, separators=(",", ":"))
         body = f"{content}\n<!-- ryo:{self._identity}: {state_blob} -->"

@@ -23,11 +23,13 @@ on:
         description: 'Issue/PR number to trigger bots on'
         required: false
         type: string
+  schedule:
+    - cron: "*/30 * * * *"
 
 permissions:
   issues: write
   pull-requests: write
-  actions: read
+  actions: write
 
 jobs:
   run-ryobot:
@@ -53,4 +55,6 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EVENT_PAYLOAD: ${{ toJson(github.event) }}
           BOT_IDENTITY: ${{ matrix.bot }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RYOBOT_ALLOWED_WORKFLOWS: github-ryobot.yml
         run: python main.py

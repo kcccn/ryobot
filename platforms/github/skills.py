@@ -50,6 +50,14 @@ class DispatchWorkflowArgs(BaseModel):
     inputs: dict[str, str] = Field(default_factory=dict)
 
 
+class ListOpenIssuesArgs(BaseModel):
+    state: str = Field(default="open")
+    labels: str = Field(default="", description="Comma-separated label names to filter by")
+    sort: str = Field(default="updated")
+    direction: str = Field(default="desc")
+    limit: int = Field(default=10, ge=1, le=30)
+
+
 DEFAULT_MAX_DIFF_CHARS = 50000
 DEFAULT_MAX_ISSUE_BODY_CHARS = 12000
 
@@ -231,6 +239,14 @@ class DispatchWorkflow(GitHubSkillBase):
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
+
+        # Prevent infinite dispatch loops
+        if "workflow_dispatch" in str(context.get("event_id", "")):
+            return (
+                "Workflow dispatch is not available within a patrol-dispatched run "
+                "to prevent infinite dispatch loops."
+            )
+
         allowed_workflows = _csv_env("RYOBOT_ALLOWED_WORKFLOWS")
         if not allowed_workflows:
             return "Workflow dispatch is disabled because RYOBOT_ALLOWED_WORKFLOWS is not configured."
@@ -288,6 +304,55 @@ class ReadWorkflowRun(GitHubSkillBase):
                 f"URL: {run.get('html_url')}",
             ]
         )
+
+
+class ListOpenIssues(GitHubSkillBase):
+    name = "list_open_issues"
+    description = (
+        "List issues in the current repository. "
+        "Use state='open' (default) for active issues, 'closed' for completed ones, or 'all' for both. "
+        "Filter by labels (comma-separated). "
+        "Sort by 'created', 'updated', or 'comments'. "
+        "Returns issue number, title, state, labels, author, created/updated timestamps, and URL."
+    )
+    args_model = ListOpenIssuesArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        params: dict[str, Any] = {
+            "state": args.state,
+            "sort": args.sort,
+            "direction": args.direction,
+            "per_page": min(args.limit, 30),
+        }
+        if args.labels:
+            params["labels"] = args.labels
+
+        issues = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues",
+            params=params,
+        )
+        if not issues:
+            return f"No {args.state} issues found in {context['owner']}/{context['repo']}."
+
+        lines: list[str] = []
+        for issue in issues:
+            if "pull_request" in issue:
+                continue
+            labels_list = [lb.get("name", "") for lb in issue.get("labels", [])]
+            labels_str = ", ".join(labels_list) if labels_list else "none"
+            lines.append(
+                f"#{issue['number']}: {issue['title']} "
+                f"[{issue['state']}] "
+                f"labels: {labels_str} "
+                f"author: {issue.get('user', {}).get('login', 'unknown')} "
+                f"updated: {issue.get('updated_at', '')} "
+                f"url: {issue.get('html_url', '')}"
+            )
+        if not lines:
+            return f"No {args.state} issues found (excluding PRs)."
+        return "\n".join(lines)
 
 
 def _csv_env(name: str) -> set[str]:
