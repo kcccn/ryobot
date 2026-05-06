@@ -198,6 +198,12 @@ async def test_fetch_history_reads_all_issue_comment_pages() -> None:
     seen_pages: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        # Mind-issue search and create calls — ignore
+        path = request.url.path
+        if path.endswith("/search/issues"):
+            return httpx.Response(200, json={"items": []})
+        if request.method == "POST" and path.endswith("/issues"):
+            return httpx.Response(201, json={"number": 999, "body": "initial"})
         page = str(request.url.params.get("page"))
         seen_pages.append(page)
         if page == "1":

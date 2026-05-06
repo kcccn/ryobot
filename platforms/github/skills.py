@@ -47,6 +47,17 @@ class CloseIssueArgs(BaseModel):
     issue_number: int = 0
 
 
+class SearchIssuesArgs(BaseModel):
+    query: str = Field(description="Search query (same syntax as GitHub issue search)")
+    limit: int = Field(default=10, ge=1, le=30)
+
+
+class UpdateIssueArgs(BaseModel):
+    issue_number: int = Field(description="Issue number to update")
+    title: str = Field(default="", description="New title (empty to keep unchanged)")
+    body: str = Field(default="", description="New body (empty to keep unchanged)")
+
+
 class CommentOnPRArgs(BaseModel):
     pr_number: int = 0
     body: str
@@ -306,6 +317,39 @@ class CloseIssue(GitHubSkillBase):
         return f"Closed issue #{issue_number}"
 
 
+class UpdateIssue(GitHubSkillBase):
+    name = "update_issue"
+    description = (
+        "Update the title and/or body of an existing issue. "
+        "Use this to persist learnings, update your mind issue, "
+        "or refine an issue's description based on new findings. "
+        "Pass only the fields you want to change; empty strings keep the current value."
+    )
+    args_model = UpdateIssueArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        body: dict[str, Any] = {}
+        if args.title:
+            body["title"] = args.title
+        if args.body:
+            body["body"] = args.body
+        if not body:
+            return "Nothing to update: both title and body are empty."
+        await self._api.patch_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{args.issue_number}",
+            json_body=body,
+        )
+        parts: list[str] = [f"Updated issue #{args.issue_number}"]
+        if "title" in body:
+            parts.append("title")
+        if "body" in body:
+            parts.append("body")
+        return ": ".join([parts[0], ", ".join(parts[1:])])
+
+
 class CommentOnPR(GitHubSkillBase):
     name = "comment_on_pr"
     description = "Post a comment on a GitHub pull request."
@@ -549,6 +593,41 @@ class ListOpenPullRequests(GitHubSkillBase):
                 f"branch: {pr.get('head', {}).get('ref', '?')} → {pr.get('base', {}).get('ref', '?')} "
                 f"updated: {pr.get('updated_at', '')} "
                 f"url: {pr.get('html_url', '')}"
+            )
+        return "\n".join(lines)
+
+
+class SearchIssues(GitHubSkillBase):
+    name = "search_issues"
+    description = (
+        "Search issues and pull requests in the repository using GitHub's search syntax. "
+        "You can search by keywords in title/body, filter by state/labels/author, or search "
+        "for exact title matches. Examples: 'is:issue is:open label:bug' or 'bot-mind in:title'. "
+        "Returns issue number, title, state, labels, author, and URL."
+    )
+    args_model = SearchIssuesArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        q = f"repo:{context['owner']}/{context['repo']} {args.query}"
+        result = await self._api.get_json(
+            "/search/issues",
+            params={"q": q, "per_page": min(args.limit, 30), "sort": "updated", "order": "desc"},
+        )
+        items = result.get("items", []) if isinstance(result, dict) else []
+        if not items:
+            return f"No results for: {args.query}"
+
+        lines: list[str] = [f"Search results for '{args.query}' ({result.get('total_count', 0)} total):"]
+        for issue in items:
+            labels_str = ", ".join(lb.get("name", "") for lb in issue.get("labels", [])) or "none"
+            issue_type = "PR" if "pull_request" in issue else "Issue"
+            lines.append(
+                f"  #{issue['number']} [{issue_type}] {issue['title']} "
+                f"state={issue['state']} labels={labels_str} "
+                f"author={issue.get('user', {}).get('login', '?')} "
+                f"url={issue.get('html_url', '')}"
             )
         return "\n".join(lines)
 

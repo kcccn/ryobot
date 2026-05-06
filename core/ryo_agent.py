@@ -83,6 +83,24 @@ class RyoAgent:
         if history.subconscious:
             _log(f"subconscious: {json.dumps(history.subconscious, ensure_ascii=False)[:LOG_TRUNCATE]}")
         _log(f"history messages: {len(history.messages)}")
+        if history.mind_body:
+            _log(f"mind issue #{history.mind_issue_number}: {len(history.mind_body)} chars")
+
+        # Inject mind issue content into system prompt
+        mind_context = ""
+        if history.mind_body:
+            mind_context = (
+                f"\n\n---\n"
+                f"## Your Persistent Mind Issue (#{history.mind_issue_number})\n"
+                f"This is your persistent memory issue. Its current content is shown below. "
+                f"It contains your accumulated memories, learnings, active context, "
+                f"and recent activity. Read it carefully at the start of every run.\n"
+                f"After completing your work, use update_issue with "
+                f"issue_number={history.mind_issue_number} to update your mind issue "
+                f"with new learnings, changing context, or anything worth remembering.\n"
+                f"\n{history.mind_body}\n"
+                f"---\n"
+            )
 
         if self.cooldown_seconds > 0 and history.last_bot_comment_at:
             try:
@@ -102,8 +120,9 @@ class RyoAgent:
         elif history.last_bot_comment_at:
             _log("cooldown disabled or no prior bot comment")
 
+        system_prompt = self.persona["system_prompt"] + mind_context
         messages: list[ChatMessage] = [
-            {"role": "system", "content": self.persona["system_prompt"]},
+            {"role": "system", "content": system_prompt},
             *history.messages,  # type: ignore[typeddict-item,list-item]
             {"role": "user", "content": event.message},
         ]

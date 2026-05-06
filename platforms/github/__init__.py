@@ -20,7 +20,9 @@ from .skills import (
     ReadWorkflowRun,
     RunCommand,
     SearchCode,
+    SearchIssues,
     SearchRepoMemory,
+    UpdateIssue,
     WriteFile,
 )
 
@@ -46,6 +48,8 @@ __all__ = [
     "ReadWorkflowRun",
     "RunCommand",
     "SearchCode",
+    "SearchIssues",
     "SearchRepoMemory",
+    "UpdateIssue",
     "WriteFile",
 ]

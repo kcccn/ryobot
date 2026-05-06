@@ -225,12 +225,53 @@ class GitHubPlugin(BasePlugin):
             repo=str(repo),
         )
 
+    _MIND_ISSUE_TITLE = "🧠 {name}"
+
+    async def _find_or_create_mind_issue(
+        self, owner: str, repo: str
+    ) -> tuple[str, int]:
+        """Return (mind_body, issue_number) for this bot's mind issue."""
+        title = self._MIND_ISSUE_TITLE.format(name=self._display_name)
+        search_result = await self._api.get_json(
+            "/search/issues",
+            params={
+                "q": f'repo:{owner}/{repo} is:issue is:open "{title}" in:title',
+                "per_page": 1,
+            },
+        )
+        items = (search_result.get("items") or []) if isinstance(search_result, dict) else []
+        if items:
+            number = int(items[0].get("number", 0))
+            body = str(items[0].get("body") or "")
+            return body, number
+
+        # Create the mind issue
+        body = _mind_issue_template(self._display_name, self._identity)
+        result = await self._api.post_json(
+            f"/repos/{owner}/{repo}/issues",
+            json_body={"title": title, "body": body},
+        )
+        number = int(result.get("number", 0))
+        return body, number
+
     async def fetch_history(self, event: PluginEvent) -> HistorySnapshot:
+        # Fetch mind issue (independent of event issue number)
+        mind_body, mind_issue_number = "", 0
+        if event.owner and event.repo:
+            try:
+                mind_body, mind_issue_number = await self._find_or_create_mind_issue(
+                    event.owner, event.repo
+                )
+            except Exception:
+                pass  # Mind issue is best-effort, don't block the run
+
         if event.issue_number == 0:
             return HistorySnapshot(
                 messages=[],
                 subconscious={},
                 last_bot_comment_at=None,
+                mind_body=mind_body,
+                mind_issue_number=mind_issue_number,
             )
         comments = await self._fetch_paginated(
             f"/repos/{event.owner}/{event.repo}/issues/{event.issue_number}/comments",
@@ -275,6 +316,8 @@ class GitHubPlugin(BasePlugin):
             messages=_fit_messages_to_history_budget(messages),
             subconscious=subconscious,
             last_bot_comment_at=last_bot_comment_at or None,
+            mind_body=mind_body,
+            mind_issue_number=mind_issue_number,
         )
 
     async def send_reply(
@@ -374,3 +417,26 @@ def _comment_sort_key(comment: dict[str, Any]) -> tuple[str, int]:
     except (TypeError, ValueError):
         comment_id = 0
     return (created_at, comment_id)
+
+
+def _mind_issue_template(display_name: str, identity: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        f"# 🧠 {display_name}\n\n"
+        f"> I am **{display_name}** (`{identity}`), a member of the Ryo Bot Society.\n"
+        f"> This issue is my **persistent memory** — I read it at the start of every run\n"
+        f"> and update it with new learnings, context, and activity.\n\n"
+        f"## Who I Am\n\n"
+        f"(I will fill this in as I learn about my role and preferences.)\n\n"
+        f"## Long-term Memory\n\n"
+        f"<!-- Lessons learned, patterns discovered, preferences, codebase knowledge -->\n\n"
+        f"(empty — I will populate this as I gain experience)\n\n"
+        f"## Active Context\n\n"
+        f"<!-- What I am currently tracking or working on across issues -->\n\n"
+        f"(empty)\n\n"
+        f"## Recent Activity\n\n"
+        f"<!-- Last few actions, newest first -->\n\n"
+        f"- 🆕 Mind issue created ({ts})\n\n"
+        f"---\n"
+        f"🤖 Auto-managed by RyoBot. Last updated: {ts}\n"
+    )

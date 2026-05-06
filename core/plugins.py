@@ -27,6 +27,8 @@ class HistorySnapshot(BaseModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
     subconscious: dict[str, Any] = Field(default_factory=dict)
     last_bot_comment_at: str | None = None
+    mind_body: str = ""
+    mind_issue_number: int = 0
 
 
 class BasePlugin(ABC):

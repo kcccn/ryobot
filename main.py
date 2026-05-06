@@ -34,7 +34,9 @@ from platforms.github import (
     ReadWorkflowRun,
     RunCommand,
     SearchCode,
+    SearchIssues,
     SearchRepoMemory,
+    UpdateIssue,
     WriteFile,
 )
 from platforms.llm import AnthropicAdapter
@@ -211,6 +213,8 @@ async def _run(
             CommentOnPR(token=github_token, client=http_client),
             ReadWorkflowRun(token=github_token, client=http_client),
             RunCommand(token=github_token, client=http_client),
+            SearchIssues(token=github_token, client=http_client),
+            UpdateIssue(token=github_token, client=http_client),
         ]
         if _workflow_dispatch_enabled():
             all_skills.append(DispatchWorkflow(token=github_token, client=http_client))
