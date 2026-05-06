@@ -9,12 +9,13 @@ from typing import Any, TypedDict
 
 from pydantic import BaseModel, ValidationError
 
-from .plugins import BasePlugin, HistorySnapshot, PluginEvent
+from .plugins import BasePlugin, PluginEvent
 from .skills import BaseSkill, clear_skill_context, set_skill_context
 
 DEFAULT_FALLBACK_MESSAGE = "I'm sorry, but I couldn't complete your request right now."
 TRUSTED_MUTATION_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 DEFAULT_MAX_TOOL_RESULT_CHARS = 20000
+NO_REPLY_TOOL_NAME = "no_reply"
 
 
 class ChatMessage(TypedDict, total=False):
@@ -50,6 +51,7 @@ class RyoAgent:
         self.max_iterations = max_iterations
         self.max_tokens = max_tokens
         self._skills_by_name = {skill.name: skill for skill in skills}
+        self._control_skills_by_name = {NO_REPLY_TOOL_NAME: _NoReplySkill()}
 
     async def run(self, raw_event: Any) -> None:
         event = self.plugin.parse_event(raw_event)
@@ -72,7 +74,7 @@ class RyoAgent:
             {"role": "user", "content": event.message},
         ]
         available_skills = self._available_skills_for_event(event)
-        tools = [skill.get_tool_definition() for skill in available_skills]
+        tools = [skill.get_tool_definition() for skill in [*available_skills, *self._control_skills_by_name.values()]]
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
 
@@ -94,6 +96,8 @@ class RyoAgent:
                     messages.append(msg)
                     for tool_call in tool_calls:
                         tool_result = await self._execute_tool_call(tool_call, event=event)
+                        if isinstance(tool_result, _NoReplyResult):
+                            return
                         messages.append(
                             {
                                 "role": "tool",
@@ -141,7 +145,7 @@ class RyoAgent:
         while True:
             try:
                 return await self._create_completion(messages=messages, tools=tools)
-            except Exception as exc:
+            except Exception:
                 attempt += 1
                 if attempt > max_retries:
                     raise
@@ -151,19 +155,34 @@ class RyoAgent:
     def _available_skills_for_event(self, event: PluginEvent) -> list[BaseSkill]:
         if _is_trusted_mutation_author(event.author_association):
             return self.skills
-        return [skill for skill in self.skills if not skill.mutates_state]
+        return [
+            skill
+            for skill in self.skills
+            if not skill.mutates_state and not skill.requires_trusted_author
+        ]
 
-    async def _execute_tool_call(self, tool_call: Any, *, event: PluginEvent) -> str:
+    async def _execute_tool_call(self, tool_call: Any, *, event: PluginEvent) -> str | _NoReplyResult:
         tool_name = getattr(getattr(tool_call, "function", None), "name", "")
+        if tool_name in self._control_skills_by_name:
+            skill = self._control_skills_by_name[tool_name]
+            return await self._execute_validated_skill(skill, tool_call)
+
         skill = self._skills_by_name.get(tool_name)
         if skill is None:
             return f"Tool error: Unknown tool '{tool_name}'."
-        if skill.mutates_state and not _is_trusted_mutation_author(event.author_association):
+        if (
+            (skill.mutates_state or skill.requires_trusted_author)
+            and not _is_trusted_mutation_author(event.author_association)
+        ):
             return (
                 f"Tool error: Tool '{tool_name}' is not available for author "
                 f"association '{event.author_association}'."
             )
 
+        return await self._execute_validated_skill(skill, tool_call)
+
+    async def _execute_validated_skill(self, skill: BaseSkill, tool_call: Any) -> str | _NoReplyResult:
+        tool_name = skill.name
         try:
             raw_arguments = getattr(getattr(tool_call, "function", None), "arguments", "{}")
             parsed_arguments = self._parse_tool_arguments(raw_arguments)
@@ -183,6 +202,8 @@ class RyoAgent:
 
         if isinstance(result, str):
             return _truncate_text(result, _max_chars_from_env("RYOBOT_MAX_TOOL_RESULT_CHARS", DEFAULT_MAX_TOOL_RESULT_CHARS))
+        if isinstance(result, _NoReplyResult):
+            return result
         return _truncate_text(
             json.dumps(result, ensure_ascii=False),
             _max_chars_from_env("RYOBOT_MAX_TOOL_RESULT_CHARS", DEFAULT_MAX_TOOL_RESULT_CHARS),
@@ -259,3 +280,24 @@ def _truncate_text(text: str, max_chars: int) -> str:
         return text
     omitted = len(text) - max_chars
     return f"{text[:max_chars]}\n[truncated: {omitted} chars omitted]"
+
+
+class _NoReplyArgs(BaseModel):
+    reason: str
+
+
+class _NoReplyResult:
+    pass
+
+
+class _NoReplySkill(BaseSkill):
+    name = NO_REPLY_TOOL_NAME
+    description = (
+        "Use this when you intentionally should not post a public reply, "
+        "because you have no meaningful new contribution or the discussion is outside your role."
+    )
+    args_model = _NoReplyArgs
+
+    async def execute(self, **kwargs: Any) -> _NoReplyResult:
+        self.args_model.model_validate(kwargs)
+        return _NoReplyResult()

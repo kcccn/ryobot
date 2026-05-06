@@ -19,9 +19,11 @@ from platforms.github.skills import (
     DispatchWorkflow,
     ListFiles,
     ListOpenIssues,
+    ListRepoLabels,
     ReadCodeDiff,
     ReadFile,
     ReadIssueMemory,
+    ReadThreadComments,
     ReadWorkflowRun,
     RunCommand,
     SearchCode,
@@ -40,6 +42,21 @@ def with_context() -> Any:
         comment_id=21,
         owner="acme",
         repo="widgets",
+    )
+    return set_skill_context(event=event, subconscious={"mode": "focus"})
+
+
+def with_pr_context() -> Any:
+    event = PluginEvent(
+        event_id="evt-pr",
+        message="hello",
+        author="octocat",
+        issue_id="2001",
+        issue_number=12,
+        comment_id=21,
+        owner="acme",
+        repo="widgets",
+        is_pull_request=True,
     )
     return set_skill_context(event=event, subconscious={"mode": "focus"})
 
@@ -178,6 +195,8 @@ def test_github_skills_expose_complete_tool_definitions() -> None:
         comment_tool = CommentOnPR(token="secret-token", client=client).get_tool_definition()
         dispatch_tool = DispatchWorkflow(token="secret-token", client=client).get_tool_definition()
         run_tool = ReadWorkflowRun(token="secret-token", client=client).get_tool_definition()
+        labels_catalog_tool = ListRepoLabels(token="secret-token", client=client).get_tool_definition()
+        thread_tool = ReadThreadComments(token="secret-token", client=client).get_tool_definition()
     finally:
         import asyncio
 
@@ -196,6 +215,8 @@ def test_github_skills_expose_complete_tool_definitions() -> None:
     assert dispatch_tool["function"]["parameters"]["properties"]["workflow_id"]["type"] == "string"
     assert run_tool["function"]["name"] == "read_workflow_run"
     assert run_tool["function"]["parameters"]["properties"]["run_id"]["type"] == "integer"
+    assert labels_catalog_tool["function"]["name"] == "list_repo_labels"
+    assert thread_tool["function"]["name"] == "read_thread_comments"
 
 
 @pytest.mark.asyncio
@@ -241,6 +262,8 @@ async def test_add_labels_uses_context_issue_when_zero() -> None:
         captured["method"] = request.method
         captured["url"] = str(request.url)
         captured["body"] = request.content.decode()
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"name": "bug"}])
         return httpx.Response(200, json={"labels": [{"name": "bug"}]})
 
     client = httpx.AsyncClient(
@@ -268,6 +291,8 @@ async def test_add_labels_uses_explicit_issue_number() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"name": "enhancement"}])
         return httpx.Response(200, json={"labels": []})
 
     client = httpx.AsyncClient(
@@ -284,6 +309,28 @@ async def test_add_labels_uses_explicit_issue_number() -> None:
 
     assert captured["url"].endswith("/repos/acme/widgets/issues/99/labels")
     assert "Added labels ['enhancement'] to issue #99" == result
+
+
+@pytest.mark.asyncio
+async def test_add_labels_rejects_missing_repo_label() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"name": "bug"}])
+        raise AssertionError("missing labels should not be posted")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = AddLabels(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(labels=["missing"], issue_number=0)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Labels do not exist in repo: missing" == result
 
 
 @pytest.mark.asyncio
@@ -646,6 +693,81 @@ async def test_list_open_issues_skips_pull_requests() -> None:
     assert "PR" not in result
 
 
+@pytest.mark.asyncio
+async def test_list_repo_labels_returns_available_labels() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).endswith("/repos/acme/widgets/labels?per_page=100&page=1")
+        return httpx.Response(
+            200,
+            json=[
+                {"name": "bug", "description": "Something is broken", "color": "d73a4a"},
+                {"name": "enhancement", "description": "", "color": "a2eeef"},
+            ],
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ListRepoLabels(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute()
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "bug (#d73a4a): Something is broken" in result
+    assert "enhancement (#a2eeef)" in result
+
+
+@pytest.mark.asyncio
+async def test_read_thread_comments_reads_issue_comments_and_review_comments() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        calls.append(url)
+        if "/issues/77/comments" in url:
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 1,
+                        "body": "issue comment",
+                        "user": {"login": "human"},
+                        "created_at": "2026-01-01T00:00:02Z",
+                    }
+                ],
+            )
+        if "/pulls/77/comments" in url:
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 2,
+                        "body": "review comment",
+                        "user": {"login": "reviewer"},
+                        "created_at": "2026-01-01T00:00:01Z",
+                        "path": "main.py",
+                        "line": 10,
+                    }
+                ],
+            )
+        return httpx.Response(200, json=[])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReadThreadComments(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_pr_context()
+    try:
+        result = await skill.execute(issue_number=77, include_review_comments=True)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert any("/issues/77/comments" in call for call in calls)
+    assert any("/pulls/77/comments" in call for call in calls)
+    assert "reviewer at 2026-01-01T00:00:01Z [main.py:10]: review comment" in result
+    assert "human at 2026-01-01T00:00:02Z: issue comment" in result
+
+
 # ---- list_files ----
 
 
@@ -923,35 +1045,60 @@ async def test_create_pull_request_creates_pr() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_command_returns_stdout() -> None:
+async def test_run_command_allows_default_pytest_command() -> None:
     client = httpx.AsyncClient(base_url="https://api.github.test")
     skill = RunCommand(token="secret-token", client=client, api_base_url="https://api.github.test")
     try:
-        result = await skill.execute(command="echo hello world")
+        result = await skill.execute(command="python -m pytest --version")
     finally:
         await client.aclose()
     assert "Exit code: 0" in result
-    assert "hello world" in result
+    assert "pytest" in result
 
 
 @pytest.mark.asyncio
-async def test_run_command_returns_stderr() -> None:
+async def test_run_command_rejects_disallowed_command() -> None:
     client = httpx.AsyncClient(base_url="https://api.github.test")
     skill = RunCommand(token="secret-token", client=client, api_base_url="https://api.github.test")
     try:
-        result = await skill.execute(command="echo error >&2")
+        result = await skill.execute(command="echo hello")
+    finally:
+        await client.aclose()
+    assert "Command is not allowed" in result
+
+
+@pytest.mark.asyncio
+async def test_run_command_rejects_shell_metacharacters() -> None:
+    client = httpx.AsyncClient(base_url="https://api.github.test")
+    skill = RunCommand(token="secret-token", client=client, api_base_url="https://api.github.test")
+    try:
+        result = await skill.execute(command="python -m pytest --version && echo leaked")
+    finally:
+        await client.aclose()
+    assert "Shell metacharacters are not allowed" in result
+
+
+@pytest.mark.asyncio
+async def test_run_command_rejects_broad_python_c_by_default() -> None:
+    client = httpx.AsyncClient(base_url="https://api.github.test")
+    skill = RunCommand(token="secret-token", client=client, api_base_url="https://api.github.test")
+    try:
+        result = await skill.execute(command='python -c "print(1)"')
+    finally:
+        await client.aclose()
+    assert "Command is not allowed" in result
+
+
+@pytest.mark.asyncio
+async def test_run_command_strips_secret_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RYOBOT_ALLOWED_COMMANDS", "python -c")
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-gh-token")
+    client = httpx.AsyncClient(base_url="https://api.github.test")
+    skill = RunCommand(token="secret-token", client=client, api_base_url="https://api.github.test")
+    try:
+        result = await skill.execute(command='python -c "print(__import__(\'os\').environ.get(\'GITHUB_TOKEN\'))"')
     finally:
         await client.aclose()
     assert "Exit code: 0" in result
-    assert "error" in result
-
-
-@pytest.mark.asyncio
-async def test_run_command_nonzero_exit_code() -> None:
-    client = httpx.AsyncClient(base_url="https://api.github.test")
-    skill = RunCommand(token="secret-token", client=client, api_base_url="https://api.github.test")
-    try:
-        result = await skill.execute(command="exit 42")
-    finally:
-        await client.aclose()
-    assert "Exit code: 42" in result
+    assert "None" in result
+    assert "secret-gh-token" not in result

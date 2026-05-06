@@ -18,6 +18,7 @@ class PluginEvent(BaseModel):
     comment_id: int
     owner: str
     repo: str
+    is_pull_request: bool = False
 
 
 class HistorySnapshot(BaseModel):

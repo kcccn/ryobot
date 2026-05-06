@@ -19,6 +19,14 @@ on:
         description: 'Comma-separated GitHub logins whose marker comments are trusted'
         type: string
         default: 'github-actions[bot]'
+      allowed_commands:
+        description: 'Comma-separated command prefixes allowed for run_command (empty = safe defaults)'
+        type: string
+        default: ''
+      command_timeout_seconds:
+        description: 'Maximum seconds per run_command execution'
+        type: number
+        default: 300
 
 jobs:
   run-ryobot:
@@ -48,4 +56,6 @@ jobs:
           MAX_ITERATIONS: ${{ inputs.max_iterations }}
           RYOBOT_ALLOWED_WORKFLOWS: ${{ inputs.allowed_workflows }}
           RYOBOT_MARKER_AUTHOR_LOGINS: ${{ inputs.marker_author_logins }}
+          RYOBOT_ALLOWED_COMMANDS: ${{ inputs.allowed_commands }}
+          RYOBOT_COMMAND_TIMEOUT_SECONDS: ${{ inputs.command_timeout_seconds }}
         run: ryobot

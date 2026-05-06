@@ -130,7 +130,7 @@ def _convert_tool_def(t: dict[str, Any]) -> dict[str, Any]:
 # Anthropic → OpenAI response converters
 # ---------------------------------------------------------------------------
 
-def _convert_response(response: Any) -> "_FakeResponse":
+def _convert_response(response: Any) -> _FakeResponse:
     content_blocks: list[Any] = getattr(response, "content", []) or []
     text_parts: list[str] = []
     tool_calls: list[_FakeToolCall] = []
@@ -165,19 +165,19 @@ def _convert_response(response: Any) -> "_FakeResponse":
 # ---------------------------------------------------------------------------
 
 class _FakeResponse:
-    def __init__(self, *, choices: list["_FakeChoice"], stop_reason: str | None = None, usage: Any = None) -> None:
+    def __init__(self, *, choices: list[_FakeChoice], stop_reason: str | None = None, usage: Any = None) -> None:
         self.choices = choices
         self.stop_reason = stop_reason
         self.usage = usage
 
 
 class _FakeChoice:
-    def __init__(self, *, message: "_FakeMessage") -> None:
+    def __init__(self, *, message: _FakeMessage) -> None:
         self.message = message
 
 
 class _FakeMessage:
-    def __init__(self, *, content: str | None, tool_calls: list["_FakeToolCall"] | None) -> None:
+    def __init__(self, *, content: str | None, tool_calls: list[_FakeToolCall] | None) -> None:
         self.content = content
         self.tool_calls = tool_calls
 

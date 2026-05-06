@@ -8,8 +8,8 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from core.ryo_agent import DEFAULT_FALLBACK_MESSAGE, RyoAgent
 from core.plugins import BasePlugin, HistorySnapshot, PluginEvent
+from core.ryo_agent import DEFAULT_FALLBACK_MESSAGE, RyoAgent
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
 
@@ -122,6 +122,16 @@ class MutatingSkill(EchoSkill):
         return f"mutated:{args.text}"
 
 
+class TrustedReadSkill(EchoSkill):
+    name = "trusted_read"
+    description = "Read broader trusted-only context."
+    requires_trusted_author = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        return f"trusted:{args.text}"
+
+
 class ContextAwareSkill(BaseSkill):
     name = "read_context"
     description = "Inspect runtime context."
@@ -212,7 +222,7 @@ async def test_run_hides_mutating_tools_from_untrusted_authors() -> None:
         tool["function"]["name"]
         for tool in fake_completions.calls[0]["tools"]
     ]
-    assert tool_names == ["echo"]
+    assert tool_names == ["echo", "no_reply"]
 
 
 @pytest.mark.asyncio
@@ -247,7 +257,7 @@ async def test_run_exposes_mutating_tools_to_trusted_authors() -> None:
         tool["function"]["name"]
         for tool in fake_completions.calls[0]["tools"]
     ]
-    assert tool_names == ["echo", "mutate"]
+    assert tool_names == ["echo", "mutate", "no_reply"]
 
 
 @pytest.mark.asyncio
@@ -293,6 +303,116 @@ async def test_run_rejects_mutating_tool_calls_from_untrusted_authors() -> None:
     assert fake_completions.calls[1]["messages"][-1]["content"] == (
         "Tool error: Tool 'mutate' is not available for author association 'NONE'."
     )
+
+
+@pytest.mark.asyncio
+async def test_run_hides_trusted_read_tools_from_untrusted_authors() -> None:
+    fake_completions = FakeCompletions(
+        [build_response(FakeMessage(content="Read-only answer"))]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="Need help",
+            author="octocat",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+            author_association="CONTRIBUTOR",
+        ),
+    )
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[EchoSkill(), TrustedReadSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    tool_names = [
+        tool["function"]["name"]
+        for tool in fake_completions.calls[0]["tools"]
+    ]
+    assert tool_names == ["echo", "no_reply"]
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_trusted_read_tool_calls_from_untrusted_authors() -> None:
+    fake_completions = FakeCompletions(
+        [
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction(name="trusted_read", arguments='{"text":"other thread"}'),
+                        )
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content="Recovered")),
+        ]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="Read elsewhere",
+            author="octocat",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+            author_association="NONE",
+        ),
+    )
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[TrustedReadSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    assert fake_completions.calls[1]["messages"][-1]["content"] == (
+        "Tool error: Tool 'trusted_read' is not available for author association 'NONE'."
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_exits_without_reply_when_no_reply_tool_is_called() -> None:
+    fake_completions = FakeCompletions(
+        [
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-no-reply",
+                            function=FakeFunction(name="no_reply", arguments='{"reason":"nothing useful to add"}'),
+                        )
+                    ]
+                )
+            ),
+        ]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    plugin = FakePlugin()
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[EchoSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    assert plugin.sent_replies == []
 
 
 @pytest.mark.asyncio

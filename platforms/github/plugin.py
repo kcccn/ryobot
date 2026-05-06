@@ -21,6 +21,7 @@ _RYO_ANY_MARKER_PATTERN = re.compile(
 )
 DEFAULT_MARKER_AUTHOR_LOGINS = frozenset({"github-actions[bot]"})
 DEFAULT_MAX_HISTORY_COMMENT_CHARS = 12000
+DEFAULT_MAX_HISTORY_TOTAL_CHARS = 80000
 
 
 class GitHubPlugin(BasePlugin):
@@ -160,6 +161,7 @@ class GitHubPlugin(BasePlugin):
             comment_id=0,
             owner=str(owner),
             repo=str(repo),
+            is_pull_request=True,
         )
 
     def _parse_review_comment(self, raw: dict[str, Any], owner: str, repo: str, action: str) -> PluginEvent:
@@ -181,6 +183,7 @@ class GitHubPlugin(BasePlugin):
             comment_id=int(comment_id),
             owner=str(owner),
             repo=str(repo),
+            is_pull_request=True,
         )
 
     def _parse_patrol(self, raw: dict[str, Any], owner: str, repo: str) -> PluginEvent:
@@ -223,23 +226,27 @@ class GitHubPlugin(BasePlugin):
                 subconscious={},
                 last_bot_comment_at=None,
             )
-        comments = await self._api.get_json(
+        comments = await self._fetch_paginated(
             f"/repos/{event.owner}/{event.repo}/issues/{event.issue_number}/comments",
-            params={"per_page": 10, "sort": "created", "direction": "desc"},
+            params={"per_page": 100, "sort": "created", "direction": "asc"},
         )
+        if event.is_pull_request:
+            review_comments = await self._fetch_paginated(
+                f"/repos/{event.owner}/{event.repo}/pulls/{event.issue_number}/comments",
+                params={"per_page": 100, "sort": "created", "direction": "asc"},
+            )
+            comments = [*comments, *review_comments]
+        comments = sorted(comments, key=_comment_sort_key)
         messages: list[dict[str, str]] = []
         subconscious: dict[str, Any] = {}
         last_bot_comment_at: str | None = None
 
-        for comment in reversed(comments):
+        for comment in comments:
             if int(comment.get("id", 0)) == event.comment_id:
                 continue
 
             body = str(comment.get("body") or "")
-            clean_body = truncate_text(
-                _RYO_ANY_MARKER_PATTERN.sub("", body).strip(),
-                max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
-            )
+            clean_body = _RYO_ANY_MARKER_PATTERN.sub("", body).strip()
             is_trusted_marker = self._is_trusted_marker_comment(comment)
 
             our_match = self._state_pattern.search(body)
@@ -259,7 +266,7 @@ class GitHubPlugin(BasePlugin):
             messages.append({"role": "user", "content": clean_body})
 
         return HistorySnapshot(
-            messages=messages,
+            messages=_fit_messages_to_history_budget(messages),
             subconscious=subconscious,
             last_bot_comment_at=last_bot_comment_at or None,
         )
@@ -287,6 +294,20 @@ class GitHubPlugin(BasePlugin):
         login = str((comment.get("user") or {}).get("login") or "")
         return login in self._marker_author_logins
 
+    async def _fetch_paginated(self, path: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
+        page = 1
+        results: list[dict[str, Any]] = []
+        while True:
+            page_params = dict(params)
+            page_params["page"] = page
+            items = await self._api.get_json(path, params=page_params)
+            if not isinstance(items, list) or not items:
+                return results
+            results.extend(items)
+            if len(items) < int(page_params.get("per_page", 100)):
+                return results
+            page += 1
+
 
 _ACTION_LABELS: dict[str, str] = {
     "opened": "opened",
@@ -306,3 +327,44 @@ def _marker_author_logins_from_env() -> frozenset[str]:
         return DEFAULT_MARKER_AUTHOR_LOGINS
     values = {item.strip() for item in raw.split(",") if item.strip()}
     return frozenset(values) if values else DEFAULT_MARKER_AUTHOR_LOGINS
+
+
+def _fit_messages_to_history_budget(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    max_chars = max_chars_from_env("RYOBOT_MAX_HISTORY_TOTAL_CHARS", DEFAULT_MAX_HISTORY_TOTAL_CHARS)
+    if max_chars <= 0:
+        return messages
+    kept: list[dict[str, str]] = []
+    total_chars = 0
+    omitted = 0
+    for message in reversed(messages):
+        content = str(message.get("content") or "")
+        message_chars = len(content)
+        if kept and total_chars + message_chars > max_chars:
+            omitted += 1
+            continue
+        if not kept and message_chars > max_chars:
+            kept.append(message)
+            total_chars += message_chars
+            continue
+        kept.append(message)
+        total_chars += message_chars
+    kept.reverse()
+    if omitted:
+        plural = "comment" if omitted == 1 else "comments"
+        kept.insert(
+            0,
+            {
+                "role": "system",
+                "content": f"[history omitted: {omitted} older {plural} omitted to fit context budget]",
+            },
+        )
+    return kept
+
+
+def _comment_sort_key(comment: dict[str, Any]) -> tuple[str, int]:
+    created_at = str(comment.get("created_at") or "")
+    try:
+        comment_id = int(comment.get("id") or 0)
+    except (TypeError, ValueError):
+        comment_id = 0
+    return (created_at, comment_id)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 from typing import Any
 
 import httpx
@@ -35,6 +36,11 @@ class CreateIssueArgs(BaseModel):
 class AddLabelsArgs(BaseModel):
     labels: list[str]
     issue_number: int = 0
+
+
+class ReadThreadCommentsArgs(BaseModel):
+    issue_number: int = 0
+    include_review_comments: bool = True
 
 
 class CloseIssueArgs(BaseModel):
@@ -123,6 +129,21 @@ class GitHubSkillBase(BaseSkill):
         if not context:
             raise RuntimeError("GitHub skill context is not available.")
         return context
+
+    async def _fetch_paginated(self, path: str, *, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        page = 1
+        results: list[dict[str, Any]] = []
+        while True:
+            page_params = dict(params or {})
+            page_params["per_page"] = page_params.get("per_page", 100)
+            page_params["page"] = page
+            items = await self._api.get_json(path, params=page_params)
+            if not isinstance(items, list) or not items:
+                return results
+            results.extend(items)
+            if len(items) < int(page_params.get("per_page", 100)):
+                return results
+            page += 1
 
 
 class ReadIssueMemory(GitHubSkillBase):
@@ -219,6 +240,10 @@ class AddLabels(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
         issue_number = args.issue_number if args.issue_number else context["issue_number"]
+        existing_labels = await _repo_label_names(self, context)
+        missing = [label for label in args.labels if label not in existing_labels]
+        if missing:
+            return f"Labels do not exist in repo: {', '.join(missing)}"
         await self._api.post_json(
             f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}/labels",
             json_body={"labels": args.labels},
@@ -387,6 +412,66 @@ class ListOpenIssues(GitHubSkillBase):
             )
         if not lines:
             return f"No {args.state} issues found (excluding PRs)."
+        return "\n".join(lines)
+
+
+class ListRepoLabels(GitHubSkillBase):
+    name = "list_repo_labels"
+    description = "List existing labels in the current repository before applying labels to issues or pull requests."
+    args_model = EmptyArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        context = self._require_context()
+        labels = await self._fetch_paginated(
+            f"/repos/{context['owner']}/{context['repo']}/labels",
+            params={"per_page": 100},
+        )
+        if not labels:
+            return f"No labels found in {context['owner']}/{context['repo']}."
+        lines: list[str] = []
+        for label in labels:
+            name = str(label.get("name") or "")
+            color = str(label.get("color") or "")
+            description = str(label.get("description") or "")
+            suffix = f": {description}" if description else ""
+            lines.append(f"{name} (#{color}){suffix}")
+        return "\n".join(lines)
+
+
+class ReadThreadComments(GitHubSkillBase):
+    name = "read_thread_comments"
+    description = (
+        "Read comments from another issue or pull request in the same repository. "
+        "Use this to understand related discussions before deciding whether to reply or label."
+    )
+    args_model = ReadThreadCommentsArgs
+    requires_trusted_author = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        issue_number = args.issue_number if args.issue_number else context["issue_number"]
+        comments = await self._fetch_paginated(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}/comments",
+            params={"per_page": 100, "sort": "created", "direction": "asc"},
+        )
+        if args.include_review_comments:
+            review_comments = await self._fetch_paginated(
+                f"/repos/{context['owner']}/{context['repo']}/pulls/{issue_number}/comments",
+                params={"per_page": 100, "sort": "created", "direction": "asc"},
+            )
+            comments = [*comments, *review_comments]
+        comments = sorted(comments, key=lambda item: str(item.get("created_at") or ""))
+        if not comments:
+            return f"No comments found for issue/PR #{issue_number}."
+
+        lines: list[str] = [f"Comments for issue/PR #{issue_number}:"]
+        for comment in comments:
+            author = str((comment.get("user") or {}).get("login") or "unknown")
+            created_at = str(comment.get("created_at") or "")
+            body = str(comment.get("body") or "").strip()
+            location = _comment_location(comment)
+            lines.append(f"{author} at {created_at}{location}: {body}")
         return "\n".join(lines)
 
 
@@ -631,10 +716,9 @@ class RunCommandArgs(BaseModel):
 class RunCommand(GitHubSkillBase):
     name = "run_command"
     description = (
-        "Execute a shell command in the repository workspace and return stdout/stderr. "
-        "Use this to run tests, linters, build scripts, or any other development tool. "
-        "The command runs in the repository root directory with a 5-minute timeout. "
-        "All standard development tools (pytest, ruff, mypy, npm, cargo, go, etc.) are available."
+        "Execute an allowlisted development command in the repository workspace and return stdout/stderr. "
+        "Default allowed commands are pytest, python -m pytest, ruff check, mypy, and pyright. "
+        "Shell metacharacters are rejected and secrets are stripped from the subprocess environment."
     )
     args_model = RunCommandArgs
     mutates_state = True
@@ -642,20 +726,32 @@ class RunCommand(GitHubSkillBase):
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         workspace = os.getenv("GITHUB_WORKSPACE", ".")
+        parsed = _parse_safe_command(args.command)
+        if isinstance(parsed, str):
+            return parsed
+        if not _is_allowed_command(parsed):
+            return (
+                "Command is not allowed. Allowed command prefixes: "
+                + ", ".join(sorted(_allowed_command_prefixes()))
+            )
+        timeout = _command_timeout_seconds()
 
         try:
-            proc = await asyncio.create_subprocess_shell(
-                args.command,
+            proc = await asyncio.create_subprocess_exec(
+                *parsed,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workspace,
+                env=_safe_subprocess_env(),
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(),
-                timeout=300,
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
-            return f"Command timed out after 300s:\n  {args.command}"
+            return f"Command timed out after {timeout}s:\n  {args.command}"
+        except FileNotFoundError as exc:
+            return f"Command failed to start: {exc}"
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
@@ -670,3 +766,89 @@ class RunCommand(GitHubSkillBase):
 
         max_chars = max_chars_from_env("RYOBOT_MAX_TOOL_RESULT_CHARS", 20000)
         return truncate_text(result, max_chars)
+
+
+DEFAULT_ALLOWED_COMMANDS = frozenset({
+    "pytest",
+    "python -m pytest",
+    "ruff check",
+    "mypy",
+    "pyright",
+})
+SHELL_METACHARS = frozenset({"|", "&", ";", "<", ">", "`", "$", "\n", "\r"})
+SAFE_ENV_KEYS = frozenset({
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "GITHUB_WORKSPACE",
+    "PYTHONPATH",
+})
+
+
+def _repo_label_names(skill: GitHubSkillBase, context: dict[str, Any]) -> Any:
+    async def _load() -> set[str]:
+        labels = await skill._fetch_paginated(
+            f"/repos/{context['owner']}/{context['repo']}/labels",
+            params={"per_page": 100},
+        )
+        return {str(label.get("name") or "") for label in labels}
+
+    return _load()
+
+
+def _comment_location(comment: dict[str, Any]) -> str:
+    path = str(comment.get("path") or "")
+    line = comment.get("line") or comment.get("original_line")
+    if path and line:
+        return f" [{path}:{line}]"
+    if path:
+        return f" [{path}]"
+    return ""
+
+
+def _parse_safe_command(command: str) -> list[str] | str:
+    if any(char in command for char in SHELL_METACHARS):
+        return "Shell metacharacters are not allowed in run_command."
+    try:
+        parts = shlex.split(command)
+    except ValueError as exc:
+        return f"Invalid command syntax: {exc}"
+    if not parts:
+        return "Command is empty."
+    return parts
+
+
+def _allowed_command_prefixes() -> set[str]:
+    configured = csv_env("RYOBOT_ALLOWED_COMMANDS")
+    return configured or set(DEFAULT_ALLOWED_COMMANDS)
+
+
+def _is_allowed_command(parts: list[str]) -> bool:
+    for prefix in _allowed_command_prefixes():
+        prefix_parts = shlex.split(prefix)
+        if parts[: len(prefix_parts)] == prefix_parts:
+            return True
+    return False
+
+
+def _command_timeout_seconds() -> int:
+    raw = os.getenv("RYOBOT_COMMAND_TIMEOUT_SECONDS", "300")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 300
+    return max(1, value)
+
+
+def _safe_subprocess_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in SAFE_ENV_KEYS
+    }

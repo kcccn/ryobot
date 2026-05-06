@@ -57,6 +57,7 @@ def test_parse_event_normalizes_issue_comment_payload() -> None:
         repo="widgets",
         author_association="NONE",
     )
+    assert event.is_pull_request is False
 
 
 @pytest.mark.asyncio
@@ -162,12 +163,17 @@ async def test_fetch_history_treats_human_forged_marker_as_user_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_history_truncates_long_comment_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RYOBOT_MAX_HISTORY_COMMENT_CHARS", "12")
+async def test_fetch_history_keeps_whole_recent_comments_with_total_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RYOBOT_MAX_HISTORY_TOTAL_CHARS", "35")
     comments = [
         {
             "id": 1,
-            "body": "x" * 20,
+            "body": "old comment that should be omitted",
+            "user": {"login": "octocat", "type": "User"},
+        },
+        {
+            "id": 2,
+            "body": "recent whole comment",
             "user": {"login": "octocat", "type": "User"},
         },
     ]
@@ -181,8 +187,41 @@ async def test_fetch_history_truncates_long_comment_text(monkeypatch: pytest.Mon
     snapshot = await plugin.fetch_history(event)
     await plugin.aclose()
 
-    assert snapshot.messages[0]["content"].startswith("x" * 12)
-    assert "[truncated:" in snapshot.messages[0]["content"]
+    assert snapshot.messages == [
+        {"role": "system", "content": "[history omitted: 1 older comment omitted to fit context budget]"},
+        {"role": "user", "content": "recent whole comment"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_reads_all_issue_comment_pages() -> None:
+    seen_pages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = str(request.url.params.get("page"))
+        seen_pages.append(page)
+        if page == "1":
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": idx, "body": f"page one {idx}", "user": {"login": "human"}}
+                    for idx in range(1000, 1100)
+                ],
+            )
+        if page == "2":
+            return httpx.Response(200, json=[{"id": 1100, "body": "page two", "user": {"login": "human"}}])
+        return httpx.Response(200, json=[])
+
+    plugin = build_plugin(httpx.MockTransport(handler))
+    event = plugin.parse_event(build_issue_comment_payload(comment_id=99))
+
+    snapshot = await plugin.fetch_history(event)
+    await plugin.aclose()
+
+    assert seen_pages == ["1", "2"]
+    assert len(snapshot.messages) == 101
+    assert snapshot.messages[0] == {"role": "user", "content": "page one 1000"}
+    assert snapshot.messages[-1] == {"role": "user", "content": "page two"}
 
 
 def test_state_pattern_matches_own_identity_marker() -> None:
@@ -289,6 +328,7 @@ def test_parse_event_handles_pr_opened() -> None:
     assert event.comment_id == 0
     assert event.author == "dev"
     assert event.author_association == "CONTRIBUTOR"
+    assert event.is_pull_request is True
     assert "[PR #42 opened]" in event.message
     assert "Add caching layer" in event.message
     assert "Uses Redis" in event.message
@@ -309,7 +349,50 @@ def test_parse_event_handles_pr_review_comment() -> None:
     assert event.comment_id == 10
     assert event.author == "reviewer"
     assert event.author_association == "MEMBER"
+    assert event.is_pull_request is True
     assert event.message == "Please add a test"
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_includes_pr_review_comments_in_timestamp_order() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/issues/42/comments" in url:
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 1,
+                        "body": "issue timeline comment",
+                        "user": {"login": "human"},
+                        "created_at": "2026-01-01T00:00:02Z",
+                    },
+                ],
+            )
+        if "/pulls/42/comments" in url:
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 2,
+                        "body": "inline review comment",
+                        "user": {"login": "reviewer"},
+                        "created_at": "2026-01-01T00:00:01Z",
+                    },
+                ],
+            )
+        return httpx.Response(200, json=[])
+
+    plugin = build_plugin(httpx.MockTransport(handler))
+    event = plugin.parse_event(build_pr_payload(number=42))
+
+    snapshot = await plugin.fetch_history(event)
+    await plugin.aclose()
+
+    assert snapshot.messages == [
+        {"role": "user", "content": "inline review comment"},
+        {"role": "user", "content": "issue timeline comment"},
+    ]
 
 
 @pytest.mark.asyncio

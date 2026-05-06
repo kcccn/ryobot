@@ -66,8 +66,8 @@ jobs:
 
 | Secret | 说明 | 哪些 bot 用到 |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | [DeepSeek API Key](https://platform.deepseek.com/api_keys) | architect / pm / explorer |
-| `ANTHROPIC_API_KEY` | [Anthropic API Key](https://console.anthropic.com/) | reviewer |
+| `DEEPSEEK_API_KEY` | [DeepSeek API Key](https://platform.deepseek.com/api_keys) | 默认内置 bot：architect / reviewer / pm / explorer |
+| `ANTHROPIC_API_KEY` | [Anthropic API Key](https://console.anthropic.com/) | 仅自定义 Anthropic provider bot 需要 |
 
 未配置对应 Key 的 bot 会在运行时报错退出，但不影响其他 bot 正常工作。
 
@@ -139,11 +139,14 @@ Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions m
 | `RYOBOT_ALLOWED_WORKFLOW_REFS` | `main` | 允许 DispatchWorkflow skill 触发的目标分支列表，逗号分隔 |
 | `RYOBOT_MARKER_AUTHOR_LOGINS` | `github-actions[bot]` | 被视为 bot 标记可信来源的 GitHub 用户名，逗号分隔 |
 | `RYOBOT_MAX_TOOL_RESULT_CHARS` | `20000` | 单次工具调用返回结果的最大字符数，超出截断 |
-| `RYOBOT_MAX_HISTORY_COMMENT_CHARS` | `12000` | 历史评论回灌给 LLM 时每条的最大字符数，超出截断 |
+| `RYOBOT_MAX_HISTORY_COMMENT_CHARS` | `12000` | 当前事件 Issue/PR 正文回灌给 LLM 的最大字符数，超出截断 |
+| `RYOBOT_MAX_HISTORY_TOTAL_CHARS` | `80000` | 历史评论回灌给 LLM 时的总字符预算；超出时丢弃最旧的完整评论 |
 | `RYOBOT_MAX_DIFF_CHARS` | `50000` | `read_code_diff` 读取 PR diff 的最大字符数 |
 | `RYOBOT_MAX_FILE_CHARS` | `30000` | `read_file` 读取文件内容的最大字符数 |
+| `RYOBOT_ALLOWED_COMMANDS` | `pytest, python -m pytest, ruff check, mypy, pyright` | `run_command` 允许执行的命令前缀，逗号分隔 |
+| `RYOBOT_COMMAND_TIMEOUT_SECONDS` | `300` | `run_command` 单次执行超时秒数 |
 
-常用变量（`COOLDOWN_SECONDS`、`MAX_ITERATIONS`、`RYOBOT_ALLOWED_WORKFLOWS`、`RYOBOT_MARKER_AUTHOR_LOGINS`）已暴露为可复用 workflow 的 `with:` 输入。例如：
+常用变量（`COOLDOWN_SECONDS`、`MAX_ITERATIONS`、`RYOBOT_ALLOWED_WORKFLOWS`、`RYOBOT_MARKER_AUTHOR_LOGINS`、`RYOBOT_ALLOWED_COMMANDS`、`RYOBOT_COMMAND_TIMEOUT_SECONDS`）已暴露为可复用 workflow 的 `with:` 输入。例如：
 
 ```yaml
 jobs:
@@ -160,6 +163,14 @@ jobs:
 通过 `COOLDOWN_SECONDS` 控制 bot 的最小响应间隔（默认 120 秒）。如果 bot 在上一次回复后的冷却窗口内再次被触发，会静默退出，不会发帖。设为 `0` 可禁用。
 
 `send_reply` 发帖前会随机等待 1-5 秒，模拟人类打字节奏。
+
+### 权限与安全边界
+
+`ryobot` workflow 需要 `issues: write` 和 `pull-requests: write` 来评论、打标签和读取 PR 讨论；需要 `contents: write` 来通过 `write_file`、`create_branch`、`create_pull_request` 完成仓库修改；需要 `actions: write` 才能在允许列表内触发 workflow。
+
+写操作和可信上下文读取只对 GitHub `OWNER`、`MEMBER`、`COLLABORATOR` 触发的事件开放。外部贡献者触发时，agent 只能使用只读且非敏感的工具。
+
+`run_command` 不再执行任意 shell。它会拒绝 shell 元字符，只运行 `RYOBOT_ALLOWED_COMMANDS` 中的命令前缀，并在子进程环境中移除 `GITHUB_TOKEN`、模型 API Key 等敏感变量。默认适合跑测试、lint 和类型检查；如果你放宽 allowlist，就等价于主动扩大 bot 的执行边界。
 
 ---
 
@@ -200,8 +211,10 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 | `read_file` | 读 | 读取仓库中任意文件内容 |
 | `search_code` | 读 | 在仓库代码中搜索关键词或模式 |
 | `list_open_issues` | 读 | 列出仓库中的 Issue 并过滤状态/标签 |
+| `list_repo_labels` | 读 | 列出仓库已有标签，供打标签前确认 |
+| `read_thread_comments` | 可信读 | 读取同仓库其他 Issue/PR 的评论和 PR review comments |
 | `create_issue` | 写 | 在仓库中创建新 Issue |
-| `add_labels` | 写 | 为 Issue 添加标签 |
+| `add_labels` | 写 | 为 Issue/PR 添加仓库中已存在的标签 |
 | `close_issue` | 写 | 关闭 Issue |
 | `comment_on_pr` | 写 | 在 PR 下发布评论 |
 | `write_file` | 写 | 创建或更新仓库文件 |
@@ -209,9 +222,10 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 | `create_pull_request` | 写 | 创建 Pull Request |
 | `dispatch_workflow` | 写 | 触发 GitHub Actions workflow |
 | `read_workflow_run` | 读 | 查看 workflow 运行状态和结果 |
-| `run_command` | 写 | 在仓库工作目录执行 shell 命令（pytest/ruff/mypy 等），5 分钟超时 |
+| `run_command` | 写 | 在仓库工作目录执行 allowlist 内的开发命令（pytest/ruff/mypy/pyright 等） |
+| `no_reply` | 控制 | 明确选择不公开回复，避免无意义 fallback 评论 |
 
-单次执行最多进行 `MAX_ITERATIONS` 轮工具调用（默认 100）。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息。
+单次执行最多进行 `MAX_ITERATIONS` 轮工具调用（默认 100）。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息；如果调用 `no_reply`，本轮会静默结束。
 
 ---
 
