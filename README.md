@@ -169,7 +169,7 @@ GitHub 评论时间线
 ## 事件流
 
 ```text
-issue_comment.created
+issue / PR / comment event
         |
         v
 GitHub Actions workflow
@@ -187,6 +187,11 @@ GitHubPlugin.parse_event()
         |
         v
 RyoAgent.run()
+        |
+        v
+Within cooldown? ---- yes ---> exit(0)
+        |
+        no
         |
         v
 GitHubPlugin.send_reply()
@@ -210,7 +215,22 @@ Issue comment + hidden ryo_state blob
 
 ### 触发条件
 
-bot 只在 `issue_comment.created` 事件上触发。创建 Issue、push 代码、开 PR 不会触发它。bot 不会回复类型为 Bot 的账号发出的评论（防死循环）。
+bot 在以下事件上触发：
+
+| 事件 | 触发时机 |
+|---|---|
+| `issues.opened / edited` | Issue 创建或编辑 |
+| `issue_comment.created` | 收到新评论 |
+| `pull_request.opened / edited / synchronize` | PR 创建、编辑或推送新代码 |
+| `pull_request_review_comment.created` | PR review 讨论中新评论 |
+
+bot 不会回复 `sender.type == "Bot"` 的事件（防死循环）。
+
+### 冷却机制
+
+通过 `COOLDOWN_SECONDS` 环境变量控制 bot 的最小响应间隔（默认 `120` 秒）。如果 bot 在上一次回复后的冷却窗口内再次被触发，会静默退出，不会发帖。设置为 `0` 可禁用冷却。
+
+`send_reply` 发帖前会随机等待 1-5 秒，模拟人类打字节奏。
 
 ### 为什么只需要一个 Secret
 
@@ -256,7 +276,19 @@ bot 代码本身是**仓库无关**的——`GITHUB_TOKEN` 自动指向 workflow
 name: ryobot
 
 on:
+  issues:
+    types:
+      - opened
+      - edited
   issue_comment:
+    types:
+      - created
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+  pull_request_review_comment:
     types:
       - created
 

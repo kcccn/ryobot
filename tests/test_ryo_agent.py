@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -60,6 +61,7 @@ class FakePlugin(BasePlugin):
         event: PluginEvent | None = None,
         history_messages: list[dict[str, str]] | None = None,
         subconscious: dict[str, Any] | None = None,
+        last_bot_comment_at: str | None = None,
     ) -> None:
         self._event = event or PluginEvent(
             event_id="evt-1",
@@ -73,6 +75,7 @@ class FakePlugin(BasePlugin):
         )
         self._history_messages = list(history_messages or [])
         self._subconscious = dict(subconscious or {})
+        self._last_bot_comment_at = last_bot_comment_at
         self.sent_replies: list[tuple[PluginEvent, str, dict[str, Any] | None]] = []
 
     def parse_event(self, raw_payload: Any) -> PluginEvent:
@@ -83,6 +86,7 @@ class FakePlugin(BasePlugin):
         return HistorySnapshot(
             messages=list(self._history_messages),
             subconscious=dict(self._subconscious),
+            last_bot_comment_at=self._last_bot_comment_at,
         )
 
     async def send_reply(
@@ -340,3 +344,72 @@ async def test_run_sets_runtime_context_for_skills() -> None:
     assert '"issue_number": 12' in tool_message["content"]
     assert '"memory": "sticky"' in tool_message["content"]
     assert get_skill_context() == {}
+
+
+@pytest.mark.asyncio
+async def test_run_skips_when_within_cooldown() -> None:
+    fake_completions = FakeCompletions(
+        [build_response(FakeMessage(content="Should not be called"))]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    recent_ts = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+    plugin = FakePlugin(last_bot_comment_at=recent_ts)
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[EchoSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+        cooldown_seconds=120,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    # No reply sent and no LLM call made
+    assert plugin.sent_replies == []
+    assert fake_completions.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_proceeds_when_cooldown_expired() -> None:
+    fake_completions = FakeCompletions(
+        [build_response(FakeMessage(content="Final answer"))]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    old_ts = (datetime.now(timezone.utc) - timedelta(seconds=300)).isoformat()
+    plugin = FakePlugin(last_bot_comment_at=old_ts)
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[EchoSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+        cooldown_seconds=120,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    assert plugin.sent_replies == [
+        (plugin.parse_event(None), "Final answer", {})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_proceeds_when_no_bot_history() -> None:
+    fake_completions = FakeCompletions(
+        [build_response(FakeMessage(content="First response"))]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    # No prior bot comments — should proceed regardless of cooldown config
+    plugin = FakePlugin(last_bot_comment_at=None)
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[EchoSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+        cooldown_seconds=120,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    assert plugin.sent_replies == [
+        (plugin.parse_event(None), "First response", {})
+    ]

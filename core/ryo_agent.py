@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any
 
@@ -22,6 +23,7 @@ class RyoAgent:
         skills: list[BaseSkill],
         llm_client: Any,
         plugin: BasePlugin,
+        cooldown_seconds: int = 0,
     ) -> None:
         if "model" not in persona or "system_prompt" not in persona:
             raise ValueError("persona must include 'model' and 'system_prompt'.")
@@ -30,11 +32,22 @@ class RyoAgent:
         self.skills = skills
         self.llm_client = llm_client
         self.plugin = plugin
+        self.cooldown_seconds = cooldown_seconds
         self._skills_by_name = {skill.name: skill for skill in skills}
 
     async def run(self, raw_event: Any) -> None:
         event = self.plugin.parse_event(raw_event)
         history = await self.plugin.fetch_history(event)
+
+        if self.cooldown_seconds > 0 and history.last_bot_comment_at:
+            try:
+                last_at = datetime.fromisoformat(history.last_bot_comment_at.replace("Z", "+00:00"))
+                elapsed = (datetime.now(timezone.utc) - last_at).total_seconds()
+                if elapsed < self.cooldown_seconds:
+                    return
+            except (ValueError, TypeError):
+                pass
+
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.persona["system_prompt"]},
             *history.messages,

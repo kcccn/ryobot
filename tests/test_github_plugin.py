@@ -137,3 +137,131 @@ def test_comment_state_pattern_matches_expected_marker() -> None:
 
     assert match is not None
     assert match.group("payload") == '{"mode":"focus"}'
+
+
+def build_issue_payload(*, action: str = "opened", number: int = 12, title: str = "Bug found", body: str = "Steps") -> dict[str, Any]:
+    return {
+        "action": action,
+        "issue": {
+            "id": 1001,
+            "number": number,
+            "title": title,
+            "body": body,
+            "user": {"login": "octocat", "type": "User"},
+        },
+        "repository": {
+            "name": "widgets",
+            "owner": {"login": "acme"},
+        },
+    }
+
+
+def build_pr_payload(*, action: str = "opened", number: int = 42, title: str = "Refactor", body: str = "Cleanup") -> dict[str, Any]:
+    return {
+        "action": action,
+        "pull_request": {
+            "id": 2001,
+            "number": number,
+            "title": title,
+            "body": body,
+            "user": {"login": "dev", "type": "User"},
+        },
+        "repository": {
+            "name": "widgets",
+            "owner": {"login": "acme"},
+        },
+    }
+
+
+def build_review_comment_payload(*, body: str = "LGTM", pr_number: int = 42, comment_id: int = 55) -> dict[str, Any]:
+    return {
+        "action": "created",
+        "comment": {
+            "id": comment_id,
+            "body": body,
+            "user": {"login": "reviewer", "type": "User"},
+        },
+        "pull_request": {
+            "id": 2001,
+            "number": pr_number,
+        },
+        "repository": {
+            "name": "widgets",
+            "owner": {"login": "acme"},
+        },
+    }
+
+
+def test_parse_event_handles_issue_opened() -> None:
+    plugin = build_plugin()
+    event = plugin.parse_event(build_issue_payload(action="opened", title="Segfault on startup", body="Happens every time"))
+
+    assert event.issue_number == 12
+    assert event.comment_id == 0
+    assert event.author == "octocat"
+    assert event.owner == "acme"
+    assert event.repo == "widgets"
+    assert "[Issue #12 opened]" in event.message
+    assert "Segfault on startup" in event.message
+    assert "Happens every time" in event.message
+
+
+def test_parse_event_handles_issue_edited() -> None:
+    plugin = build_plugin()
+    event = plugin.parse_event(build_issue_payload(action="edited", title="Updated title", body=""))
+
+    assert "[Issue #12 edited]" in event.message
+    assert "Updated title" in event.message
+
+
+def test_parse_event_handles_pr_opened() -> None:
+    plugin = build_plugin()
+    event = plugin.parse_event(build_pr_payload(action="opened", title="Add caching layer", body="Uses Redis"))
+
+    assert event.issue_number == 42
+    assert event.comment_id == 0
+    assert event.author == "dev"
+    assert "[PR #42 opened]" in event.message
+    assert "Add caching layer" in event.message
+    assert "Uses Redis" in event.message
+
+
+def test_parse_event_handles_pr_synchronize() -> None:
+    plugin = build_plugin()
+    event = plugin.parse_event(build_pr_payload(action="synchronize", title="Add caching layer", body=""))
+
+    assert "[PR #42 synchronized]" in event.message
+
+
+def test_parse_event_handles_pr_review_comment() -> None:
+    plugin = build_plugin()
+    event = plugin.parse_event(build_review_comment_payload(body="Please add a test", pr_number=77, comment_id=10))
+
+    assert event.issue_number == 77
+    assert event.comment_id == 10
+    assert event.author == "reviewer"
+    assert event.message == "Please add a test"
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_tracks_bot_timestamp() -> None:
+    comments = [
+        {"id": 1, "body": "human comment", "user": {"login": "human", "type": "User"}},
+        {
+            "id": 2,
+            "body": "bot reply\n<!-- ryo_state: {} -->",
+            "user": {"login": "ryobot[bot]", "type": "Bot"},
+            "created_at": "2025-06-15T10:30:00Z",
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=comments)
+
+    plugin = build_plugin(httpx.MockTransport(handler))
+    event = plugin.parse_event(build_issue_comment_payload(comment_id=99))
+
+    snapshot = await plugin.fetch_history(event)
+    await plugin.aclose()
+
+    assert snapshot.last_bot_comment_at == "2025-06-15T10:30:00Z"

@@ -25,6 +25,7 @@ from platforms.github import (
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_COOLDOWN_SECONDS = 120
 PERSONA = {
     "system_prompt": (
         "你是一个严厉且幽默的顶级架构师。"
@@ -67,6 +68,7 @@ async def _run(
 ) -> None:
     base_url = os.getenv("LLM_BASE_URL", DEEPSEEK_BASE_URL)
     model = os.getenv("LLM_MODEL", DEFAULT_MODEL)
+    cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", str(DEFAULT_COOLDOWN_SECONDS)))
     http_client = httpx.AsyncClient(base_url="https://api.github.com")
     try:
         plugin = GitHubPlugin(token=github_token, client=http_client)
@@ -90,6 +92,7 @@ async def _run(
             skills=skills,
             llm_client=llm_client,
             plugin=plugin,
+            cooldown_seconds=cooldown_seconds,
         )
         await ryo_agent.run(payload)
     finally:

@@ -1,7 +1,19 @@
 name: github-ryobot
 
 on:
+  issues:
+    types:
+      - opened
+      - edited
   issue_comment:
+    types:
+      - created
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+  pull_request_review_comment:
     types:
       - created
 
