@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from collections.abc import Sequence
 from typing import Any, TypedDict
 
 from pydantic import BaseModel, ValidationError
