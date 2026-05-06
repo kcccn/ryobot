@@ -90,11 +90,13 @@ class ListOpenIssuesArgs(BaseModel):
 
 class ListFilesArgs(BaseModel):
     path: str = Field(default="", description="Directory path relative to repo root, empty for root")
+    ref: str = Field(default="", description="Branch, tag, or commit SHA (empty for default branch)")
     limit: int = Field(default=30, ge=1, le=100)
 
 
 class ReadFileArgs(BaseModel):
     path: str = Field(description="File path relative to repo root")
+    ref: str = Field(default="", description="Branch, tag, or commit SHA (empty for default branch)")
 
 
 class SearchCodeArgs(BaseModel):
@@ -616,6 +618,7 @@ class ListFiles(GitHubSkillBase):
     description = (
         "List files and directories at a given path in the repository. "
         "Use this to explore the project structure. Pass an empty string for the root directory. "
+        "Optionally provide a ref (branch, tag, or commit SHA) to list files on a non-default branch. "
         "Returns file/directory names, types, and sizes."
     )
     args_model = ListFilesArgs
@@ -623,15 +626,20 @@ class ListFiles(GitHubSkillBase):
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
+        params: dict[str, Any] = {}
+        if args.ref:
+            params["ref"] = args.ref
         contents = await self._api.get_json(
             f"/repos/{context['owner']}/{context['repo']}/contents/{args.path}",
+            params=params if params else None,
         )
         if not isinstance(contents, list):
             return f"Not a directory: {args.path or '/'}"
         if not contents:
             return f"Directory is empty: {args.path or '/'}"
 
-        lines: list[str] = [f"Contents of {args.path or '/'}:"]
+        ref_note = f" (ref: {args.ref})" if args.ref else ""
+        lines: list[str] = [f"Contents of {args.path or '/'}{ref_note}:"]
         for item in contents[: args.limit]:
             item_type = item.get("type", "?")
             prefix = "📁" if item_type == "dir" else "📄"
@@ -646,7 +654,8 @@ class ReadFile(GitHubSkillBase):
     description = (
         "Read the content of a file in the repository. "
         "Provide the full path relative to the repository root. "
-        "Returns the decoded file content."
+        "Optionally provide a ref (branch, tag, or commit SHA) to read from a "
+        "non-default branch. Returns the decoded file content."
     )
     args_model = ReadFileArgs
 
@@ -655,8 +664,12 @@ class ReadFile(GitHubSkillBase):
 
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
+        params: dict[str, Any] = {}
+        if args.ref:
+            params["ref"] = args.ref
         item = await self._api.get_json(
             f"/repos/{context['owner']}/{context['repo']}/contents/{args.path}",
+            params=params if params else None,
         )
         if not isinstance(item, dict):
             return f"Cannot read: {args.path}"
