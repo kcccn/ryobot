@@ -143,5 +143,16 @@ class GitHubApiClient:
             except httpx.HTTPStatusError:
                 if not self._retryable(response) or attempt >= 3:
                     raise
-            await asyncio.sleep(delay)
+            await asyncio.sleep(self._retry_delay(response, delay))
             delay *= 2
+
+    @staticmethod
+    def _retry_delay(response: httpx.Response | None, fallback: float) -> float:
+        if response is not None and response.status_code == 429:
+            header = response.headers.get("Retry-After", "")
+            if header:
+                try:
+                    return float(header)
+                except ValueError:
+                    pass
+        return fallback

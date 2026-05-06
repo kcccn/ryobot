@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from openai import AsyncOpenAI
 
-from bots import get_bot
+from bots import get_bot, list_bots
 from core import RyoAgent
 from platforms.github import (
     AddLabels,
@@ -68,7 +68,7 @@ def main() -> None:
         raise SystemExit(1) from exc
 
     try:
-        asyncio.run(_run(payload, github_token=github_token, api_key=api_key))
+        asyncio.run(_run(payload, github_token=github_token, api_key=api_key, bot=bot))
     except Exception as exc:
         print(f"Fatal entrypoint error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
@@ -79,12 +79,18 @@ async def _run(
     *,
     github_token: str,
     api_key: str,
+    bot: Any,
 ) -> None:
-    bot = get_bot(BOT_IDENTITY)
     base_url = bot.base_url or os.getenv("LLM_BASE_URL", DEEPSEEK_BASE_URL)
     model = bot.model or os.getenv("LLM_MODEL", DEFAULT_MODEL)
     cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", str(DEFAULT_COOLDOWN_SECONDS)))
     max_iterations = int(os.getenv("MAX_ITERATIONS", "5"))
+    roster_lines = [
+        f"- {b.display_name}（{b.identity}）：{b.description}"
+        for b in list_bots()
+    ]
+    roster = "当前 Bot 社会成员：\n" + "\n".join(roster_lines)
+    system_prompt = f"{roster}\n\n{bot.system_prompt}"
     http_client = httpx.AsyncClient(
         base_url="https://api.github.com",
         timeout=httpx.Timeout(30.0, connect=10.0),
@@ -109,7 +115,7 @@ async def _run(
             base_url=base_url,
         )
         ryo_agent = RyoAgent(
-            persona={"model": model, "system_prompt": bot.system_prompt},
+            persona={"model": model, "system_prompt": system_prompt},
             skills=skills,
             llm_client=llm_client,
             plugin=plugin,

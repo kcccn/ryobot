@@ -158,7 +158,7 @@ class GitHubPlugin(BasePlugin):
     async def fetch_history(self, event: PluginEvent) -> HistorySnapshot:
         comments = await self._api.get_json(
             f"/repos/{event.owner}/{event.repo}/issues/{event.issue_number}/comments",
-            params={"per_page": 10},
+            params={"per_page": 10, "sort": "created", "direction": "desc"},
         )
         messages: list[dict[str, str]] = []
         subconscious: dict[str, Any] = {}
