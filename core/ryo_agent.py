@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from typing import Any
+from typing import Any, TypedDict
 
 from pydantic import BaseModel, ValidationError
 
@@ -11,6 +11,13 @@ from .plugins import BasePlugin, HistorySnapshot, PluginEvent
 from .skills import BaseSkill, clear_skill_context, set_skill_context
 
 DEFAULT_FALLBACK_MESSAGE = "I'm sorry, but I couldn't complete your request right now."
+
+
+class ChatMessage(TypedDict, total=False):
+    role: str
+    content: str | None
+    tool_calls: list[dict[str, Any]]
+    tool_call_id: str
 
 
 class RyoAgent:
@@ -50,9 +57,9 @@ class RyoAgent:
             except (ValueError, TypeError):
                 pass
 
-        messages: list[dict[str, Any]] = [
+        messages: list[ChatMessage] = [
             {"role": "system", "content": self.persona["system_prompt"]},
-            *history.messages,
+            *history.messages,  # type: ignore[typeddict-item]
             {"role": "user", "content": event.message},
         ]
         tools = [skill.get_tool_definition() for skill in self.skills]
@@ -98,7 +105,7 @@ class RyoAgent:
     async def _create_completion(
         self,
         *,
-        messages: list[dict[str, Any]],
+        messages: list[ChatMessage],
         tools: list[dict[str, Any]],
     ) -> Any:
         request: dict[str, Any] = {

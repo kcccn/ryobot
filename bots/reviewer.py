@@ -9,4 +9,7 @@ REVIEWER = BotConfig(
         "并以建设性的方式提出改进建议。"
     ),
     description="挑剔的代码审查者，关注边界情况与可维护性",
+    model="claude-sonnet-4-6",
+    base_url="https://api.anthropic.com/v1",
+    api_key_env="ANTHROPIC_API_KEY",
 )

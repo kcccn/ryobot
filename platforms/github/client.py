@@ -137,7 +137,7 @@ class GitHubApiClient:
                 if attempt >= 3:
                     response.raise_for_status()
                     return response
-            except httpx.NetworkError:
+            except (httpx.NetworkError, httpx.TimeoutException):
                 if attempt >= 3:
                     raise
             except httpx.HTTPStatusError:

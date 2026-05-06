@@ -54,6 +54,10 @@ def main() -> None:
     if _contains_own_marker(payload, BOT_IDENTITY):
         raise SystemExit(0)
 
+    if "repository" not in payload:
+        # workflow_dispatch / schedule — no issue context available yet
+        raise SystemExit(0)
+
     try:
         github_token = _require_env("GITHUB_TOKEN")
         bot = get_bot(BOT_IDENTITY)
@@ -87,7 +91,7 @@ async def _run(
     )
     try:
         plugin = GitHubPlugin(token=github_token, client=http_client, identity=BOT_IDENTITY)
-        skills = [
+        all_skills = [
             ReadIssueMemory(token=github_token, client=http_client),
             SearchRepoMemory(token=github_token, client=http_client),
             ReadCodeDiff(token=github_token, client=http_client),
@@ -98,6 +102,8 @@ async def _run(
             DispatchWorkflow(token=github_token, client=http_client),
             ReadWorkflowRun(token=github_token, client=http_client),
         ]
+        allow = bot.skill_filter
+        skills = [s for s in all_skills if allow is None or s.name in allow]
         llm_client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
