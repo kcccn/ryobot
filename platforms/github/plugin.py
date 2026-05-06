@@ -32,9 +32,11 @@ class GitHubPlugin(BasePlugin):
         client: httpx.AsyncClient | None = None,
         api_base_url: str | None = None,
         identity: str = "architect",
+        display_name: str = "",
     ) -> None:
         self._api = GitHubApiClient(token=token, client=client, api_base_url=api_base_url)
         self._identity = identity
+        self._display_name = display_name or identity
         self._marker_author_logins = _marker_author_logins_from_env()
         self._state_pattern = re.compile(
             rf"<!--\s*ryo:{re.escape(identity)}:\s*(?P<payload>\{{.*?\}})\s*-->",
@@ -271,7 +273,7 @@ class GitHubPlugin(BasePlugin):
             return
         await asyncio.sleep(random.uniform(1, 5))
         state_blob = json.dumps(subconscious or {}, ensure_ascii=False, separators=(",", ":"))
-        body = f"{content}\n<!-- ryo:{self._identity}: {state_blob} -->"
+        body = f"**{self._display_name}**\n\n{content}\n<!-- ryo:{self._identity}: {state_blob} -->"
         await self._api.post_json(
             f"/repos/{event.owner}/{event.repo}/issues/{event.issue_number}/comments",
             json_body={"body": body},

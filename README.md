@@ -207,10 +207,17 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 | `read_issue_memory` | 读 | 读取当前 Issue 详情（标题、状态、正文） |
 | `search_repo_memory` | 读 | 在仓库内搜索相关 Issue |
 | `read_code_diff` | 读 | 读取指定 PR 的 `.diff` 内容 |
+| `list_files` | 读 | 列出仓库目录结构 |
+| `read_file` | 读 | 读取仓库中任意文件内容 |
+| `search_code` | 读 | 在仓库代码中搜索关键词或模式 |
+| `list_open_issues` | 读 | 列出仓库中的 Issue 并过滤状态/标签 |
 | `create_issue` | 写 | 在仓库中创建新 Issue |
 | `add_labels` | 写 | 为 Issue 添加标签 |
 | `close_issue` | 写 | 关闭 Issue |
 | `comment_on_pr` | 写 | 在 PR 下发布评论 |
+| `write_file` | 写 | 创建或更新仓库文件 |
+| `create_branch` | 写 | 创建新分支 |
+| `create_pull_request` | 写 | 创建 Pull Request |
 | `dispatch_workflow` | 写 | 触发 GitHub Actions workflow |
 | `read_workflow_run` | 读 | 查看 workflow 运行状态和结果 |
 

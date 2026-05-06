@@ -77,6 +77,22 @@ class GitHubApiClient:
         )
         return response.json()
 
+    async def put_json(
+        self,
+        path: str,
+        *,
+        json_body: dict[str, Any],
+        accept: str = "application/vnd.github+json",
+    ) -> Any:
+        response = await self._with_retry(
+            lambda: self._client.put(
+                path,
+                json=json_body,
+                headers=self._headers(accept=accept),
+            ),
+        )
+        return response.json()
+
     async def patch_json(
         self,
         path: str,

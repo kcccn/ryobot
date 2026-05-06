@@ -16,14 +16,20 @@ from platforms.github import (
     AddLabels,
     CloseIssue,
     CommentOnPR,
+    CreateBranch,
     CreateIssue,
+    CreatePullRequest,
     DispatchWorkflow,
     GitHubPlugin,
+    ListFiles,
     ListOpenIssues,
     ReadCodeDiff,
+    ReadFile,
     ReadIssueMemory,
     ReadWorkflowRun,
+    SearchCode,
     SearchRepoMemory,
+    WriteFile,
 )
 from platforms.llm import AnthropicAdapter
 
@@ -122,13 +128,19 @@ async def _run(
         timeout=httpx.Timeout(30.0, connect=10.0),
     )
     try:
-        plugin = GitHubPlugin(token=github_token, client=http_client, identity=BOT_IDENTITY)
+        plugin = GitHubPlugin(token=github_token, client=http_client, identity=BOT_IDENTITY, display_name=bot.display_name)
         all_skills = [
             ReadIssueMemory(token=github_token, client=http_client),
             SearchRepoMemory(token=github_token, client=http_client),
             ListOpenIssues(token=github_token, client=http_client),
+            ListFiles(token=github_token, client=http_client),
+            ReadFile(token=github_token, client=http_client),
+            SearchCode(token=github_token, client=http_client),
             ReadCodeDiff(token=github_token, client=http_client),
             CreateIssue(token=github_token, client=http_client),
+            WriteFile(token=github_token, client=http_client),
+            CreateBranch(token=github_token, client=http_client),
+            CreatePullRequest(token=github_token, client=http_client),
             AddLabels(token=github_token, client=http_client),
             CloseIssue(token=github_token, client=http_client),
             CommentOnPR(token=github_token, client=http_client),
