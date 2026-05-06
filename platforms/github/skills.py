@@ -415,6 +415,54 @@ class ListOpenIssues(GitHubSkillBase):
         return "\n".join(lines)
 
 
+class ListOpenPullRequestsArgs(BaseModel):
+    state: str = Field(default="open")
+    sort: str = Field(default="updated")
+    direction: str = Field(default="desc")
+    limit: int = Field(default=10, ge=1, le=30)
+
+
+class ListOpenPullRequests(GitHubSkillBase):
+    name = "list_open_pull_requests"
+    description = (
+        "List pull requests in the current repository. "
+        "Use state='open' (default) for active PRs, 'closed' for merged/closed ones, or 'all' for both. "
+        "Sort by 'created', 'updated', 'popularity', or 'long-running'. "
+        "Returns PR number, title, state, draft status, author, head/base branches, created/updated timestamps, and URL."
+    )
+    args_model = ListOpenPullRequestsArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        params: dict[str, Any] = {
+            "state": args.state,
+            "sort": args.sort,
+            "direction": args.direction,
+            "per_page": min(args.limit, 30),
+        }
+
+        prs = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/pulls",
+            params=params,
+        )
+        if not prs:
+            return f"No {args.state} pull requests found in {context['owner']}/{context['repo']}."
+
+        lines: list[str] = []
+        for pr in prs:
+            draft = " [DRAFT]" if pr.get("draft") else ""
+            lines.append(
+                f"#{pr['number']}: {pr['title']}{draft} "
+                f"[{pr['state']}] "
+                f"author: {pr.get('user', {}).get('login', 'unknown')} "
+                f"branch: {pr.get('head', {}).get('ref', '?')} → {pr.get('base', {}).get('ref', '?')} "
+                f"updated: {pr.get('updated_at', '')} "
+                f"url: {pr.get('html_url', '')}"
+            )
+        return "\n".join(lines)
+
+
 class ListRepoLabels(GitHubSkillBase):
     name = "list_repo_labels"
     description = "List existing labels in the current repository before applying labels to issues or pull requests."
