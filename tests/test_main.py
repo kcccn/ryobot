@@ -166,6 +166,7 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(main, "ListOpenIssues", FakeSkill)
     monkeypatch.setattr(main, "ListOpenPullRequests", FakeSkill)
     monkeypatch.setattr(main, "ListRepoLabels", FakeSkill)
+    monkeypatch.setattr(main, "MergePullRequest", FakeSkill)
     monkeypatch.setattr(main, "ReadThreadComments", FakeSkill)
     monkeypatch.setattr(main, "ListFiles", FakeSkill)
     monkeypatch.setattr(main, "ReadFile", FakeSkill)
@@ -190,7 +191,7 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     assert captured["openai_kwargs"]["base_url"] == "https://api.deepseek.com"
     assert captured["plugin_kwargs"]["token"] == "gh-token"
     assert captured["plugin_kwargs"]["identity"] == "architect"
-    assert len(captured["skill_kwargs"]) == 19
+    assert len(captured["skill_kwargs"]) == 20
     assert captured["ryo_agent_kwargs"]["persona"]["model"] == "deepseek-v4-flash"
     assert "严厉且幽默的顶级架构师" in captured["ryo_agent_kwargs"]["persona"]["system_prompt"]
     assert captured["http_client_closed"] is True
@@ -240,14 +241,14 @@ def test_main_includes_dispatch_workflow_only_when_allowlist_is_configured(monke
                  "ListFiles", "ReadFile", "SearchCode",
                  "ReadCodeDiff", "CreateIssue", "WriteFile", "CreateBranch",
                  "CreatePullRequest", "AddLabels", "CloseIssue",
-                 "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun",
-                 "RunCommand"):
+                 "CommentOnPR", "MergePullRequest", "DispatchWorkflow",
+                 "ReadWorkflowRun", "RunCommand"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
 
     main.main()
 
-    assert captured["skill_count"] == 20
+    assert captured["skill_count"] == 21
 
 
 def test_readme_brands_project_as_ryo_ghost_engine() -> None:
@@ -318,7 +319,8 @@ def test_reviewer_uses_deepseek_openai_adapter(monkeypatch: pytest.MonkeyPatch) 
                  "ListFiles", "ReadFile", "SearchCode",
                  "ReadCodeDiff", "CreateIssue", "WriteFile", "CreateBranch",
                  "CreatePullRequest", "AddLabels", "CloseIssue",
-                 "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun"):
+                 "CommentOnPR", "MergePullRequest", "DispatchWorkflow",
+                 "ReadWorkflowRun"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
 
@@ -433,8 +435,8 @@ def test_fix_mode_injects_directive(monkeypatch: pytest.MonkeyPatch) -> None:
                  "ListFiles", "ReadFile", "SearchCode",
                  "ReadCodeDiff", "CreateIssue", "WriteFile", "CreateBranch",
                  "CreatePullRequest", "AddLabels", "CloseIssue",
-                 "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun",
-                 "RunCommand"):
+                 "CommentOnPR", "MergePullRequest", "DispatchWorkflow",
+                 "ReadWorkflowRun", "RunCommand"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
 

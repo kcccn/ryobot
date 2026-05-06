@@ -792,6 +792,78 @@ class CreatePullRequest(GitHubSkillBase):
         )
 
 
+class MergePullRequestArgs(BaseModel):
+    pr_number: int = Field(description="Pull request number to merge")
+    merge_method: str = Field(
+        default="merge",
+        description="Merge method: 'merge', 'squash', or 'rebase'",
+    )
+    commit_title: str = Field(
+        default="",
+        description="Title for the merge commit (only for squash/rebase)",
+    )
+
+
+class MergePullRequest(GitHubSkillBase):
+    name = "merge_pull_request"
+    description = (
+        "Merge a pull request. "
+        "Provide the PR number and optionally the merge method "
+        "('merge', 'squash', or 'rebase', default 'merge'). "
+        "Only PRs with a clean mergeable state can be merged. "
+        "Use this to land reviewed and approved PRs — never merge "
+        "without prior review."
+    )
+    args_model = MergePullRequestArgs
+    mutates_state = True
+    requires_trusted_author = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+
+        # Check PR state first
+        pr_info = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/pulls/{args.pr_number}",
+        )
+        if pr_info.get("state") != "open":
+            return f"PR #{args.pr_number} is not open (state={pr_info.get('state')})."
+        if pr_info.get("merged"):
+            return f"PR #{args.pr_number} is already merged."
+        if pr_info.get("draft"):
+            return f"PR #{args.pr_number} is still a draft. Mark it ready for review first."
+        if pr_info.get("mergeable") is False:
+            return f"PR #{args.pr_number} has merge conflicts and cannot be merged."
+        if pr_info.get("mergeable_state") == "blocked":
+            return (
+                f"PR #{args.pr_number} is blocked from merging: "
+                f"{pr_info.get('mergeable_state', 'unknown')}"
+            )
+
+        body: dict[str, Any] = {
+            "merge_method": args.merge_method,
+        }
+        if args.commit_title:
+            body["commit_title"] = args.commit_title
+
+        try:
+            result = await self._api.put_json(
+                f"/repos/{context['owner']}/{context['repo']}/pulls/{args.pr_number}/merge",
+                json_body=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            return (
+                f"GitHub API error ({exc.response.status_code}): "
+                f"{exc.response.text[:1000]}"
+            )
+        return (
+            f"Merged PR #{args.pr_number}: {pr_info.get('title', '')}\n"
+            f"Method: {args.merge_method}\n"
+            f"SHA: {result.get('sha', '')}\n"
+            f"Merged: {result.get('merged', False)}"
+        )
+
+
 class RunCommandArgs(BaseModel):
     command: str = Field(..., description="Shell command to execute. Working directory is the repository root.")
 
