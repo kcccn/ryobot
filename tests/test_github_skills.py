@@ -23,6 +23,7 @@ from platforms.github.skills import (
     ReadFile,
     ReadIssueMemory,
     ReadWorkflowRun,
+    RunCommand,
     SearchCode,
     SearchRepoMemory,
     WriteFile,
@@ -919,3 +920,38 @@ async def test_create_pull_request_creates_pr() -> None:
 
     assert "Created PR #42" in result
     assert "https://github.test/acme/widgets/pull/42" in result
+
+
+@pytest.mark.asyncio
+async def test_run_command_returns_stdout() -> None:
+    client = httpx.AsyncClient(base_url="https://api.github.test")
+    skill = RunCommand(token="secret-token", client=client, api_base_url="https://api.github.test")
+    try:
+        result = await skill.execute(command="echo hello world")
+    finally:
+        await client.aclose()
+    assert "Exit code: 0" in result
+    assert "hello world" in result
+
+
+@pytest.mark.asyncio
+async def test_run_command_returns_stderr() -> None:
+    client = httpx.AsyncClient(base_url="https://api.github.test")
+    skill = RunCommand(token="secret-token", client=client, api_base_url="https://api.github.test")
+    try:
+        result = await skill.execute(command="echo error >&2")
+    finally:
+        await client.aclose()
+    assert "Exit code: 0" in result
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_run_command_nonzero_exit_code() -> None:
+    client = httpx.AsyncClient(base_url="https://api.github.test")
+    skill = RunCommand(token="secret-token", client=client, api_base_url="https://api.github.test")
+    try:
+        result = await skill.execute(command="exit 42")
+    finally:
+        await client.aclose()
+    assert "Exit code: 42" in result

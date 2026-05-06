@@ -209,8 +209,9 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 | `create_pull_request` | 写 | 创建 Pull Request |
 | `dispatch_workflow` | 写 | 触发 GitHub Actions workflow |
 | `read_workflow_run` | 读 | 查看 workflow 运行状态和结果 |
+| `run_command` | 写 | 在仓库工作目录执行 shell 命令（pytest/ruff/mypy 等），5 分钟超时 |
 
-单次执行最多进行 `MAX_ITERATIONS` 轮工具调用（默认 30）。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息。
+单次执行最多进行 `MAX_ITERATIONS` 轮工具调用（默认 100）。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息。
 
 ---
 

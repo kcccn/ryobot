@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from typing import Any
 
 import httpx
@@ -620,3 +622,51 @@ class CreatePullRequest(GitHubSkillBase):
             f"URL: {result.get('html_url', '')}\n"
             f"State: {result.get('state', 'unknown')}"
         )
+
+
+class RunCommandArgs(BaseModel):
+    command: str = Field(..., description="Shell command to execute. Working directory is the repository root.")
+
+
+class RunCommand(GitHubSkillBase):
+    name = "run_command"
+    description = (
+        "Execute a shell command in the repository workspace and return stdout/stderr. "
+        "Use this to run tests, linters, build scripts, or any other development tool. "
+        "The command runs in the repository root directory with a 5-minute timeout. "
+        "All standard development tools (pytest, ruff, mypy, npm, cargo, go, etc.) are available."
+    )
+    args_model = RunCommandArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        workspace = os.getenv("GITHUB_WORKSPACE", ".")
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                args.command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=workspace,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=300,
+            )
+        except asyncio.TimeoutError:
+            return f"Command timed out after 300s:\n  {args.command}"
+
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        exit_code = proc.returncode
+
+        parts: list[str] = [f"Exit code: {exit_code}"]
+        if stdout:
+            parts.append(f"stdout:\n{stdout.rstrip()}")
+        if stderr:
+            parts.append(f"stderr:\n{stderr.rstrip()}")
+        result = "\n\n".join(parts)
+
+        max_chars = max_chars_from_env("RYOBOT_MAX_TOOL_RESULT_CHARS", 20000)
+        return truncate_text(result, max_chars)

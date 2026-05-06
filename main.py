@@ -27,6 +27,7 @@ from platforms.github import (
     ReadFile,
     ReadIssueMemory,
     ReadWorkflowRun,
+    RunCommand,
     SearchCode,
     SearchRepoMemory,
     WriteFile,
@@ -145,6 +146,7 @@ async def _run(
             CloseIssue(token=github_token, client=http_client),
             CommentOnPR(token=github_token, client=http_client),
             ReadWorkflowRun(token=github_token, client=http_client),
+            RunCommand(token=github_token, client=http_client),
         ]
         if _workflow_dispatch_enabled():
             all_skills.append(DispatchWorkflow(token=github_token, client=http_client))
