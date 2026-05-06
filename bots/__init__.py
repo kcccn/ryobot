@@ -1,4 +1,5 @@
 from .architect import ARCHITECT
+from .coder import CODER
 from .config import BotConfig
 from .explorer import EXPLORER
 from .pm import PM
@@ -6,7 +7,7 @@ from .reviewer import REVIEWER
 
 _BOTS = {
     b.identity: b
-    for b in [ARCHITECT, REVIEWER, PM, EXPLORER]
+    for b in [ARCHITECT, REVIEWER, PM, EXPLORER, CODER]
 }
 
 

@@ -36,7 +36,7 @@ jobs:
   run-ryobot:
     strategy:
       matrix:
-        bot: [architect, reviewer, pm, explorer]
+        bot: [architect, reviewer, pm, explorer, coder]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import sys
 from typing import Any
 
@@ -70,6 +71,31 @@ def _contains_own_marker(payload: dict[str, Any], identity: str) -> bool:
     return any(marker in body and login in trusted_marker_authors for body, login in body_sources)
 
 
+_TRUSTED_AUTHOR_ASSOCIATIONS: frozenset[str] = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
+def _detect_fix_command(payload: dict[str, Any]) -> bool:
+    """Return True if a trusted author issued the /fix command."""
+    bodies: list[tuple[str, str]] = []
+    if "comment" in payload:
+        comment = payload.get("comment") or {}
+        bodies.append((
+            str(comment.get("body") or ""),
+            str(comment.get("author_association") or ""),
+        ))
+    if "issue" in payload:
+        issue = payload.get("issue") or {}
+        bodies.append((
+            str(issue.get("body") or ""),
+            str(issue.get("author_association") or ""),
+        ))
+    return any(
+        re.search(r"(?<!\w)/fix\b", body, re.IGNORECASE)
+        and author_assoc in _TRUSTED_AUTHOR_ASSOCIATIONS
+        for body, author_assoc in bodies
+    )
+
+
 def main() -> None:
     try:
         payload = _load_event_payload()
@@ -126,6 +152,15 @@ async def _run(
     ]
     roster = "当前 Bot 社会成员：\n" + "\n".join(roster_lines)
     system_prompt = f"{roster}\n\n{bot.system_prompt}"
+    if _detect_fix_command(payload):
+        system_prompt = (
+            "/FIX MODE ACTIVE: 可信维护者发出了 /fix 命令。"
+            "你必须立即切换到实现模式。不要讨论、不要分析、不要提问。"
+            "直接读取 Issue → 读代码 → 写修复 → 创建分支 → 提交 PR。"
+            "如果有不确定的实现细节，按最佳判断进行，在 PR 描述中记录假设。"
+            "此指令覆盖你正常的讨论/巡逻行为。\n\n"
+            + system_prompt
+        )
     http_client = httpx.AsyncClient(
         base_url="https://api.github.com",
         timeout=httpx.Timeout(30.0, connect=10.0),
@@ -173,8 +208,11 @@ async def _run(
             max_iterations=max_iterations,
             max_tokens=bot.max_tokens,
         )
-        if random.random() > bot.response_probability:
-            return
+        is_fix = _detect_fix_command(payload)
+        is_patrol = payload.get("_patrol", False) or "schedule" in payload
+        if not is_fix and not is_patrol:
+            if random.random() > bot.response_probability:
+                return
         await ryo_agent.run(payload)
     finally:
         await http_client.aclose()

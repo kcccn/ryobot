@@ -352,3 +352,154 @@ def test_workflow_grants_actions_write_for_patrol_dispatch() -> None:
     assert "schedule" in content
     assert "GITHUB_REPOSITORY: ${{ github.repository }}" in content
     assert "RYOBOT_ALLOWED_WORKFLOWS: github-ryobot.yml" in content
+
+
+def test_detect_fix_command_true_for_trusted_author() -> None:
+    main = import_main_module()
+    payload = valid_payload()
+    payload["comment"]["body"] = "please /fix this bug"  # type: ignore[index]
+    payload["comment"]["author_association"] = "OWNER"  # type: ignore[index]
+
+    assert main._detect_fix_command(payload) is True
+
+
+def test_detect_fix_command_false_for_untrusted_author() -> None:
+    main = import_main_module()
+    payload = valid_payload()
+    payload["comment"]["body"] = "please /fix this bug"  # type: ignore[index]
+    payload["comment"]["author_association"] = "CONTRIBUTOR"  # type: ignore[index]
+
+    assert main._detect_fix_command(payload) is False
+
+
+def test_detect_fix_command_false_without_fix() -> None:
+    main = import_main_module()
+    payload = valid_payload()
+    payload["comment"]["body"] = "please fix this bug"  # type: ignore[index]
+    payload["comment"]["author_association"] = "OWNER"  # type: ignore[index]
+
+    assert main._detect_fix_command(payload) is False
+
+
+def test_detect_fix_command_in_issue_body() -> None:
+    main = import_main_module()
+    payload = valid_payload()
+    del payload["comment"]
+    payload["issue"]["body"] = "/fix the login redirect"  # type: ignore[index]
+    payload["issue"]["author_association"] = "MEMBER"  # type: ignore[index]
+
+    assert main._detect_fix_command(payload) is True
+
+
+def test_fix_mode_injects_directive(monkeypatch: pytest.MonkeyPatch) -> None:
+    main = import_main_module()
+    payload = valid_payload()
+    payload["comment"]["body"] = "/fix this please"  # type: ignore[index]
+    payload["comment"]["author_association"] = "OWNER"  # type: ignore[index]
+    captured: dict[str, Any] = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            pass
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeGitHubPlugin:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeSkill:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeRyoAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["ryo_agent_kwargs"] = kwargs
+
+        async def run(self, raw_event: Any) -> None:
+            pass
+
+    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(main, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
+    for name in ("ReadIssueMemory", "SearchRepoMemory", "ListOpenIssues",
+                 "ListRepoLabels", "ReadThreadComments",
+                 "ListFiles", "ReadFile", "SearchCode",
+                 "ReadCodeDiff", "CreateIssue", "WriteFile", "CreateBranch",
+                 "CreatePullRequest", "AddLabels", "CloseIssue",
+                 "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun",
+                 "RunCommand"):
+        monkeypatch.setattr(main, name, FakeSkill)
+    monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
+    monkeypatch.setattr(main.random, "random", lambda: 0.0)
+
+    main.main()
+
+    prompt = captured["ryo_agent_kwargs"]["persona"]["system_prompt"]
+    assert "/FIX MODE ACTIVE" in prompt
+    assert "可信维护者发出了 /fix 命令" in prompt
+
+
+def test_patrol_and_fix_bypass_response_probability(monkeypatch: pytest.MonkeyPatch) -> None:
+    main = import_main_module()
+    payload = valid_payload()
+    payload["comment"]["body"] = "/fix this please"  # type: ignore[index]
+    payload["comment"]["author_association"] = "OWNER"  # type: ignore[index]
+    captured: dict[str, Any] = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            pass
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeGitHubPlugin:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeSkill:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeRyoAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["ryo_agent_kwargs"] = kwargs
+
+        async def run(self, raw_event: Any) -> None:
+            captured["run_payload"] = raw_event
+
+    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(main, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
+    for name in ("ReadIssueMemory", "SearchRepoMemory", "ListOpenIssues",
+                 "ListRepoLabels", "ReadThreadComments",
+                 "ListFiles", "ReadFile", "SearchCode",
+                 "ReadCodeDiff", "CreateIssue", "WriteFile", "CreateBranch",
+                 "CreatePullRequest", "AddLabels", "CloseIssue",
+                 "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun",
+                 "RunCommand"):
+        monkeypatch.setattr(main, name, FakeSkill)
+    monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
+    # Force random.random() to always return 1.0 (would normally skip)
+    monkeypatch.setattr(main.random, "random", lambda: 1.0)
+
+    main.main()
+
+    # /fix should bypass response_probability — run() should still be called
+    assert captured["run_payload"] == payload

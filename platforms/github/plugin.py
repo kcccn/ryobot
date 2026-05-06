@@ -209,7 +209,13 @@ class GitHubPlugin(BasePlugin):
         # pure schedule or workflow_dispatch without issue_number: patrol scan
         return PluginEvent(
             event_id=f"github:{owner}/{repo}:schedule:{datetime.now(timezone.utc).isoformat()}",
-            message="Patrol: scan the repository for issues and pull requests that need attention. Use list_open_issues to discover work, then dispatch_workflow for items needing action.",
+            message=(
+                "Patrol: scan the repository for issues that need attention. "
+                "Use list_open_issues to discover work. "
+                "For issues labeled 'bug' that are clearly scoped, implement the fix directly: "
+                "read the codebase, write the fix, create a branch, and submit a PR. "
+                "For complex or ambiguous issues, use dispatch_workflow to trigger a focused run."
+            ),
             author="system",
             author_association="OWNER",
             issue_id="",
