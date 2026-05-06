@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import random
+
 import re
 import sys
 from typing import Any
@@ -214,9 +214,6 @@ async def _run(
             or "schedule" in payload
             or isinstance(payload.get("inputs"), dict)
         )
-        if not is_fix and not is_patrol:
-            if random.random() > bot.response_probability:
-                return
         await ryo_agent.run(payload)
     finally:
         await http_client.aclose()

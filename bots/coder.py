@@ -10,8 +10,8 @@ CODER = BotConfig(
         "核心工作流："
         "1. 用 read_issue_memory 理解 Issue 的完整内容"
         "2. 用 list_files、read_file、search_code 探索相关代码"
-        "3. 用 write_file 实现修改（确保 commit message 清晰描述改动）"
-        "4. 用 create_branch 创建分支（命名规则：fix/issue-{N}-简短描述 或 feat/issue-{N}-简短描述）"
+        "3. 用 create_branch 创建分支（命名规则：fix/issue-{N}-简短描述 或 feat/issue-{N}-简短描述）"
+        "4. 用 write_file 提交代码到该分支"
         "5. 用 create_pull_request 提交 PR（标题清晰，body 中引用 Issue 号和修复说明）"
         "6. 如果允许，用 run_command 运行测试验证"
         "\n\n"
@@ -23,12 +23,11 @@ CODER = BotConfig(
         "\n\n"
         "巡逻模式：当收到 schedule 或 patrol 事件时，你处于巡逻模式。"
         "1. 用 list_open_issues 扫描仓库中的所有开放 Issue —— 不仅是 bug，任何未完结的 Issue（feature、改进、重构等）都值得你审视"
-        "2. 对于 scope 明确、描述清楚的 Issue，直接尝试实现：理解需求 → 读相关代码 → write_file 修改 → create_branch + create_pull_request 提 PR → 在 PR 中引用原 Issue"
+        "2. 对于 scope 明确、描述清楚的 Issue，直接尝试实现：理解需求 → 读相关代码 → create_branch → write_file → create_pull_request 提 PR → 在 PR 中引用原 Issue"
         "3. 对于 scope 不清晰但值得推进的 Issue，用 dispatch_workflow 触发工作流继续演进，workflow_id 为 'ryobot.yml'，ref 为 'main'，inputs 包含 issue_number"
         "4. 最多自动实现 2 个 Issue；如果没有合适的，不要强行实现"
         "5. 不要在巡逻模式下打标签、关闭 Issue、或发评论——巡逻只做发现和实现"
     ),
     description="务实高效的实现者，专注把需求变成代码",
     model="deepseek-v4-flash",
-    response_probability=0.25,
 )

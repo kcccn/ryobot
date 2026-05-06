@@ -583,9 +583,11 @@ class WriteFile(GitHubSkillBase):
     name = "write_file"
     description = (
         "Create or update a file in the repository. "
-        "Provide the file path, new content (plain text), and a commit message. "
-        "Optionally specify a branch to commit to. "
-        "If the file already exists it will be updated; if not, it will be created."
+        "Provide the file path, new content (plain text), a commit message, "
+        "and a branch name to commit to. "
+        "If the file already exists it will be updated; if not, it will be created. "
+        "Writing directly to the default branch is not allowed — you must create a "
+        "feature branch first, write to it, and then open a pull request."
     )
     args_model = WriteFileArgs
     mutates_state = True
@@ -595,19 +597,34 @@ class WriteFile(GitHubSkillBase):
 
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
+
+        repo_info = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}",
+        )
+        default_branch = repo_info.get("default_branch", "main")
+        effective_branch = args.branch or default_branch
+        if effective_branch == default_branch:
+            return (
+                f"Refusing to write directly to the default branch '{default_branch}'. "
+                "All code changes must go through the PR workflow:\n"
+                "1. Use create_branch to create a feature branch\n"
+                "2. Use write_file with branch=<your-branch> to commit changes\n"
+                "3. Use create_pull_request to open a PR for review\n"
+                "You must never commit directly to the default branch."
+            )
+
         content_bytes = args.content.encode("utf-8")
         body: dict[str, Any] = {
             "message": args.message,
             "content": base64.b64encode(content_bytes).decode("ascii"),
+            "branch": args.branch,
         }
-        if args.branch:
-            body["branch"] = args.branch
 
         # Try to get existing file sha for updates
         try:
             existing = await self._api.get_json(
                 f"/repos/{context['owner']}/{context['repo']}/contents/{args.path}",
-                params={"ref": args.branch} if args.branch else None,
+                params={"ref": args.branch},
             )
             if isinstance(existing, dict) and existing.get("sha"):
                 body["sha"] = existing["sha"]

@@ -909,8 +909,16 @@ async def test_write_file_creates_new_file() -> None:
     import base64
 
     captured: dict[str, Any] = {}
+    call_order: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        call_order.append(request.method)
+        if request.method == "GET" and "/contents/" not in str(request.url):
+            # Repo info request
+            return httpx.Response(200, json={"default_branch": "main"})
+        if request.method == "GET" and "/contents/" in str(request.url):
+            # Existing file check — file doesn't exist
+            return httpx.Response(404)
         captured["method"] = request.method
         captured["url"] = str(request.url)
         body = json.loads(request.content)
@@ -918,7 +926,7 @@ async def test_write_file_creates_new_file() -> None:
         return httpx.Response(
             201,
             json={
-                "content": {"html_url": "https://github.test/acme/widgets/blob/main/new.py"},
+                "content": {"html_url": "https://github.test/acme/widgets/blob/feat/new-thing/new.py"},
                 "commit": {"sha": "abc123"},
             },
         )
@@ -927,7 +935,9 @@ async def test_write_file_creates_new_file() -> None:
     skill = WriteFile(token="secret-token", client=client, api_base_url="https://api.github.test")
     token = with_context()
     try:
-        result = await skill.execute(path="new.py", content="print('hi')", message="Add new.py")
+        result = await skill.execute(
+            path="new.py", content="print('hi')", message="Add new.py", branch="feat/new-thing",
+        )
     finally:
         clear_skill_context(token)
         await client.aclose()
@@ -935,6 +945,7 @@ async def test_write_file_creates_new_file() -> None:
     assert captured["method"] == "PUT"
     assert base64.b64decode(captured["body"]["content"]).decode("utf-8") == "print('hi')"
     assert captured["body"]["message"] == "Add new.py"
+    assert captured["body"]["branch"] == "feat/new-thing"
     assert "Created file" in result
 
 
@@ -945,13 +956,16 @@ async def test_write_file_updates_existing_file() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         call_count[0] += 1
         if call_count[0] == 1:
-            # First call: try to get existing file
+            # First call: repo info
+            return httpx.Response(200, json={"default_branch": "main"})
+        if call_count[0] == 2:
+            # Second call: get existing file
             return httpx.Response(200, json={"sha": "oldsha", "type": "file", "size": 10})
-        # Second call: PUT with sha
+        # Third call: PUT with sha
         return httpx.Response(
             200,
             json={
-                "content": {"html_url": "https://github.test/acme/widgets/blob/main/existing.py"},
+                "content": {"html_url": "https://github.test/acme/widgets/blob/feat/update/existing.py"},
                 "commit": {"sha": "def456"},
             },
         )
@@ -960,13 +974,40 @@ async def test_write_file_updates_existing_file() -> None:
     skill = WriteFile(token="secret-token", client=client, api_base_url="https://api.github.test")
     token = with_context()
     try:
-        result = await skill.execute(path="existing.py", content="updated", message="Update")
+        result = await skill.execute(
+            path="existing.py", content="updated", message="Update", branch="feat/update",
+        )
     finally:
         clear_skill_context(token)
         await client.aclose()
 
-    assert call_count[0] == 2
+    assert call_count[0] == 3
     assert "Updated file" in result
+
+
+@pytest.mark.asyncio
+async def test_write_file_refuses_default_branch() -> None:
+    call_count = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # Repo info request
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(500)  # should not reach here
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = WriteFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(
+            path="foo.py", content="bar", message="Should fail", branch="main",
+        )
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Refusing to write directly to the default branch" in result
 
 
 # ---- create_branch ----

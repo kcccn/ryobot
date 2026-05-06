@@ -15,4 +15,4 @@ class BotConfig:
     api_key_env: str | None = None
     provider: str = "openai"
     max_tokens: int = 4096
-    response_probability: float = 1.0
+

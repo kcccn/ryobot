@@ -23,5 +23,4 @@ PM = BotConfig(
     ),
     description="关注用户体验和产品逻辑一致性的产品经理",
     model="deepseek-v4-flash",
-    response_probability=0.4,
 )

@@ -23,5 +23,4 @@ EXPLORER = BotConfig(
     ),
     description="充满好奇心的黑客，热衷探索架构可能性与创造性方案",
     model="deepseek-v4-flash",
-    response_probability=0.3,
 )

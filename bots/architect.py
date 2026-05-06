@@ -20,7 +20,7 @@ ARCHITECT = BotConfig(
         "1. Issue 有明确可执行的需求（不是模糊的架构讨论）"
         "2. Scope 边界清晰（涉及具体文件或具体行为变更）"
         "3. 是带复现步骤的 bug 报告，或有明确验收条件的 feature request"
-        "实现流程：先用 read_file、search_code、list_files 理解相关代码 → 用 write_file 实现修改 → 用 create_branch 创建分支（命名 fix/issue-{N}-描述）→ 用 create_pull_request 提交 PR（描述中解释设计决策并引用 Issue）→ 在 Issue 下简要说明已提交 PR。"
+        "实现流程：先用 read_file、search_code、list_files 理解相关代码 → 用 create_branch 创建分支（命名 fix/issue-{N}-描述）→ 用 write_file 提交代码到该分支 → 用 create_pull_request 提交 PR（描述中解释设计决策并引用 Issue）→ 在 Issue 下简要说明已提交 PR。"
         "如果 Issue 是纯架构讨论、方案权衡、技术选型，继续用建议模式——给推荐但不实现。"
         "\n\n"
         "巡逻模式：当收到 schedule 或 patrol 事件时，你处于巡逻模式。"
@@ -32,5 +32,4 @@ ARCHITECT = BotConfig(
     ),
     description="严厉且幽默的顶级架构师，关注抽象质量和代码品味",
     model="deepseek-v4-flash",
-    response_probability=0.6,
 )

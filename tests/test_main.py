@@ -181,7 +181,6 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(main, "ReadWorkflowRun", FakeSkill)
     monkeypatch.setattr(main, "RunCommand", FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
-    monkeypatch.setattr(main.random, "random", lambda: 0.0)
 
     main.main()
 
@@ -244,7 +243,6 @@ def test_main_includes_dispatch_workflow_only_when_allowlist_is_configured(monke
                  "RunCommand"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
-    monkeypatch.setattr(main.random, "random", lambda: 0.0)
 
     main.main()
 
@@ -322,7 +320,6 @@ def test_reviewer_uses_deepseek_openai_adapter(monkeypatch: pytest.MonkeyPatch) 
                  "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
-    monkeypatch.setattr(main.random, "random", lambda: 0.0)
 
     main.main()
 
@@ -439,67 +436,9 @@ def test_fix_mode_injects_directive(monkeypatch: pytest.MonkeyPatch) -> None:
                  "RunCommand"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
-    monkeypatch.setattr(main.random, "random", lambda: 0.0)
 
     main.main()
 
     prompt = captured["ryo_agent_kwargs"]["persona"]["system_prompt"]
     assert "/FIX MODE ACTIVE" in prompt
     assert "可信维护者发出了 /fix 命令" in prompt
-
-
-def test_patrol_and_fix_bypass_response_probability(monkeypatch: pytest.MonkeyPatch) -> None:
-    main = import_main_module()
-    payload = valid_payload()
-    payload["comment"]["body"] = "/fix this please"  # type: ignore[index]
-    payload["comment"]["author_association"] = "OWNER"  # type: ignore[index]
-    captured: dict[str, Any] = {}
-
-    class FakeAsyncClient:
-        def __init__(self, **kwargs: Any) -> None:
-            pass
-
-        async def aclose(self) -> None:
-            pass
-
-    class FakeAsyncOpenAI:
-        def __init__(self, **kwargs: Any) -> None:
-            pass
-
-    class FakeGitHubPlugin:
-        def __init__(self, **kwargs: Any) -> None:
-            pass
-
-    class FakeSkill:
-        def __init__(self, **kwargs: Any) -> None:
-            pass
-
-    class FakeRyoAgent:
-        def __init__(self, **kwargs: Any) -> None:
-            captured["ryo_agent_kwargs"] = kwargs
-
-        async def run(self, raw_event: Any) -> None:
-            captured["run_payload"] = raw_event
-
-    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
-    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
-    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
-    monkeypatch.setattr(main, "AsyncOpenAI", FakeAsyncOpenAI)
-    monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
-    for name in ("ReadIssueMemory", "SearchRepoMemory", "ListOpenIssues",
-                 "ListRepoLabels", "ReadThreadComments",
-                 "ListFiles", "ReadFile", "SearchCode",
-                 "ReadCodeDiff", "CreateIssue", "WriteFile", "CreateBranch",
-                 "CreatePullRequest", "AddLabels", "CloseIssue",
-                 "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun",
-                 "RunCommand"):
-        monkeypatch.setattr(main, name, FakeSkill)
-    monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
-    # Force random.random() to always return 1.0 (would normally skip)
-    monkeypatch.setattr(main.random, "random", lambda: 1.0)
-
-    main.main()
-
-    # /fix should bypass response_probability — run() should still be called
-    assert captured["run_payload"] == payload

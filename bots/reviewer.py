@@ -23,5 +23,4 @@ REVIEWER = BotConfig(
     ),
     description="挑剔的代码审查者，关注边界情况与可维护性",
     model="deepseek-v4-flash",
-    response_probability=0.5,
 )
