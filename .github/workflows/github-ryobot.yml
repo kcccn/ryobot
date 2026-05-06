@@ -27,7 +27,7 @@ on:
 permissions:
   issues: write
   pull-requests: write
-  actions: write
+  actions: read
 
 jobs:
   run-ryobot:

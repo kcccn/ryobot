@@ -112,6 +112,16 @@ class EchoSkill(BaseSkill):
         return f"echo:{args.text}"
 
 
+class MutatingSkill(EchoSkill):
+    name = "mutate"
+    description = "Mutate external state."
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        return f"mutated:{args.text}"
+
+
 class ContextAwareSkill(BaseSkill):
     name = "read_context"
     description = "Inspect runtime context."
@@ -168,6 +178,121 @@ async def test_run_sends_direct_reply_without_tool_calls() -> None:
         {"role": "assistant", "content": "Previous reply"},
         {"role": "user", "content": "Need help"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_hides_mutating_tools_from_untrusted_authors() -> None:
+    fake_completions = FakeCompletions(
+        [build_response(FakeMessage(content="Read-only answer"))]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="Need help",
+            author="octocat",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+            author_association="CONTRIBUTOR",
+        ),
+    )
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[EchoSkill(), MutatingSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    tool_names = [
+        tool["function"]["name"]
+        for tool in fake_completions.calls[0]["tools"]
+    ]
+    assert tool_names == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_run_exposes_mutating_tools_to_trusted_authors() -> None:
+    fake_completions = FakeCompletions(
+        [build_response(FakeMessage(content="Can act"))]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="Please label this",
+            author="maintainer",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+            author_association="MEMBER",
+        ),
+    )
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[EchoSkill(), MutatingSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    tool_names = [
+        tool["function"]["name"]
+        for tool in fake_completions.calls[0]["tools"]
+    ]
+    assert tool_names == ["echo", "mutate"]
+
+
+@pytest.mark.asyncio
+async def test_run_rejects_mutating_tool_calls_from_untrusted_authors() -> None:
+    fake_completions = FakeCompletions(
+        [
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction(name="mutate", arguments='{"text":"close it"}'),
+                        )
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content="Recovered")),
+        ]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="Close this",
+            author="octocat",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+            author_association="NONE",
+        ),
+    )
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[MutatingSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    assert fake_completions.calls[1]["messages"][-1]["content"] == (
+        "Tool error: Tool 'mutate' is not available for author association 'NONE'."
+    )
 
 
 @pytest.mark.asyncio
@@ -344,6 +469,40 @@ async def test_run_sets_runtime_context_for_skills() -> None:
     assert '"issue_number": 12' in tool_message["content"]
     assert '"memory": "sticky"' in tool_message["content"]
     assert get_skill_context() == {}
+
+
+@pytest.mark.asyncio
+async def test_run_truncates_large_tool_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RYOBOT_MAX_TOOL_RESULT_CHARS", "10")
+    fake_completions = FakeCompletions(
+        [
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction(name="echo", arguments='{"text":"abcdefghijklmnop"}'),
+                        )
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content="Done")),
+        ]
+    )
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    plugin = FakePlugin()
+    ryo_agent = RyoAgent(
+        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=[EchoSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+    )
+
+    await ryo_agent.run(raw_event={})
+
+    tool_message = fake_completions.calls[1]["messages"][-1]["content"]
+    assert tool_message.startswith("echo:abcde")
+    assert "[truncated:" in tool_message
 
 
 @pytest.mark.asyncio

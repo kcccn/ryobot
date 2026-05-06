@@ -189,7 +189,7 @@ def test_convert_response_thinking_block() -> None:
     result = _convert_response(resp)
 
     content = result.choices[0].message.content or ""
-    assert "[思考]hmm, let me analyze this[/思考]" in content
+    assert "hmm, let me analyze this" not in content
     assert "Here is my conclusion." in content
 
 
@@ -197,8 +197,7 @@ def test_convert_response_thinking_only() -> None:
     resp = _mock_response([_MockThinking("deep thought")], stop_reason="end_turn")
     result = _convert_response(resp)
 
-    content = result.choices[0].message.content or ""
-    assert "[思考]deep thought[/思考]" in content
+    assert result.choices[0].message.content is None
     assert result.stop_reason == "end_turn"
 
 

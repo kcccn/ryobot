@@ -132,6 +132,29 @@ async def test_read_code_diff_requests_diff_media_type() -> None:
     assert result == "diff --git a/a.py b/a.py"
 
 
+@pytest.mark.asyncio
+async def test_read_code_diff_truncates_large_diff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RYOBOT_MAX_DIFF_CHARS", "8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="diff-content")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = ReadCodeDiff(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(pr_number=55)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert result.startswith("diff-con")
+    assert "[truncated:" in result
+
+
 def test_github_skills_expose_complete_tool_definitions() -> None:
     client = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
@@ -362,7 +385,9 @@ async def test_comment_on_pr_uses_explicit_pr_number() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_workflow_posts_to_dispatches_endpoint() -> None:
+async def test_dispatch_workflow_posts_to_dispatches_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RYOBOT_ALLOWED_WORKFLOWS", "ci.yml")
+    monkeypatch.setenv("RYOBOT_ALLOWED_WORKFLOW_REFS", "feature/branch")
     captured: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -393,7 +418,8 @@ async def test_dispatch_workflow_posts_to_dispatches_endpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_workflow_passes_inputs_in_body() -> None:
+async def test_dispatch_workflow_passes_inputs_in_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RYOBOT_ALLOWED_WORKFLOWS", "test.yml")
     captured: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -414,6 +440,48 @@ async def test_dispatch_workflow_passes_inputs_in_body() -> None:
 
     body = json.loads(captured["body"])
     assert body["inputs"] == {"suite": "unit"}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_workflow_is_disabled_without_allowlist() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("dispatch endpoint should not be called")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = DispatchWorkflow(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(workflow_id="ci.yml", ref="main")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Workflow dispatch is disabled" in result
+
+
+@pytest.mark.asyncio
+async def test_dispatch_workflow_rejects_disallowed_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RYOBOT_ALLOWED_WORKFLOWS", "ci.yml")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("dispatch endpoint should not be called")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = DispatchWorkflow(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(workflow_id="ci.yml", ref="feature/branch")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "ref 'feature/branch' is not allowed" in result
 
 
 @pytest.mark.asyncio

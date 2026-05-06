@@ -28,6 +28,7 @@ from platforms.llm import AnthropicAdapter
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_COOLDOWN_SECONDS = 120
+DEFAULT_MARKER_AUTHOR_LOGINS = frozenset({"github-actions[bot]"})
 
 BOT_IDENTITY = os.getenv("BOT_IDENTITY", "architect")
 
@@ -35,14 +36,27 @@ BOT_IDENTITY = os.getenv("BOT_IDENTITY", "architect")
 def _contains_own_marker(payload: dict[str, Any], identity: str) -> bool:
     """Return True if any body field in the payload contains this bot's marker."""
     marker = f"<!-- ryo:{identity}:"
-    bodies: list[str] = []
+    trusted_marker_authors = _marker_author_logins_from_env()
+    body_sources: list[tuple[str, str]] = []
     if "comment" in payload:
-        bodies.append(str((payload.get("comment") or {}).get("body") or ""))
+        comment = payload.get("comment") or {}
+        body_sources.append((
+            str(comment.get("body") or ""),
+            str((comment.get("user") or {}).get("login") or ""),
+        ))
     if "issue" in payload:
-        bodies.append(str((payload.get("issue") or {}).get("body") or ""))
+        issue = payload.get("issue") or {}
+        body_sources.append((
+            str(issue.get("body") or ""),
+            str((issue.get("user") or {}).get("login") or ""),
+        ))
     if "pull_request" in payload:
-        bodies.append(str((payload.get("pull_request") or {}).get("body") or ""))
-    return any(marker in body for body in bodies)
+        pull_request = payload.get("pull_request") or {}
+        body_sources.append((
+            str(pull_request.get("body") or ""),
+            str((pull_request.get("user") or {}).get("login") or ""),
+        ))
+    return any(marker in body and login in trusted_marker_authors for body, login in body_sources)
 
 
 def main() -> None:
@@ -106,9 +120,10 @@ async def _run(
             AddLabels(token=github_token, client=http_client),
             CloseIssue(token=github_token, client=http_client),
             CommentOnPR(token=github_token, client=http_client),
-            DispatchWorkflow(token=github_token, client=http_client),
             ReadWorkflowRun(token=github_token, client=http_client),
         ]
+        if _workflow_dispatch_enabled():
+            all_skills.append(DispatchWorkflow(token=github_token, client=http_client))
         allow = bot.skill_filter
         skills = [s for s in all_skills if allow is None or s.name in allow]
         llm_client: Any
@@ -149,6 +164,18 @@ def _require_env(name: str) -> str:
     if not value:
         raise ValueError(f"Missing required environment variable: {name}")
     return value
+
+
+def _marker_author_logins_from_env() -> frozenset[str]:
+    raw = os.getenv("RYOBOT_MARKER_AUTHOR_LOGINS")
+    if not raw:
+        return DEFAULT_MARKER_AUTHOR_LOGINS
+    values = {item.strip() for item in raw.split(",") if item.strip()}
+    return frozenset(values) if values else DEFAULT_MARKER_AUTHOR_LOGINS
+
+
+def _workflow_dispatch_enabled() -> bool:
+    return bool(os.getenv("RYOBOT_ALLOWED_WORKFLOWS", "").strip())
 
 
 if __name__ == "__main__":

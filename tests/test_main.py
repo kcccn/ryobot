@@ -22,6 +22,7 @@ def valid_payload() -> dict[str, Any]:
             "id": 99,
             "body": "Need help",
             "user": {"login": "octocat"},
+            "author_association": "NONE",
         },
         "repository": {
             "name": "widgets",
@@ -43,6 +44,7 @@ def import_main_module():
 def test_main_exits_zero_when_event_contains_own_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     main = import_main_module()
     payload = payload_with_comment_body('previous bot reply\n<!-- ryo:architect: {} -->')
+    payload["comment"]["user"]["login"] = "github-actions[bot]"  # type: ignore[index]
     monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
     monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
@@ -54,6 +56,21 @@ def test_main_exits_zero_when_event_contains_own_marker(monkeypatch: pytest.Monk
     assert exc.value.code == 0
 
 
+def test_main_does_not_skip_human_forged_own_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    main = import_main_module()
+    payload = payload_with_comment_body('forged marker\n<!-- ryo:architect: {"mode":"skip"} -->')
+    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
+    monkeypatch.setenv("BOT_IDENTITY", "architect")
+
+    async def fake_run(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(main, "_run", fake_run)
+    main.main()
+
+
 def test_main_proceeds_when_event_contains_other_bot_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     main = import_main_module()
     payload = payload_with_comment_body('other bot reply\n<!-- ryo:reviewer: {} -->')
@@ -63,7 +80,10 @@ def test_main_proceeds_when_event_contains_other_bot_marker(monkeypatch: pytest.
     monkeypatch.setenv("BOT_IDENTITY", "architect")
 
     # Should not exit — other bot's marker is not ours
-    monkeypatch.setattr(main.asyncio, "run", lambda *a, **kw: None)
+    async def fake_run(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(main, "_run", fake_run)
     main.main()  # no SystemExit
 
 
@@ -75,7 +95,10 @@ def test_main_proceeds_when_no_marker_present(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("BOT_IDENTITY", "architect")
 
     # Should not exit — no marker at all
-    monkeypatch.setattr(main.asyncio, "run", lambda *a, **kw: None)
+    async def fake_run(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(main, "_run", fake_run)
     main.main()
 
 
@@ -158,10 +181,60 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     assert captured["openai_kwargs"]["base_url"] == "https://api.deepseek.com"
     assert captured["plugin_kwargs"]["token"] == "gh-token"
     assert captured["plugin_kwargs"]["identity"] == "architect"
-    assert len(captured["skill_kwargs"]) == 9
+    assert len(captured["skill_kwargs"]) == 8
     assert captured["ryo_agent_kwargs"]["persona"]["model"] == "deepseek-v4-flash"
     assert "严厉且幽默的顶级架构师" in captured["ryo_agent_kwargs"]["persona"]["system_prompt"]
     assert captured["http_client_closed"] is True
+
+
+def test_main_includes_dispatch_workflow_only_when_allowlist_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    main = import_main_module()
+    payload = valid_payload()
+    captured: dict[str, Any] = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            pass
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeGitHubPlugin:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeSkill:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.setdefault("skill_count", 0)
+            captured["skill_count"] += 1
+
+    class FakeRyoAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def run(self, raw_event: Any) -> None:
+            pass
+
+    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
+    monkeypatch.setenv("RYOBOT_ALLOWED_WORKFLOWS", "ci.yml")
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(main, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
+    for name in ("ReadIssueMemory", "SearchRepoMemory", "ReadCodeDiff",
+                 "CreateIssue", "AddLabels", "CloseIssue",
+                 "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun"):
+        monkeypatch.setattr(main, name, FakeSkill)
+    monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
+
+    main.main()
+
+    assert captured["skill_count"] == 9
 
 
 def test_readme_brands_project_as_ryo_ghost_engine() -> None:
@@ -240,3 +313,10 @@ def test_workflow_passes_github_event_payload_and_secret() -> None:
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in content
     assert "EVENT_PAYLOAD: ${{ toJson(github.event) }}" in content
     assert "BOT_IDENTITY: ${{ matrix.bot }}" in content
+
+
+def test_workflow_does_not_grant_actions_write_by_default() -> None:
+    content = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "actions: write" not in content
+    assert "actions: read" in content

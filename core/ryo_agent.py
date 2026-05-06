@@ -11,6 +11,8 @@ from .plugins import BasePlugin, HistorySnapshot, PluginEvent
 from .skills import BaseSkill, clear_skill_context, set_skill_context
 
 DEFAULT_FALLBACK_MESSAGE = "I'm sorry, but I couldn't complete your request right now."
+TRUSTED_MUTATION_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+DEFAULT_MAX_TOOL_RESULT_CHARS = 20000
 
 
 class ChatMessage(TypedDict, total=False):
@@ -64,7 +66,8 @@ class RyoAgent:
             *history.messages,  # type: ignore[typeddict-item]
             {"role": "user", "content": event.message},
         ]
-        tools = [skill.get_tool_definition() for skill in self.skills]
+        available_skills = self._available_skills_for_event(event)
+        tools = [skill.get_tool_definition() for skill in available_skills]
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
 
@@ -83,7 +86,7 @@ class RyoAgent:
                         }
                     )
                     for tool_call in tool_calls:
-                        tool_result = await self._execute_tool_call(tool_call)
+                        tool_result = await self._execute_tool_call(tool_call, event=event)
                         messages.append(
                             {
                                 "role": "tool",
@@ -120,11 +123,21 @@ class RyoAgent:
             request["tool_choice"] = "auto"
         return await self.llm_client.chat.completions.create(**request)
 
-    async def _execute_tool_call(self, tool_call: Any) -> str:
+    def _available_skills_for_event(self, event: PluginEvent) -> list[BaseSkill]:
+        if _is_trusted_mutation_author(event.author_association):
+            return self.skills
+        return [skill for skill in self.skills if not skill.mutates_state]
+
+    async def _execute_tool_call(self, tool_call: Any, *, event: PluginEvent) -> str:
         tool_name = getattr(getattr(tool_call, "function", None), "name", "")
         skill = self._skills_by_name.get(tool_name)
         if skill is None:
             return f"Tool error: Unknown tool '{tool_name}'."
+        if skill.mutates_state and not _is_trusted_mutation_author(event.author_association):
+            return (
+                f"Tool error: Tool '{tool_name}' is not available for author "
+                f"association '{event.author_association}'."
+            )
 
         try:
             raw_arguments = getattr(getattr(tool_call, "function", None), "arguments", "{}")
@@ -144,8 +157,11 @@ class RyoAgent:
             return f"Tool error: Execution failed for tool '{tool_name}': {exc}."
 
         if isinstance(result, str):
-            return result
-        return json.dumps(result, ensure_ascii=False)
+            return _truncate_text(result, _max_chars_from_env("RYOBOT_MAX_TOOL_RESULT_CHARS", DEFAULT_MAX_TOOL_RESULT_CHARS))
+        return _truncate_text(
+            json.dumps(result, ensure_ascii=False),
+            _max_chars_from_env("RYOBOT_MAX_TOOL_RESULT_CHARS", DEFAULT_MAX_TOOL_RESULT_CHARS),
+        )
 
     @staticmethod
     def _parse_tool_arguments(arguments: Any) -> dict[str, Any]:
@@ -194,3 +210,27 @@ class RyoAgent:
                 "arguments": getattr(function, "arguments", "{}"),
             },
         }
+
+
+def _is_trusted_mutation_author(author_association: str) -> bool:
+    return author_association.upper() in TRUSTED_MUTATION_AUTHOR_ASSOCIATIONS
+
+
+def _max_chars_from_env(name: str, default: int) -> int:
+    import os
+
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(value, 0)
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return f"{text[:max_chars]}\n[truncated: {omitted} chars omitted]"

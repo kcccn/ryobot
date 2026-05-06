@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -26,7 +27,7 @@ class ReadCodeDiffArgs(BaseModel):
 class CreateIssueArgs(BaseModel):
     title: str
     body: str = ""
-    labels: list[str] = []
+    labels: list[str] = Field(default_factory=list)
 
 
 class AddLabelsArgs(BaseModel):
@@ -46,7 +47,11 @@ class CommentOnPRArgs(BaseModel):
 class DispatchWorkflowArgs(BaseModel):
     workflow_id: str
     ref: str = "main"
-    inputs: dict[str, str] = {}
+    inputs: dict[str, str] = Field(default_factory=dict)
+
+
+DEFAULT_MAX_DIFF_CHARS = 50000
+DEFAULT_MAX_ISSUE_BODY_CHARS = 12000
 
 
 class ReadWorkflowRunArgs(BaseModel):
@@ -87,11 +92,15 @@ class ReadIssueMemory(GitHubSkillBase):
         issue = await self._api.get_json(
             f"/repos/{context['owner']}/{context['repo']}/issues/{context['issue_number']}"
         )
+        body = _truncate_text(
+            str(issue.get("body") or ""),
+            _max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_ISSUE_BODY_CHARS),
+        )
         return "\n".join(
             [
                 f"Issue #{issue['number']}: {issue['title']}",
                 f"State: {issue['state']}",
-                f"Body: {issue.get('body') or ''}",
+                f"Body: {body}",
             ]
         )
 
@@ -127,9 +136,13 @@ class ReadCodeDiff(GitHubSkillBase):
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
-        return await self._api.get_text(
+        diff = await self._api.get_text(
             f"/repos/{context['owner']}/{context['repo']}/pulls/{args.pr_number}",
             accept="application/vnd.github.v3.diff",
+        )
+        return _truncate_text(
+            diff,
+            _max_chars_from_env("RYOBOT_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
         )
 
 
@@ -137,6 +150,7 @@ class CreateIssue(GitHubSkillBase):
     name = "create_issue"
     description = "Create a new GitHub issue in the current repository."
     args_model = CreateIssueArgs
+    mutates_state = True
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
@@ -156,6 +170,7 @@ class AddLabels(GitHubSkillBase):
     name = "add_labels"
     description = "Add labels to a GitHub issue."
     args_model = AddLabelsArgs
+    mutates_state = True
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
@@ -172,6 +187,7 @@ class CloseIssue(GitHubSkillBase):
     name = "close_issue"
     description = "Close a GitHub issue."
     args_model = CloseIssueArgs
+    mutates_state = True
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
@@ -188,6 +204,7 @@ class CommentOnPR(GitHubSkillBase):
     name = "comment_on_pr"
     description = "Post a comment on a GitHub pull request."
     args_model = CommentOnPRArgs
+    mutates_state = True
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
@@ -209,10 +226,19 @@ class DispatchWorkflow(GitHubSkillBase):
         "defined in the repository."
     )
     args_model = DispatchWorkflowArgs
+    mutates_state = True
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
+        allowed_workflows = _csv_env("RYOBOT_ALLOWED_WORKFLOWS")
+        if not allowed_workflows:
+            return "Workflow dispatch is disabled because RYOBOT_ALLOWED_WORKFLOWS is not configured."
+        if args.workflow_id not in allowed_workflows:
+            return f"Workflow '{args.workflow_id}' is not allowed for dispatch."
+        allowed_refs = _csv_env("RYOBOT_ALLOWED_WORKFLOW_REFS") or {"main"}
+        if args.ref not in allowed_refs:
+            return f"Workflow ref '{args.ref}' is not allowed for dispatch."
         inputs = args.inputs if isinstance(args.inputs, dict) else {}
         await self._api.post_no_content(
             f"/repos/{context['owner']}/{context['repo']}/actions/workflows/{args.workflow_id}/dispatches",
@@ -262,3 +288,26 @@ class ReadWorkflowRun(GitHubSkillBase):
                 f"URL: {run.get('html_url')}",
             ]
         )
+
+
+def _csv_env(name: str) -> set[str]:
+    raw = os.getenv(name, "")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def _max_chars_from_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(value, 0)
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return f"{text[:max_chars]}\n[truncated: {omitted} chars omitted]"

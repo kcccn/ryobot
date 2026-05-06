@@ -12,6 +12,7 @@ class PluginEvent(BaseModel):
     event_id: str
     message: str
     author: str
+    author_association: str = "NONE"
     issue_id: str
     issue_number: int
     comment_id: int

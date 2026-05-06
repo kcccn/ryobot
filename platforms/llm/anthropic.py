@@ -139,9 +139,7 @@ def _convert_response(response: Any) -> "_FakeResponse":
                 input_obj=getattr(block, "input", {}),
             ))
         elif block_type == "thinking":
-            thinking_text = getattr(block, "thinking", "")
-            if thinking_text:
-                text_parts.append(f"[思考]{thinking_text}[/思考]")
+            continue
 
     text = "\n".join(text_parts) if text_parts else ""
     message = _FakeMessage(

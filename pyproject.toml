@@ -26,4 +26,4 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
-include = ["core*", "platforms*"]
+include = ["bots*", "core*", "platforms*"]

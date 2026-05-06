@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ _RYO_ANY_MARKER_PATTERN = re.compile(
     r"<!--\s*ryo:\w+:.*?-->",
     re.DOTALL,
 )
+DEFAULT_MARKER_AUTHOR_LOGINS = frozenset({"github-actions[bot]"})
+DEFAULT_MAX_HISTORY_COMMENT_CHARS = 12000
 
 
 class GitHubPlugin(BasePlugin):
@@ -32,6 +35,7 @@ class GitHubPlugin(BasePlugin):
     ) -> None:
         self._api = GitHubApiClient(token=token, client=client, api_base_url=api_base_url)
         self._identity = identity
+        self._marker_author_logins = _marker_author_logins_from_env()
         self._state_pattern = re.compile(
             rf"<!--\s*ryo:{re.escape(identity)}:\s*(?P<payload>\{{.*?\}})\s*-->",
             re.DOTALL,
@@ -80,6 +84,7 @@ class GitHubPlugin(BasePlugin):
             event_id=f"github:{owner}/{repo}:issue:{issue_number}:comment:{comment_id}",
             message=str(comment["body"]),
             author=str((comment.get("user") or {})["login"]),
+            author_association=str(comment.get("author_association") or "NONE"),
             issue_id=str(issue["id"]),
             issue_number=int(issue_number),
             comment_id=int(comment_id),
@@ -99,11 +104,16 @@ class GitHubPlugin(BasePlugin):
         message = f"[Issue #{issue_number} {label}]\n\n{issue['title']}"
         if body:
             message += f"\n\n{body}"
+        message = _truncate_text(
+            message,
+            _max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
+        )
 
         return PluginEvent(
             event_id=f"github:{owner}/{repo}:issue:{issue_number}:event:{action}",
             message=message,
             author=str((issue.get("user") or {})["login"]),
+            author_association=str(issue.get("author_association") or "NONE"),
             issue_id=str(issue["id"]),
             issue_number=int(issue_number),
             comment_id=0,
@@ -123,11 +133,16 @@ class GitHubPlugin(BasePlugin):
         message = f"[PR #{pr_number} {label}]\n\n{pr_['title']}"
         if body:
             message += f"\n\n{body}"
+        message = _truncate_text(
+            message,
+            _max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
+        )
 
         return PluginEvent(
             event_id=f"github:{owner}/{repo}:pr:{pr_number}:event:{action}",
             message=message,
             author=str((pr_.get("user") or {})["login"]),
+            author_association=str(pr_.get("author_association") or "NONE"),
             issue_id=str(pr_["id"]),
             issue_number=int(pr_number),
             comment_id=0,
@@ -148,6 +163,7 @@ class GitHubPlugin(BasePlugin):
             event_id=f"github:{owner}/{repo}:pr:{pr_number}:comment:{comment_id}",
             message=str(comment["body"]),
             author=str((comment.get("user") or {})["login"]),
+            author_association=str(comment.get("author_association") or "NONE"),
             issue_id=str(pr_["id"]),
             issue_number=int(pr_number),
             comment_id=int(comment_id),
@@ -169,10 +185,14 @@ class GitHubPlugin(BasePlugin):
                 continue
 
             body = str(comment.get("body") or "")
-            clean_body = _RYO_ANY_MARKER_PATTERN.sub("", body).strip()
+            clean_body = _truncate_text(
+                _RYO_ANY_MARKER_PATTERN.sub("", body).strip(),
+                _max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
+            )
+            is_trusted_marker = self._is_trusted_marker_comment(comment)
 
             our_match = self._state_pattern.search(body)
-            if our_match:
+            if our_match and is_trusted_marker:
                 messages.append({"role": "assistant", "content": clean_body})
                 try:
                     subconscious = json.loads(our_match.group("payload"))
@@ -181,7 +201,7 @@ class GitHubPlugin(BasePlugin):
                 last_bot_comment_at = str(comment.get("created_at") or "")
                 continue
 
-            if _RYO_ANY_MARKER_PATTERN.search(body):
+            if _RYO_ANY_MARKER_PATTERN.search(body) and is_trusted_marker:
                 messages.append({"role": "assistant", "content": clean_body})
                 continue
 
@@ -210,6 +230,10 @@ class GitHubPlugin(BasePlugin):
     async def aclose(self) -> None:
         await self._api.aclose()
 
+    def _is_trusted_marker_comment(self, comment: dict[str, Any]) -> bool:
+        login = str((comment.get("user") or {}).get("login") or "")
+        return login in self._marker_author_logins
+
 
 _ACTION_LABELS: dict[str, str] = {
     "opened": "opened",
@@ -221,3 +245,29 @@ _ACTION_LABELS: dict[str, str] = {
 
 def _action_label(action: str) -> str:
     return _ACTION_LABELS.get(action, action)
+
+
+def _marker_author_logins_from_env() -> frozenset[str]:
+    raw = os.getenv("RYOBOT_MARKER_AUTHOR_LOGINS")
+    if not raw:
+        return DEFAULT_MARKER_AUTHOR_LOGINS
+    values = {item.strip() for item in raw.split(",") if item.strip()}
+    return frozenset(values) if values else DEFAULT_MARKER_AUTHOR_LOGINS
+
+
+def _max_chars_from_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(value, 0)
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return f"{text[:max_chars]}\n[truncated: {omitted} chars omitted]"

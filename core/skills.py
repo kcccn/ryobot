@@ -53,6 +53,7 @@ class BaseSkill(ABC):
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""
     args_model: ClassVar[type[BaseModel]] = BaseModel
+    mutates_state: ClassVar[bool] = False
 
     def get_json_schema(self) -> dict[str, Any]:
         """Expose a vendor-neutral JSON Schema derived from Pydantic."""
