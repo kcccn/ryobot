@@ -63,9 +63,16 @@ class _AnthropicCompletions:
             "max_tokens": kwargs.get("max_tokens", 4096),
         }
         if system_parts:
-            request["system"] = "\n\n".join(system_parts)
+            request["system"] = [{
+                "type": "text",
+                "text": "\n\n".join(system_parts),
+                "cache_control": {"type": "ephemeral"},
+            }]
         if tools:
-            request["tools"] = [_convert_tool_def(t) for t in tools]
+            anthropic_tools = [_convert_tool_def(t) for t in tools]
+            if anthropic_tools:
+                anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            request["tools"] = anthropic_tools
 
         response = await self._client.messages.create(**request)
         return _convert_response(response)

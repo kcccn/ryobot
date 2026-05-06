@@ -13,12 +13,19 @@ from platforms.github.skills import (
     AddLabels,
     CloseIssue,
     CommentOnPR,
+    CreateBranch,
     CreateIssue,
+    CreatePullRequest,
     DispatchWorkflow,
+    ListFiles,
+    ListOpenIssues,
     ReadCodeDiff,
+    ReadFile,
     ReadIssueMemory,
     ReadWorkflowRun,
+    SearchCode,
     SearchRepoMemory,
+    WriteFile,
 )
 
 
@@ -574,3 +581,341 @@ async def test_read_workflow_run_returns_error_when_no_identifier() -> None:
         await client.aclose()
 
     assert "Must provide either workflow_id or run_id." == result
+
+
+# ---- list_open_issues ----
+
+
+@pytest.mark.asyncio
+async def test_list_open_issues_returns_open_issues() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "number": 1,
+                    "title": "Bug fix",
+                    "state": "open",
+                    "labels": [{"name": "bug"}],
+                    "user": {"login": "dev1"},
+                    "updated_at": "2025-01-01T00:00:00Z",
+                    "html_url": "https://github.test/acme/widgets/issues/1",
+                },
+            ],
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ListOpenIssues(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute()
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "/repos/acme/widgets/issues" in captured["url"]
+    assert "#1: Bug fix [open]" in result
+    assert "labels: bug" in result
+
+
+@pytest.mark.asyncio
+async def test_list_open_issues_skips_pull_requests() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"number": 1, "title": "Issue", "state": "open", "labels": [], "user": {"login": "a"}, "updated_at": "", "html_url": ""},
+                {"number": 2, "title": "PR", "pull_request": {}, "labels": [], "user": {"login": "b"}, "updated_at": "", "html_url": ""},
+            ],
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ListOpenIssues(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute()
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "#1: Issue" in result
+    assert "PR" not in result
+
+
+# ---- list_files ----
+
+
+@pytest.mark.asyncio
+async def test_list_files_returns_directory_contents() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json=[
+                {"name": "core", "type": "dir", "size": 0},
+                {"name": "main.py", "type": "file", "size": 1024},
+            ],
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ListFiles(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute()
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "/repos/acme/widgets/contents/" in captured["url"]
+    assert "core" in result
+    assert "main.py" in result
+
+
+# ---- read_file ----
+
+
+@pytest.mark.asyncio
+async def test_read_file_returns_decoded_content() -> None:
+    import base64
+
+    content = "def hello():\n    return 'world'\n"
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "name": "hello.py",
+                "type": "file",
+                "size": len(content),
+                "content": encoded,
+                "encoding": "base64",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReadFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(path="src/hello.py")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "def hello():" in result
+    assert "world" in result
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_directories() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"name": "x", "type": "file", "size": 0}])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReadFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(path="src")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Cannot read" in result
+
+
+# ---- search_code ----
+
+
+@pytest.mark.asyncio
+async def test_search_code_returns_results() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "total_count": 2,
+                "items": [
+                    {"path": "src/main.py", "html_url": "https://github.test/acme/widgets/blob/main/src/main.py", "repository": {"full_name": "acme/widgets"}},
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = SearchCode(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(query="hello")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "hello" in captured["url"]
+    assert "widgets" in captured["url"]
+    assert "src/main.py" in result
+
+
+@pytest.mark.asyncio
+async def test_search_code_returns_empty_message() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"total_count": 0, "items": []})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = SearchCode(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(query="nonexistent")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "No code results found" in result
+
+
+# ---- write_file ----
+
+
+@pytest.mark.asyncio
+async def test_write_file_creates_new_file() -> None:
+    import base64
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        body = json.loads(request.content)
+        captured["body"] = body
+        return httpx.Response(
+            201,
+            json={
+                "content": {"html_url": "https://github.test/acme/widgets/blob/main/new.py"},
+                "commit": {"sha": "abc123"},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = WriteFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(path="new.py", content="print('hi')", message="Add new.py")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["method"] == "PUT"
+    assert base64.b64decode(captured["body"]["content"]).decode("utf-8") == "print('hi')"
+    assert captured["body"]["message"] == "Add new.py"
+    assert "Created file" in result
+
+
+@pytest.mark.asyncio
+async def test_write_file_updates_existing_file() -> None:
+    call_count = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # First call: try to get existing file
+            return httpx.Response(200, json={"sha": "oldsha", "type": "file", "size": 10})
+        # Second call: PUT with sha
+        return httpx.Response(
+            200,
+            json={
+                "content": {"html_url": "https://github.test/acme/widgets/blob/main/existing.py"},
+                "commit": {"sha": "def456"},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = WriteFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(path="existing.py", content="updated", message="Update")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert call_count[0] == 2
+    assert "Updated file" in result
+
+
+# ---- create_branch ----
+
+
+@pytest.mark.asyncio
+async def test_create_branch_creates_new_branch() -> None:
+    captured: dict[str, Any] = {}
+    call_order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        call_order.append(url)
+        body = json.loads(request.content) if request.content else None
+        captured.setdefault("bodies", []).append(body)
+
+        if url.endswith("/repos/acme/widgets") and request.method == "GET":
+            return httpx.Response(200, json={"default_branch": "main"})
+        if "/git/refs/heads/main" in url:
+            return httpx.Response(200, json={"object": {"sha": "basesha123"}})
+        if "/git/refs" in url:
+            return httpx.Response(201, json={"url": "https://api.github.test/repos/acme/widgets/git/refs/heads/feature-x"})
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = CreateBranch(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(branch="feature-x")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Created branch 'feature-x'" in result
+
+
+# ---- create_pull_request ----
+
+
+@pytest.mark.asyncio
+async def test_create_pull_request_creates_pr() -> None:
+    captured: dict[str, Any] = {}
+    call_order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        call_order.append(url)
+        body = json.loads(request.content) if request.content else None
+        captured.setdefault("bodies", []).append(body)
+
+        if url.endswith("/repos/acme/widgets") and request.method == "GET":
+            return httpx.Response(200, json={"default_branch": "main"})
+        if "/pulls" in url:
+            return httpx.Response(
+                201,
+                json={
+                    "number": 42,
+                    "title": "Add feature X",
+                    "html_url": "https://github.test/acme/widgets/pull/42",
+                    "state": "open",
+                },
+            )
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = CreatePullRequest(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(title="Add feature X", head="feature-x")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Created PR #42" in result
+    assert "https://github.test/acme/widgets/pull/42" in result

@@ -27,7 +27,10 @@ class GitHubApiClient:
         self._owns_client = client is None
         self._token = resolved_token
         self._base_url = (api_base_url or os.getenv("GITHUB_API_BASE_URL") or DEFAULT_GITHUB_API_BASE_URL).rstrip("/")
-        self._client = client or httpx.AsyncClient(base_url=self._base_url)
+        self._client = client or httpx.AsyncClient(
+            base_url=self._base_url,
+            timeout=httpx.Timeout(30.0, connect=10.0),
+        )
 
     async def get_json(
         self,

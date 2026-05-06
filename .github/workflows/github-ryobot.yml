@@ -30,6 +30,7 @@ permissions:
   issues: write
   pull-requests: write
   actions: write
+  contents: write
 
 jobs:
   run-ryobot:

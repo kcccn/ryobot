@@ -13,6 +13,7 @@ import httpx
 from core.plugins import BasePlugin, HistorySnapshot, PluginEvent
 
 from .client import GitHubApiClient
+from .utils import max_chars_from_env, truncate_text
 
 _RYO_ANY_MARKER_PATTERN = re.compile(
     r"<!--\s*ryo:\w+:.*?-->",
@@ -115,9 +116,9 @@ class GitHubPlugin(BasePlugin):
         message = f"[Issue #{issue_number} {label}]\n\n{issue['title']}"
         if body:
             message += f"\n\n{body}"
-        message = _truncate_text(
+        message = truncate_text(
             message,
-            _max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
+            max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
         )
 
         return PluginEvent(
@@ -144,9 +145,9 @@ class GitHubPlugin(BasePlugin):
         message = f"[PR #{pr_number} {label}]\n\n{pr_['title']}"
         if body:
             message += f"\n\n{body}"
-        message = _truncate_text(
+        message = truncate_text(
             message,
-            _max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
+            max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
         )
 
         return PluginEvent(
@@ -235,9 +236,9 @@ class GitHubPlugin(BasePlugin):
                 continue
 
             body = str(comment.get("body") or "")
-            clean_body = _truncate_text(
+            clean_body = truncate_text(
                 _RYO_ANY_MARKER_PATTERN.sub("", body).strip(),
-                _max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
+                max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_HISTORY_COMMENT_CHARS),
             )
             is_trusted_marker = self._is_trusted_marker_comment(comment)
 
@@ -305,21 +306,3 @@ def _marker_author_logins_from_env() -> frozenset[str]:
         return DEFAULT_MARKER_AUTHOR_LOGINS
     values = {item.strip() for item in raw.split(",") if item.strip()}
     return frozenset(values) if values else DEFAULT_MARKER_AUTHOR_LOGINS
-
-
-def _max_chars_from_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(value, 0)
-
-
-def _truncate_text(text: str, max_chars: int) -> str:
-    if max_chars <= 0 or len(text) <= max_chars:
-        return text
-    omitted = len(text) - max_chars
-    return f"{text[:max_chars]}\n[truncated: {omitted} chars omitted]"

@@ -45,6 +45,7 @@ permissions:
   issues: write
   pull-requests: write
   actions: write
+  contents: write
 
 jobs:
   run-ryobot:
@@ -120,9 +121,9 @@ Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions m
 | Bot Identity | 人格 | 模型 | 风格 |
 |---|---|---|---|
 | `architect` | Ryo Architect | DeepSeek V4 Flash | 严厉且幽默的顶级架构师，关注抽象质量和代码品味 |
-| `reviewer` | Ryo Reviewer | Claude Sonnet 4.6 | 挑剔的代码审查者，关注边界情况、错误处理与可维护性 |
+| `reviewer` | Ryo Reviewer | DeepSeek V4 Flash | 挑剔的代码审查者，关注边界情况、错误处理与可维护性 |
 | `pm` | Ryo PM | DeepSeek V4 Flash | 关注用户体验和产品逻辑一致性的产品经理 |
-| `explorer` | Ryo Explorer | DeepSeek Reasoner | 充满好奇心的黑客，热衷探索架构可能性与创造性替代方案 |
+| `explorer` | Ryo Explorer | DeepSeek V4 Flash | 充满好奇心的黑客，热衷探索架构可能性与创造性替代方案 |
 
 核心机制：
 - **身份标记**：每个 bot 的评论末尾嵌入 `<!-- ryo:{identity}: -->` 隐藏标记
@@ -157,6 +158,13 @@ Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions m
 | `MAX_ITERATIONS` | `100` | ReAct 循环最大工具调用轮数 |
 | `LLM_MODEL` | `deepseek-v4-flash` | 覆盖默认模型（对使用 OpenAI 兼容 API 的 bot 有效） |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | 覆盖默认 API 端点 |
+| `RYOBOT_ALLOWED_WORKFLOWS` | 无（所有 workflow 均需显式允许） | 允许 DispatchWorkflow skill 触发的 workflow 文件名列表，逗号分隔；为空则不启用该 skill |
+| `RYOBOT_ALLOWED_WORKFLOW_REFS` | `main` | 允许 DispatchWorkflow skill 触发的目标分支列表，逗号分隔 |
+| `RYOBOT_MARKER_AUTHOR_LOGINS` | `github-actions[bot]` | 被视为 bot 标记可信来源的 GitHub 用户名，逗号分隔 |
+| `RYOBOT_MAX_TOOL_RESULT_CHARS` | `20000` | 单次工具调用返回结果的最大字符数，超出截断 |
+| `RYOBOT_MAX_HISTORY_COMMENT_CHARS` | `12000` | 历史评论回灌给 LLM 时每条的最大字符数，超出截断 |
+| `RYOBOT_MAX_DIFF_CHARS` | `50000` | `read_code_diff` 读取 PR diff 的最大字符数 |
+| `RYOBOT_MAX_FILE_CHARS` | `30000` | `read_file` 读取文件内容的最大字符数 |
 
 例如在 workflow 中添加：
 

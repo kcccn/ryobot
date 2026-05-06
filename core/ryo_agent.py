@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 from datetime import datetime, timezone
@@ -77,7 +78,7 @@ class RyoAgent:
 
         try:
             for _ in range(self.max_iterations):
-                response = await self._create_completion(messages=messages, tools=tools)
+                response = await self._create_completion_with_retry(messages=messages, tools=tools)
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
 
@@ -128,6 +129,24 @@ class RyoAgent:
             request["tools"] = tools
             request["tool_choice"] = "auto"
         return await self.llm_client.chat.completions.create(**request)
+
+    async def _create_completion_with_retry(
+        self,
+        *,
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]],
+        max_retries: int = 3,
+    ) -> Any:
+        attempt = 0
+        while True:
+            try:
+                return await self._create_completion(messages=messages, tools=tools)
+            except Exception as exc:
+                attempt += 1
+                if attempt > max_retries:
+                    raise
+                delay = 2 ** (attempt - 1)
+                await asyncio.sleep(delay)
 
     def _available_skills_for_event(self, event: PluginEvent) -> list[BaseSkill]:
         if _is_trusted_mutation_author(event.author_association):

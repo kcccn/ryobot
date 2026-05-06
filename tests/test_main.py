@@ -344,6 +344,7 @@ def test_workflow_grants_actions_write_for_patrol_dispatch() -> None:
     content = WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert "actions: write" in content
+    assert "contents: write" in content
     assert "schedule" in content
     assert "GITHUB_REPOSITORY: ${{ github.repository }}" in content
     assert "RYOBOT_ALLOWED_WORKFLOWS: github-ryobot.yml" in content

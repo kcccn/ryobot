@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import httpx
@@ -9,6 +8,7 @@ from pydantic import BaseModel, Field
 from core.skills import BaseSkill, get_skill_context
 
 from .client import GitHubApiClient
+from .utils import csv_env, max_chars_from_env, truncate_text
 
 
 class EmptyArgs(BaseModel):
@@ -133,9 +133,9 @@ class ReadIssueMemory(GitHubSkillBase):
         issue = await self._api.get_json(
             f"/repos/{context['owner']}/{context['repo']}/issues/{context['issue_number']}"
         )
-        body = _truncate_text(
+        body = truncate_text(
             str(issue.get("body") or ""),
-            _max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_ISSUE_BODY_CHARS),
+            max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_ISSUE_BODY_CHARS),
         )
         return "\n".join(
             [
@@ -181,9 +181,9 @@ class ReadCodeDiff(GitHubSkillBase):
             f"/repos/{context['owner']}/{context['repo']}/pulls/{args.pr_number}",
             accept="application/vnd.github.v3.diff",
         )
-        return _truncate_text(
+        return truncate_text(
             diff,
-            _max_chars_from_env("RYOBOT_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
+            max_chars_from_env("RYOBOT_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
         )
 
 
@@ -280,12 +280,12 @@ class DispatchWorkflow(GitHubSkillBase):
                 "to prevent infinite dispatch loops."
             )
 
-        allowed_workflows = _csv_env("RYOBOT_ALLOWED_WORKFLOWS")
+        allowed_workflows = csv_env("RYOBOT_ALLOWED_WORKFLOWS")
         if not allowed_workflows:
             return "Workflow dispatch is disabled because RYOBOT_ALLOWED_WORKFLOWS is not configured."
         if args.workflow_id not in allowed_workflows:
             return f"Workflow '{args.workflow_id}' is not allowed for dispatch."
-        allowed_refs = _csv_env("RYOBOT_ALLOWED_WORKFLOW_REFS") or {"main"}
+        allowed_refs = csv_env("RYOBOT_ALLOWED_WORKFLOW_REFS") or {"main"}
         if args.ref not in allowed_refs:
             return f"Workflow ref '{args.ref}' is not allowed for dispatch."
         inputs = args.inputs if isinstance(args.inputs, dict) else {}
@@ -450,9 +450,9 @@ class ReadFile(GitHubSkillBase):
             decoded = base64.b64decode(content_b64).decode("utf-8")
         except Exception:
             return f"File content could not be decoded as UTF-8: {args.path}"
-        max_chars = _max_chars_from_env("RYOBOT_MAX_FILE_CHARS", 30000)
+        max_chars = max_chars_from_env("RYOBOT_MAX_FILE_CHARS", 30000)
         lines = decoded.split("\n")
-        truncated = _truncate_text(decoded, max_chars)
+        truncated = truncate_text(decoded, max_chars)
         if len(decoded) > max_chars:
             header = f"File: {args.path} ({len(lines)} lines, {size} bytes, truncated to {max_chars} chars)\n\n"
         else:
@@ -620,26 +620,3 @@ class CreatePullRequest(GitHubSkillBase):
             f"URL: {result.get('html_url', '')}\n"
             f"State: {result.get('state', 'unknown')}"
         )
-
-
-def _csv_env(name: str) -> set[str]:
-    raw = os.getenv(name, "")
-    return {item.strip() for item in raw.split(",") if item.strip()}
-
-
-def _max_chars_from_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return max(value, 0)
-
-
-def _truncate_text(text: str, max_chars: int) -> str:
-    if max_chars <= 0 or len(text) <= max_chars:
-        return text
-    omitted = len(text) - max_chars
-    return f"{text[:max_chars]}\n[truncated: {omitted} chars omitted]"

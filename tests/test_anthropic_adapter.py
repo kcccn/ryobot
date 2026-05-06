@@ -265,7 +265,7 @@ async def test_adapter_create_passes_system_prompt(monkeypatch: pytest.MonkeyPat
         ],
     )
 
-    assert captured["system"] == "You are a reviewer."
+    assert captured["system"] == [{"type": "text", "text": "You are a reviewer.", "cache_control": {"type": "ephemeral"}}]
     assert captured["messages"] == [{"role": "user", "content": "Check this PR."}]
 
 
