@@ -425,6 +425,7 @@ async def test_run_sends_fallback_after_max_iterations() -> None:
         skills=[EchoSkill()],
         llm_client=llm_client,
         plugin=plugin,
+        max_iterations=5,
     )
 
     await ryo_agent.run(raw_event={})

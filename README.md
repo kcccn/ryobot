@@ -154,7 +154,7 @@ Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions m
 |---|---|---|
 | `BOT_IDENTITY` | `architect` | bot 身份，可选 `architect` / `reviewer` / `pm` / `explorer` |
 | `COOLDOWN_SECONDS` | `120` | bot 最小响应间隔（秒），设为 `0` 禁用 |
-| `MAX_ITERATIONS` | `5` | ReAct 循环最大工具调用轮数 |
+| `MAX_ITERATIONS` | `100` | ReAct 循环最大工具调用轮数 |
 | `LLM_MODEL` | `deepseek-v4-flash` | 覆盖默认模型（对使用 OpenAI 兼容 API 的 bot 有效） |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | 覆盖默认 API 端点 |
 
@@ -221,7 +221,7 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 | `dispatch_workflow` | 写 | 触发 GitHub Actions workflow |
 | `read_workflow_run` | 读 | 查看 workflow 运行状态和结果 |
 
-单次执行最多进行 `MAX_ITERATIONS` 轮工具调用（默认 5）。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息。
+单次执行最多进行 `MAX_ITERATIONS` 轮工具调用（默认 30）。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息。
 
 ---
 

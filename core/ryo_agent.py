@@ -35,7 +35,7 @@ class RyoAgent:
         llm_client: Any,
         plugin: BasePlugin,
         cooldown_seconds: int = 0,
-        max_iterations: int = 5,
+        max_iterations: int = 100,
         max_tokens: int = 4096,
     ) -> None:
         if "model" not in persona or "system_prompt" not in persona:
