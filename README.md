@@ -8,9 +8,11 @@
 
 ## 快速开始
 
-### 1. 在你的仓库创建 workflow 文件
+> 整个过程只需要在你的目标仓库操作，**不需要克隆或 Fork ryobot 仓库**。
 
-在你的目标仓库（不是 ryobot 仓库）创建 `.github/workflows/ryobot.yml`：
+### 第一步：在你的仓库创建 workflow 文件
+
+进入你的目标仓库，创建 `.github/workflows/ryobot.yml`，粘贴以下内容：
 
 ```yaml
 name: ryobot
@@ -68,41 +70,46 @@ jobs:
         run: ryobot
 ```
 
+这个文件做了什么：
+
+- **定义触发条件**（`on`）：当 Issue 被创建/编辑、Issue 收到评论、PR 被创建/编辑/推送/关闭、PR review 收到评论时运行
+- **声明权限**（`permissions`）：允许 workflow 读写 Issue、PR，以及触发其他 workflow
+- **并行运行 4 个 bot**（`matrix.bot`）：每个 bot 独立执行，互不影响
+- **安装 ryobot**：通过 `pip install git+...` 从 GitHub 直接安装最新版，无需 checkout
+- **运行**：`ryobot` 命令自动读取环境变量，执行 ReAct 循环，将回复写回 Issue/PR
+
 关键要点：
-- **无需 checkout**：源码由 pip 从 GitHub 直接安装
-- **无需 Fork**：你不需要复制任何 Python 文件
-- **`GITHUB_TOKEN` 自动属于运行 workflow 的那个仓库**：bot 读写的 Issue、PR、标签都自动作用于你的仓库
+- **无需 checkout**：源码由 pip 从 GitHub 直接拉取安装
+- **无需 Fork**：你不需要复制任何 Python 文件到你的仓库
+- **`GITHUB_TOKEN` 自动指向你的仓库**：bot 读写的 Issue、PR、标签都作用于你的仓库，而非 ryobot 仓库
+- **如果你只需要部分 bot**：修改 `matrix.bot` 列表即可，例如 `bot: [architect]`
 
-### 2. 添加 Secrets
+### 第二步：添加 API Key
 
-进入你的仓库 → Settings → Secrets and variables → Actions → New repository secret：
+进入你的仓库 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**，至少添加一个：
 
-| Secret | 说明 | 哪些 bot 需要 |
+| Secret | 说明 | 哪些 bot 用到 |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | DeepSeek API Key | architect / pm / explorer |
-| `ANTHROPIC_API_KEY` | Anthropic API Key | reviewer |
+| `DEEPSEEK_API_KEY` | [DeepSeek API Key](https://platform.deepseek.com/api_keys) | architect / pm / explorer |
+| `ANTHROPIC_API_KEY` | [Anthropic API Key](https://console.anthropic.com/) | reviewer |
 
-至少配一个。未配置对应 Key 的 bot 会在运行时失败（不影响其他 bot）。
+未配置对应 Key 的 bot 会在运行时报错退出，但不影响其他 bot 正常工作。
 
-### 3. 触发
+### 第三步：启用 Actions
 
-在任意 Issue 下发一条评论，bot 即被唤醒。进入 Actions 标签页查看 workflow 运行日志。
+如果你的仓库是新建的，GitHub 可能默认禁用了 Actions。进入 **Actions** 标签页，点击 **"I understand my workflows, go ahead and enable them"**。
 
-### 如果只需要部分 bot
+### 第四步：触发并验证
 
-修改 workflow 中的 `matrix.bot` 列表。例如只保留 architect：
+1. 在你的仓库创建一个 Issue，发一条评论
+2. 进入 **Actions** 标签页，应该能看到 `ryobot` workflow 正在运行
+3. 点击 workflow run，展开每个 bot job 的日志，确认安装和运行步骤正常
+4. 几十秒后刷新 Issue 页面，应该能看到 bot 的回复
 
-```yaml
-matrix:
-  bot: [architect]
-```
-
-### 如何验证是否成功
-
-- 在 Issue 下发评论后，进入 Actions 标签页，应看到 `ryobot` workflow 被触发
-- 点击 workflow run 查看日志，各 bot job 并行执行
-- 如果 bot 回复了你的评论，说明一切正常
-- 如果某个 bot 没回复，检查对应的 Secret 是否正确，以及 run log 中的错误信息
+如果没有看到 bot 回复：
+- 检查对应 Secret 是否正确添加
+- 点击失败的 workflow run 查看具体错误信息
+- 确认 bot 不在冷却窗口内（默认 120 秒内只回复一次）
 
 ---
 
