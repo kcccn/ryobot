@@ -19,27 +19,21 @@ name: ryobot
 
 on:
   issues:
-    types:
-      - opened
-      - edited
+    types: [opened, edited]
   issue_comment:
-    types:
-      - created
+    types: [created]
   pull_request:
-    types:
-      - opened
-      - edited
-      - synchronize
-      - closed
+    types: [opened, edited, synchronize, closed]
   pull_request_review_comment:
-    types:
-      - created
+    types: [created]
   workflow_dispatch:
     inputs:
       issue_number:
         description: 'Issue/PR number to trigger bots on'
         required: false
         type: string
+  schedule:
+    - cron: "*/30 * * * *"
 
 permissions:
   issues: write
@@ -48,42 +42,23 @@ permissions:
   contents: write
 
 jobs:
-  run-ryobot:
-    strategy:
-      matrix:
-        bot: [architect, reviewer, pm, explorer]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install RyoBot
-        run: python -m pip install git+https://github.com/kcccn/ryobot.git
-
-      - name: Run
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          EVENT_PAYLOAD: ${{ toJson(github.event) }}
-          BOT_IDENTITY: ${{ matrix.bot }}
-        run: ryobot
+  ryobot:
+    uses: kcccn/ryobot/.github/workflows/ryobot.yml@main
+    secrets: inherit
 ```
 
 这个文件做了什么：
 
-- **定义触发条件**（`on`）：当 Issue 被创建/编辑、Issue 收到评论、PR 被创建/编辑/推送/关闭、PR review 收到评论时运行
-- **声明权限**（`permissions`）：允许 workflow 读写 Issue、PR，以及触发其他 workflow
-- **并行运行 4 个 bot**（`matrix.bot`）：每个 bot 独立执行，互不影响
-- **安装 ryobot**：通过 `pip install git+...` 从 GitHub 直接安装最新版，无需 checkout
-- **运行**：`ryobot` 命令自动读取环境变量，执行 ReAct 循环，将回复写回 Issue/PR
+- **定义触发条件**（`on`）：当 Issue/PR/评论事件发生时自动触发
+- **声明权限**（`permissions`）：允许 workflow 读写 Issue、PR、Contents，以及触发其他 workflow
+- **调用 ryobot 可复用 workflow**（`uses:`）：一行引用，由 ryobot 仓库提供运行逻辑
 
 关键要点：
-- **无需 checkout**：源码由 pip 从 GitHub 直接拉取安装
+- **无需 checkout、无需 pip install、无需 matrix strategy**：这些都封装在 ryobot 可复用 workflow 内部
+- **版本自动跟随**：`@main` 始终使用最新版；也可以 pin 到 `@v0.1.0` 固定版本
 - **无需 Fork**：你不需要复制任何 Python 文件到你的仓库
-- **`GITHUB_TOKEN` 自动指向你的仓库**：bot 读写的 Issue、PR、标签都作用于你的仓库，而非 ryobot 仓库
-- **如果你只需要部分 bot**：修改 `matrix.bot` 列表即可，例如 `bot: [architect]`
+- **`uses:` 引用自动在 caller 仓库上下文中运行**：bot 读写的 Issue、PR、标签都作用于你的仓库
+- **不需要部分 bot**：只要去掉不需要的 bot 即可，移除 `uses:` 改为直接写 job（见下方高级配置）
 
 ### 第二步：添加 API Key
 
@@ -151,6 +126,8 @@ Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions m
 
 ### 环境变量
 
+以下环境变量由 `ryobot` 命令读取，可通过 workflow 的 `with:` 或 `env:` 设置。
+
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
 | `BOT_IDENTITY` | `architect` | bot 身份，可选 `architect` / `reviewer` / `pm` / `explorer` |
@@ -166,12 +143,16 @@ Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions m
 | `RYOBOT_MAX_DIFF_CHARS` | `50000` | `read_code_diff` 读取 PR diff 的最大字符数 |
 | `RYOBOT_MAX_FILE_CHARS` | `30000` | `read_file` 读取文件内容的最大字符数 |
 
-例如在 workflow 中添加：
+常用变量（`COOLDOWN_SECONDS`、`MAX_ITERATIONS`、`RYOBOT_ALLOWED_WORKFLOWS`、`RYOBOT_MARKER_AUTHOR_LOGINS`）已暴露为可复用 workflow 的 `with:` 输入。例如：
 
 ```yaml
-env:
-  COOLDOWN_SECONDS: "60"
-  MAX_ITERATIONS: "3"
+jobs:
+  ryobot:
+    uses: kcccn/ryobot/.github/workflows/ryobot.yml@main
+    secrets: inherit
+    with:
+      cooldown_seconds: 60
+      max_iterations: 50
 ```
 
 ### 冷却机制

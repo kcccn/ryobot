@@ -1,0 +1,49 @@
+name: ryobot
+
+on:
+  workflow_call:
+    inputs:
+      cooldown_seconds:
+        description: 'Minimum seconds between bot replies (0 to disable)'
+        type: number
+        default: 120
+      max_iterations:
+        description: 'Maximum tool-call iterations per run'
+        type: number
+        default: 100
+      allowed_workflows:
+        description: 'Comma-separated workflow filenames that DispatchWorkflow skill may trigger (empty = disabled)'
+        type: string
+        default: ''
+      marker_author_logins:
+        description: 'Comma-separated GitHub logins whose marker comments are trusted'
+        type: string
+        default: 'github-actions[bot]'
+
+jobs:
+  run-ryobot:
+    strategy:
+      matrix:
+        bot: [architect, reviewer, pm, explorer]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install RyoBot
+        run: python -m pip install git+https://github.com/kcccn/ryobot.git
+
+      - name: Run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVENT_PAYLOAD: ${{ toJson(github.event) }}
+          BOT_IDENTITY: ${{ matrix.bot }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          COOLDOWN_SECONDS: ${{ inputs.cooldown_seconds }}
+          MAX_ITERATIONS: ${{ inputs.max_iterations }}
+          RYOBOT_ALLOWED_WORKFLOWS: ${{ inputs.allowed_workflows }}
+          RYOBOT_MARKER_AUTHOR_LOGINS: ${{ inputs.marker_author_logins }}
+        run: ryobot
