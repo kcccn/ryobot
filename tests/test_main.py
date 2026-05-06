@@ -247,7 +247,17 @@ def test_readme_brands_project_as_ryo_ghost_engine() -> None:
     assert "DEEPSEEK_API_KEY" in content
 
 
-def test_main_uses_anthropic_adapter_when_bot_provider_is_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_all_bots_use_deepseek_v4_flash() -> None:
+    from bots import list_bots
+
+    for bot in list_bots():
+        assert bot.model == "deepseek-v4-flash"
+        assert bot.provider == "openai"
+        assert bot.base_url is None
+        assert bot.api_key_env is None
+
+
+def test_reviewer_uses_deepseek_openai_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     main = import_main_module()
     payload = valid_payload()
     captured: dict[str, Any] = {}
@@ -261,7 +271,7 @@ def test_main_uses_anthropic_adapter_when_bot_provider_is_anthropic(monkeypatch:
 
     class _FakeOpenAI:
         def __init__(self, **kwargs: Any) -> None:
-            captured["openai_called"] = True
+            captured["openai_kwargs"] = kwargs
 
     class FakeAnthropicAdapter:
         def __init__(self, **kwargs: Any) -> None:
@@ -285,7 +295,7 @@ def test_main_uses_anthropic_adapter_when_bot_provider_is_anthropic(monkeypatch:
     monkeypatch.setattr(main, "BOT_IDENTITY", "reviewer")
     monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
     monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthro-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
     monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(main, "AsyncOpenAI", _FakeOpenAI)
     monkeypatch.setattr(main, "AnthropicAdapter", FakeAnthropicAdapter)
@@ -298,10 +308,10 @@ def test_main_uses_anthropic_adapter_when_bot_provider_is_anthropic(monkeypatch:
 
     main.main()
 
-    assert "openai_called" not in captured
-    assert captured["anthropic_kwargs"]["api_key"] == "anthro-key"
-    assert captured["anthropic_kwargs"]["base_url"] == "https://api.anthropic.com/v1"
-    assert captured["ryo_agent_kwargs"]["persona"]["model"] == "claude-sonnet-4-6"
+    assert "anthropic_kwargs" not in captured
+    assert captured["openai_kwargs"]["api_key"] == "ds-token"
+    assert captured["openai_kwargs"]["base_url"] == "https://api.deepseek.com"
+    assert captured["ryo_agent_kwargs"]["persona"]["model"] == "deepseek-v4-flash"
     assert captured["ryo_agent_kwargs"]["max_tokens"] == 4096
 
 
@@ -311,6 +321,7 @@ def test_workflow_passes_github_event_payload_and_secret() -> None:
     assert "issue_comment" in content
     assert "GITHUB_TOKEN: ${{ github.token }}" in content
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in content
+    assert "ANTHROPIC_API_KEY" not in content
     assert "EVENT_PAYLOAD: ${{ toJson(github.event) }}" in content
     assert "BOT_IDENTITY: ${{ matrix.bot }}" in content
 

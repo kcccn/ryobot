@@ -261,7 +261,7 @@ Ryo Ghost Engine 支持同时运行 4 个拥有不同人格的 bot，通过 GitH
 
 ### 可选配置
 
-通过 workflow 的 `env` 可以切换模型或 API 端点：
+所有 bot 默认统一使用 `deepseek-v4-flash`。通过 workflow 的 `env` 仍可显式覆盖模型或 API 端点：
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
@@ -270,11 +270,11 @@ Ryo Ghost Engine 支持同时运行 4 个拥有不同人格的 bot，通过 GitH
 | `BOT_IDENTITY` | `architect` | bot 身份，可选 `architect` / `reviewer` / `pm` / `explorer` |
 | `COOLDOWN_SECONDS` | `120` | bot 最小响应间隔（秒），设为 `0` 可禁用冷却 |
 
-例如切到 DeepSeek 的 reasoning 模型：
+例如显式固定当前默认模型：
 
 ```yaml
 env:
-  LLM_MODEL: deepseek-reasoner
+  LLM_MODEL: deepseek-v4-flash
 ```
 
 或使用其他 OpenAI 兼容服务（如本地 vLLM、Ollama 等）：

@@ -9,5 +9,5 @@ EXPLORER = BotConfig(
         "并乐于实验不同层次的抽象组合。"
     ),
     description="充满好奇心的黑客，热衷探索架构可能性与创造性方案",
-    model="deepseek-reasoner",
+    model="deepseek-v4-flash",
 )

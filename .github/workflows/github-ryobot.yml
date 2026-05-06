@@ -51,7 +51,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EVENT_PAYLOAD: ${{ toJson(github.event) }}
           BOT_IDENTITY: ${{ matrix.bot }}
         run: python main.py

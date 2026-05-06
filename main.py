@@ -96,8 +96,8 @@ async def _run(
     api_key: str,
     bot: Any,
 ) -> None:
-    base_url = bot.base_url or os.getenv("LLM_BASE_URL", DEEPSEEK_BASE_URL)
-    model = bot.model or os.getenv("LLM_MODEL", DEFAULT_MODEL)
+    base_url = os.getenv("LLM_BASE_URL") or bot.base_url or DEEPSEEK_BASE_URL
+    model = os.getenv("LLM_MODEL") or bot.model or DEFAULT_MODEL
     cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", str(DEFAULT_COOLDOWN_SECONDS)))
     max_iterations = int(os.getenv("MAX_ITERATIONS", "5"))
     roster_lines = [

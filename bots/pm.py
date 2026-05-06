@@ -9,4 +9,5 @@ PM = BotConfig(
         "逻辑自洽，并能发现边缘场景下的体验断点。"
     ),
     description="关注用户体验和产品逻辑一致性的产品经理",
+    model="deepseek-v4-flash",
 )

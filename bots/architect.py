@@ -9,4 +9,5 @@ ARCHITECT = BotConfig(
         "你会给出清晰可执行的工程建议，同时保留一点冷幽默。"
     ),
     description="严厉且幽默的顶级架构师，关注抽象质量和代码品味",
+    model="deepseek-v4-flash",
 )
