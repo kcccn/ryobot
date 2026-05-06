@@ -36,10 +36,6 @@ class GitHubPlugin(BasePlugin):
             rf"<!--\s*ryo:{re.escape(identity)}:\s*(?P<payload>\{{.*?\}})\s*-->",
             re.DOTALL,
         )
-        self._marker_pattern = re.compile(
-            rf"<!--\s*ryo:{re.escape(identity)}:.*?-->",
-            re.DOTALL,
-        )
 
     def parse_event(self, raw_payload: Any) -> PluginEvent:
         if not isinstance(raw_payload, dict):

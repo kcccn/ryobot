@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 from openai import AsyncOpenAI
 
+from bots import get_bot
 from core import RyoAgent
 from platforms.github import (
     AddLabels,
@@ -28,39 +29,6 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_COOLDOWN_SECONDS = 120
 
 BOT_IDENTITY = os.getenv("BOT_IDENTITY", "architect")
-
-PERSONAS = {
-    "architect": {
-        "system_prompt": (
-            "你是一个严厉且幽默的顶级架构师。"
-            "你直接、专业、苛刻，不容忍糟糕抽象、重复劳动和含糊表述。"
-            "你会给出清晰可执行的工程建议，同时保留一点冷幽默。"
-        ),
-    },
-    "reviewer": {
-        "system_prompt": (
-            "你是一个挑剔的代码审查者，关注边界情况与可维护性。"
-            "你会仔细检查每一处逻辑漏洞、错误处理缺失和潜在的性能问题，"
-            "并以建设性的方式提出改进建议。"
-        ),
-    },
-    "pm": {
-        "system_prompt": (
-            "你是一个关注用户体验和产品逻辑一致性的产品经理。"
-            "你从用户视角审视每一个功能，确保交互流程合理、错误提示友好、"
-            "逻辑自洽，并能发现边缘场景下的体验断点。"
-        ),
-    },
-    "explorer": {
-        "system_prompt": (
-            "你是一个喜欢探索架构可能性的充满好奇心的黑客。"
-            "你热衷于发现系统中未被充分利用的能力，提出创造性的替代方案，"
-            "并乐于实验不同层次的抽象组合。"
-        ),
-    },
-}
-
-PERSONA = PERSONAS.get(BOT_IDENTITY, PERSONAS["architect"])
 
 
 def _contains_own_marker(payload: dict[str, Any], identity: str) -> bool:
@@ -88,13 +56,15 @@ def main() -> None:
 
     try:
         github_token = _require_env("GITHUB_TOKEN")
-        deepseek_api_key = _require_env("DEEPSEEK_API_KEY")
+        bot = get_bot(BOT_IDENTITY)
+        api_key_env = bot.api_key_env or "DEEPSEEK_API_KEY"
+        api_key = _require_env(api_key_env)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
 
     try:
-        asyncio.run(_run(payload, github_token=github_token, deepseek_api_key=deepseek_api_key))
+        asyncio.run(_run(payload, github_token=github_token, api_key=api_key))
     except Exception as exc:
         print(f"Fatal entrypoint error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
@@ -104,12 +74,17 @@ async def _run(
     payload: dict[str, Any],
     *,
     github_token: str,
-    deepseek_api_key: str,
+    api_key: str,
 ) -> None:
-    base_url = os.getenv("LLM_BASE_URL", DEEPSEEK_BASE_URL)
-    model = os.getenv("LLM_MODEL", DEFAULT_MODEL)
+    bot = get_bot(BOT_IDENTITY)
+    base_url = bot.base_url or os.getenv("LLM_BASE_URL", DEEPSEEK_BASE_URL)
+    model = bot.model or os.getenv("LLM_MODEL", DEFAULT_MODEL)
     cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", str(DEFAULT_COOLDOWN_SECONDS)))
-    http_client = httpx.AsyncClient(base_url="https://api.github.com")
+    max_iterations = int(os.getenv("MAX_ITERATIONS", "5"))
+    http_client = httpx.AsyncClient(
+        base_url="https://api.github.com",
+        timeout=httpx.Timeout(30.0, connect=10.0),
+    )
     try:
         plugin = GitHubPlugin(token=github_token, client=http_client, identity=BOT_IDENTITY)
         skills = [
@@ -124,15 +99,16 @@ async def _run(
             ReadWorkflowRun(token=github_token, client=http_client),
         ]
         llm_client = AsyncOpenAI(
-            api_key=deepseek_api_key,
+            api_key=api_key,
             base_url=base_url,
         )
         ryo_agent = RyoAgent(
-            persona={"model": model, **PERSONA},
+            persona={"model": model, "system_prompt": bot.system_prompt},
             skills=skills,
             llm_client=llm_client,
             plugin=plugin,
             cooldown_seconds=cooldown_seconds,
+            max_iterations=max_iterations,
         )
         await ryo_agent.run(payload)
     finally:

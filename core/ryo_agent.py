@@ -24,6 +24,7 @@ class RyoAgent:
         llm_client: Any,
         plugin: BasePlugin,
         cooldown_seconds: int = 0,
+        max_iterations: int = 5,
     ) -> None:
         if "model" not in persona or "system_prompt" not in persona:
             raise ValueError("persona must include 'model' and 'system_prompt'.")
@@ -33,6 +34,7 @@ class RyoAgent:
         self.llm_client = llm_client
         self.plugin = plugin
         self.cooldown_seconds = cooldown_seconds
+        self.max_iterations = max_iterations
         self._skills_by_name = {skill.name: skill for skill in skills}
 
     async def run(self, raw_event: Any) -> None:
@@ -58,7 +60,7 @@ class RyoAgent:
         context_token = set_skill_context(event=event, subconscious=subconscious)
 
         try:
-            for _ in range(5):
+            for _ in range(self.max_iterations):
                 response = await self._create_completion(messages=messages, tools=tools)
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])

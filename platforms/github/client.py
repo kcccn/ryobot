@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -35,12 +36,13 @@ class GitHubApiClient:
         params: dict[str, Any] | None = None,
         accept: str = "application/vnd.github+json",
     ) -> Any:
-        response = await self._client.get(
-            path,
-            params=params,
-            headers=self._headers(accept=accept),
+        response = await self._with_retry(
+            lambda: self._client.get(
+                path,
+                params=params,
+                headers=self._headers(accept=accept),
+            ),
         )
-        response.raise_for_status()
         return response.json()
 
     async def get_text(
@@ -50,12 +52,13 @@ class GitHubApiClient:
         params: dict[str, Any] | None = None,
         accept: str = "application/vnd.github+json",
     ) -> str:
-        response = await self._client.get(
-            path,
-            params=params,
-            headers=self._headers(accept=accept),
+        response = await self._with_retry(
+            lambda: self._client.get(
+                path,
+                params=params,
+                headers=self._headers(accept=accept),
+            ),
         )
-        response.raise_for_status()
         return response.text
 
     async def post_json(
@@ -65,12 +68,13 @@ class GitHubApiClient:
         json_body: dict[str, Any],
         accept: str = "application/vnd.github+json",
     ) -> Any:
-        response = await self._client.post(
-            path,
-            json=json_body,
-            headers=self._headers(accept=accept),
+        response = await self._with_retry(
+            lambda: self._client.post(
+                path,
+                json=json_body,
+                headers=self._headers(accept=accept),
+            ),
         )
-        response.raise_for_status()
         return response.json()
 
     async def patch_json(
@@ -80,12 +84,13 @@ class GitHubApiClient:
         json_body: dict[str, Any],
         accept: str = "application/vnd.github+json",
     ) -> Any:
-        response = await self._client.patch(
-            path,
-            json=json_body,
-            headers=self._headers(accept=accept),
+        response = await self._with_retry(
+            lambda: self._client.patch(
+                path,
+                json=json_body,
+                headers=self._headers(accept=accept),
+            ),
         )
-        response.raise_for_status()
         return response.json()
 
     async def post_no_content(
@@ -95,10 +100,12 @@ class GitHubApiClient:
         json_body: dict[str, Any],
         accept: str = "application/vnd.github+json",
     ) -> None:
-        response = await self._client.post(
-            path,
-            json=json_body,
-            headers=self._headers(accept=accept),
+        response = await self._with_retry(
+            lambda: self._client.post(
+                path,
+                json=json_body,
+                headers=self._headers(accept=accept),
+            ),
         )
         response.raise_for_status()
 
@@ -112,3 +119,29 @@ class GitHubApiClient:
             "Accept": accept,
             "X-GitHub-Api-Version": GITHUB_API_VERSION,
         }
+
+    @staticmethod
+    def _retryable(response: httpx.Response) -> bool:
+        return response.status_code in (429, 500, 502, 503, 504)
+
+    async def _with_retry(self, request: Any) -> httpx.Response:
+        attempt = 0
+        delay = 1.0
+        while True:
+            attempt += 1
+            response: httpx.Response | None = None
+            try:
+                response = await request()
+                if not self._retryable(response):
+                    return response
+                if attempt >= 3:
+                    response.raise_for_status()
+                    return response
+            except httpx.NetworkError:
+                if attempt >= 3:
+                    raise
+            except httpx.HTTPStatusError:
+                if not self._retryable(response) or attempt >= 3:
+                    raise
+            await asyncio.sleep(delay)
+            delay *= 2
