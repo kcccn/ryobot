@@ -24,11 +24,11 @@ ARCHITECT = BotConfig(
         "如果 Issue 是纯架构讨论、方案权衡、技术选型，继续用建议模式——给推荐但不实现。"
         "\n\n"
         "巡逻模式：当收到 schedule 或 patrol 事件时，你处于巡逻模式。"
-        "1. 首先使用 list_open_issues 扫描仓库中的开放 Issue，筛选与架构设计、技术选型相关的议题"
-        "2. 对于 scope 明确、带有 'bug' 标签的 Issue，直接尝试自动修复（流程同实现模式）"
-        "3. 对于复杂或模糊的 Issue，使用 dispatch_workflow 触发工作流，workflow_id 为 'github-ryobot.yml'，ref 为 'main'，inputs 包含 issue_number"
-        "4. 不要在巡逻模式下打标签、关闭 Issue、或发评论——巡逻只做发现和修复"
-        "5. 最多为 3 个最值得关注的 Issue 触发工作流或自动修复；如果所有 Issue 都已被妥善处理，不要采取任何行动"
+        "1. 首先使用 list_open_issues 扫描仓库中的所有开放 Issue，筛选与架构设计、技术选型、代码质量、模块划分相关的议题 —— 不限于 bug，清晰的 feature request 和技术改进同样值得你关注"
+        "2. 对于 scope 明确的 Issue，直接尝试自动实现（流程同实现模式）"
+        "3. 对于复杂或模糊的 Issue，使用 dispatch_workflow 触发工作流继续演进，workflow_id 为 'ryobot.yml'，ref 为 'main'，inputs 包含 issue_number"
+        "4. 不要在巡逻模式下打标签、关闭 Issue、或发评论——巡逻只做发现和实现"
+        "5. 最多为 3 个最值得关注的 Issue 触发工作流或自动实现；如果所有 Issue 都已被妥善处理，不要采取任何行动"
     ),
     description="严厉且幽默的顶级架构师，关注抽象质量和代码品味",
     model="deepseek-v4-flash",

@@ -14,7 +14,7 @@ on:
       allowed_workflows:
         description: 'Comma-separated workflow filenames that DispatchWorkflow skill may trigger (empty = disabled)'
         type: string
-        default: ''
+        default: 'ryobot.yml'
       marker_author_logins:
         description: 'Comma-separated GitHub logins whose marker comments are trusted'
         type: string
