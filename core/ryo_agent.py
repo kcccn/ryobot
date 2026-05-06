@@ -20,6 +20,7 @@ class ChatMessage(TypedDict, total=False):
     content: str | None
     tool_calls: list[dict[str, Any]]
     tool_call_id: str
+    reasoning_content: str | None
 
 
 class RyoAgent:
@@ -78,13 +79,15 @@ class RyoAgent:
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
 
                 if tool_calls:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": self._extract_text_content(assistant_message),
-                            "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
-                        }
-                    )
+                    msg: dict[str, Any] = {
+                        "role": "assistant",
+                        "content": self._extract_text_content(assistant_message),
+                        "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
+                    }
+                    reasoning = getattr(assistant_message, "reasoning_content", None) or None
+                    if reasoning:
+                        msg["reasoning_content"] = reasoning
+                    messages.append(msg)
                     for tool_call in tool_calls:
                         tool_result = await self._execute_tool_call(tool_call, event=event)
                         messages.append(
