@@ -614,10 +614,16 @@ class WriteFile(GitHubSkillBase):
         except Exception:
             pass  # File doesn't exist, will be created
 
-        result = await self._api.put_json(
-            f"/repos/{context['owner']}/{context['repo']}/contents/{args.path}",
-            json_body=body,
-        )
+        try:
+            result = await self._api.put_json(
+                f"/repos/{context['owner']}/{context['repo']}/contents/{args.path}",
+                json_body=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            return (
+                f"GitHub API error ({exc.response.status_code}): "
+                f"{exc.response.text[:1000]}"
+            )
         action = "Updated" if body.get("sha") else "Created"
         return (
             f"{action} file {args.path}\n"
@@ -655,13 +661,19 @@ class CreateBranch(GitHubSkillBase):
         if not base_sha:
             return f"Could not get SHA for branch '{base}'."
 
-        result = await self._api.post_json(
-            f"/repos/{context['owner']}/{context['repo']}/git/refs",
-            json_body={
-                "ref": f"refs/heads/{args.branch}",
-                "sha": base_sha,
-            },
-        )
+        try:
+            result = await self._api.post_json(
+                f"/repos/{context['owner']}/{context['repo']}/git/refs",
+                json_body={
+                    "ref": f"refs/heads/{args.branch}",
+                    "sha": base_sha,
+                },
+            )
+        except httpx.HTTPStatusError as exc:
+            return (
+                f"GitHub API error ({exc.response.status_code}): "
+                f"{exc.response.text[:1000]}"
+            )
         return (
             f"Created branch '{args.branch}' from '{base}' (SHA: {base_sha[:7]})\n"
             f"URL: {result.get('url', '')}"
@@ -698,10 +710,16 @@ class CreatePullRequest(GitHubSkillBase):
         if args.body:
             body["body"] = args.body
 
-        result = await self._api.post_json(
-            f"/repos/{context['owner']}/{context['repo']}/pulls",
-            json_body=body,
-        )
+        try:
+            result = await self._api.post_json(
+                f"/repos/{context['owner']}/{context['repo']}/pulls",
+                json_body=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            return (
+                f"GitHub API error ({exc.response.status_code}): "
+                f"{exc.response.text[:1000]}"
+            )
         return (
             f"Created PR #{result['number']}: {result['title']}\n"
             f"URL: {result.get('html_url', '')}\n"
