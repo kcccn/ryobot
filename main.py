@@ -209,7 +209,11 @@ async def _run(
             max_tokens=bot.max_tokens,
         )
         is_fix = _detect_fix_command(payload)
-        is_patrol = payload.get("_patrol", False) or "schedule" in payload
+        is_patrol = (
+            payload.get("_patrol", False)
+            or "schedule" in payload
+            or isinstance(payload.get("inputs"), dict)
+        )
         if not is_fix and not is_patrol:
             if random.random() > bot.response_probability:
                 return
