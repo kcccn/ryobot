@@ -23,6 +23,7 @@ from platforms.github import (
     ReadWorkflowRun,
     SearchRepoMemory,
 )
+from platforms.llm import AnthropicAdapter
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -55,7 +56,7 @@ def main() -> None:
         raise SystemExit(0)
 
     if "repository" not in payload:
-        # workflow_dispatch / schedule — no issue context available yet
+        print("Skipping event without repository context (workflow_dispatch / schedule).", file=sys.stderr)
         raise SystemExit(0)
 
     try:
@@ -110,10 +111,14 @@ async def _run(
         ]
         allow = bot.skill_filter
         skills = [s for s in all_skills if allow is None or s.name in allow]
-        llm_client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-        )
+        llm_client: Any
+        if bot.provider == "anthropic":
+            llm_client = AnthropicAdapter(api_key=api_key, base_url=base_url)
+        else:
+            llm_client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+            )
         ryo_agent = RyoAgent(
             persona={"model": model, "system_prompt": system_prompt},
             skills=skills,

@@ -12,4 +12,5 @@ REVIEWER = BotConfig(
     model="claude-sonnet-4-6",
     base_url="https://api.anthropic.com/v1",
     api_key_env="ANTHROPIC_API_KEY",
+    provider="anthropic",
 )

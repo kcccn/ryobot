@@ -164,7 +164,7 @@ class GitHubPlugin(BasePlugin):
         subconscious: dict[str, Any] = {}
         last_bot_comment_at: str | None = None
 
-        for comment in comments:
+        for comment in reversed(comments):
             if int(comment.get("id", 0)) == event.comment_id:
                 continue
 

@@ -141,7 +141,7 @@ class GitHubApiClient:
                 if attempt >= 3:
                     raise
             except httpx.HTTPStatusError:
-                if not self._retryable(response) or attempt >= 3:
+                if response is None or not self._retryable(response) or attempt >= 3:
                     raise
             await asyncio.sleep(self._retry_delay(response, delay))
             delay *= 2

@@ -13,3 +13,4 @@ class BotConfig:
     model: str | None = None
     base_url: str | None = None
     api_key_env: str | None = None
+    provider: str = "openai"

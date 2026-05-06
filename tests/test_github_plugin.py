@@ -88,13 +88,13 @@ async def test_send_reply_posts_comment_with_hidden_state_marker() -> None:
 async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigger_comment() -> None:
     comments = [
         {
-            "id": 1,
-            "body": "first user comment",
-            "user": {"login": "human"},
+            "id": 4,
+            "body": 'broken marker\n<!-- ryo:architect: not-json -->',
+            "user": {"login": "ryobot"},
         },
         {
-            "id": 2,
-            "body": 'RyoBot reply\n<!-- ryo:architect: {"mode":"draft"} -->',
+            "id": 3,
+            "body": 'new RyoBot reply\n<!-- ryo:architect: {"mode":"final","step":2} -->',
             "user": {"login": "ryobot"},
         },
         {
@@ -103,14 +103,14 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
             "user": {"login": "octocat"},
         },
         {
-            "id": 3,
-            "body": 'new RyoBot reply\n<!-- ryo:architect: {"mode":"final","step":2} -->',
+            "id": 2,
+            "body": 'RyoBot reply\n<!-- ryo:architect: {"mode":"draft"} -->',
             "user": {"login": "ryobot"},
         },
         {
-            "id": 4,
-            "body": 'broken marker\n<!-- ryo:architect: not-json -->',
-            "user": {"login": "ryobot"},
+            "id": 1,
+            "body": "first user comment",
+            "user": {"login": "human"},
         },
     ]
 
@@ -310,13 +310,13 @@ async def test_fetch_history_only_tracks_own_bot_for_cooldown() -> None:
 async def test_fetch_history_includes_other_bot_messages() -> None:
     comments = [
         {
-            "id": 1,
-            "body": 'reviewer reply\n<!-- ryo:reviewer: {} -->',
+            "id": 2,
+            "body": 'architect reply\n<!-- ryo:architect: {} -->',
             "user": {"login": "ryobot[bot]", "type": "Bot"},
         },
         {
-            "id": 2,
-            "body": 'architect reply\n<!-- ryo:architect: {} -->',
+            "id": 1,
+            "body": 'reviewer reply\n<!-- ryo:reviewer: {} -->',
             "user": {"login": "ryobot[bot]", "type": "Bot"},
         },
     ]
