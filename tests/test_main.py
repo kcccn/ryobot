@@ -338,7 +338,7 @@ def test_workflow_passes_github_event_payload_and_secret() -> None:
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in content
     assert "ANTHROPIC_API_KEY" not in content
     assert "EVENT_PAYLOAD: ${{ toJson(github.event) }}" in content
-    assert "BOT_IDENTITY: ${{ matrix.bot }}" in content
+    assert "for bot in architect reviewer pm explorer coder" in content
 
 
 def test_workflow_grants_actions_write_for_patrol_dispatch() -> None:

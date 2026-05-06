@@ -35,9 +35,6 @@ jobs:
       pull-requests: write
       actions: write
       contents: write
-    strategy:
-      matrix:
-        bot: [architect, reviewer, pm, explorer, coder]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,13 +46,12 @@ jobs:
       - name: Install RyoBot
         run: python -m pip install git+https://github.com/kcccn/ryobot.git
 
-      - name: Run
+      - name: Run Bots Sequentially
         env:
           GITHUB_TOKEN: ${{ github.token }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EVENT_PAYLOAD: ${{ toJson(github.event) }}
-          BOT_IDENTITY: ${{ matrix.bot }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           COOLDOWN_SECONDS: ${{ inputs.cooldown_seconds }}
           MAX_ITERATIONS: ${{ inputs.max_iterations }}
@@ -63,4 +59,9 @@ jobs:
           RYOBOT_MARKER_AUTHOR_LOGINS: ${{ inputs.marker_author_logins }}
           RYOBOT_ALLOWED_COMMANDS: ${{ inputs.allowed_commands }}
           RYOBOT_COMMAND_TIMEOUT_SECONDS: ${{ inputs.command_timeout_seconds }}
-        run: ryobot
+        run: |
+          for bot in architect reviewer pm explorer coder; do
+            echo "::group::Running $bot"
+            BOT_IDENTITY=$bot ryobot || echo "::warning::$bot exited with code $?"
+            echo "::endgroup::"
+          done

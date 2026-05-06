@@ -34,9 +34,6 @@ permissions:
 
 jobs:
   run-ryobot:
-    strategy:
-      matrix:
-        bot: [architect, reviewer, pm, explorer, coder]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -50,12 +47,16 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -e .[dev]
 
-      - name: Run Ryo Ghost Engine
+      - name: Run Bots Sequentially
         env:
           GITHUB_TOKEN: ${{ github.token }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EVENT_PAYLOAD: ${{ toJson(github.event) }}
-          BOT_IDENTITY: ${{ matrix.bot }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RYOBOT_ALLOWED_WORKFLOWS: github-ryobot.yml
-        run: python main.py
+        run: |
+          for bot in architect reviewer pm explorer coder; do
+            echo "::group::Running $bot"
+            BOT_IDENTITY=$bot python main.py || echo "::warning::$bot exited with code $?"
+            echo "::endgroup::"
+          done
