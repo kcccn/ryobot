@@ -5,6 +5,7 @@ import json
 import random
 from datetime import datetime, timezone
 from json import JSONDecodeError
+from collections.abc import Sequence
 from typing import Any, TypedDict
 
 from pydantic import BaseModel, ValidationError
@@ -33,7 +34,7 @@ class RyoAgent:
         self,
         *,
         persona: dict[str, Any],
-        skills: list[BaseSkill],
+        skills: Sequence[BaseSkill],
         llm_client: Any,
         plugin: BasePlugin,
         cooldown_seconds: int = 0,
@@ -70,7 +71,7 @@ class RyoAgent:
 
         messages: list[ChatMessage] = [
             {"role": "system", "content": self.persona["system_prompt"]},
-            *history.messages,  # type: ignore[typeddict-item]
+            *history.messages,  # type: ignore[typeddict-item,list-item]
             {"role": "user", "content": event.message},
         ]
         available_skills = self._available_skills_for_event(event)
@@ -85,7 +86,7 @@ class RyoAgent:
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
 
                 if tool_calls:
-                    msg: dict[str, Any] = {
+                    msg: ChatMessage = {
                         "role": "assistant",
                         "content": self._extract_text_content(assistant_message),
                         "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
@@ -152,7 +153,7 @@ class RyoAgent:
                 delay = 2 ** (attempt - 1)
                 await asyncio.sleep(delay)
 
-    def _available_skills_for_event(self, event: PluginEvent) -> list[BaseSkill]:
+    def _available_skills_for_event(self, event: PluginEvent) -> Sequence[BaseSkill]:
         if _is_trusted_mutation_author(event.author_association):
             return self.skills
         return [
@@ -164,10 +165,10 @@ class RyoAgent:
     async def _execute_tool_call(self, tool_call: Any, *, event: PluginEvent) -> str | _NoReplyResult:
         tool_name = getattr(getattr(tool_call, "function", None), "name", "")
         if tool_name in self._control_skills_by_name:
-            skill = self._control_skills_by_name[tool_name]
-            return await self._execute_validated_skill(skill, tool_call)
+            control_skill = self._control_skills_by_name[tool_name]
+            return await self._execute_validated_skill(control_skill, tool_call)
 
-        skill = self._skills_by_name.get(tool_name)
+        skill: BaseSkill | None = self._skills_by_name.get(tool_name)
         if skill is None:
             return f"Tool error: Unknown tool '{tool_name}'."
         if (
