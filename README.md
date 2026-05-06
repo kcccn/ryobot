@@ -60,6 +60,12 @@ jobs:
 - **`uses:` 引用自动在 caller 仓库上下文中运行**：bot 读写的 Issue、PR、标签都作用于你的仓库
 - **不需要部分 bot**：只要去掉不需要的 bot 即可，移除 `uses:` 改为直接写 job（见下方高级配置）
 
+> **重要**：bot 会自动创建分支和提交 PR。为使这正常工作，需要在仓库 **Settings → Actions → General → Workflow permissions** 中：
+> 1. 勾选 **Read and write permissions**
+> 2. 勾选 **Allow GitHub Actions to create and approve pull requests**
+>
+> 如果不开启这个选项，bot 创建 PR 时会收到 `"GitHub Actions is not permitted to create or approve pull requests"` 错误。
+
 ### 第二步：添加 API Key
 
 进入你的仓库 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**，至少添加一个：
