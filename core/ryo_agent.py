@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any, TypedDict
@@ -57,7 +58,9 @@ class RyoAgent:
             try:
                 last_at = datetime.fromisoformat(history.last_bot_comment_at.replace("Z", "+00:00"))
                 elapsed = (datetime.now(timezone.utc) - last_at).total_seconds()
-                if elapsed < self.cooldown_seconds:
+                jitter = random.uniform(0.5, 1.5)
+                effective_cooldown = self.cooldown_seconds * jitter
+                if elapsed < effective_cooldown:
                     return
             except (ValueError, TypeError):
                 pass

@@ -173,6 +173,7 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(main, "DispatchWorkflow", FakeSkill)
     monkeypatch.setattr(main, "ReadWorkflowRun", FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
+    monkeypatch.setattr(main.random, "random", lambda: 0.0)
 
     main.main()
 
@@ -231,6 +232,7 @@ def test_main_includes_dispatch_workflow_only_when_allowlist_is_configured(monke
                  "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
+    monkeypatch.setattr(main.random, "random", lambda: 0.0)
 
     main.main()
 
@@ -305,6 +307,7 @@ def test_reviewer_uses_deepseek_openai_adapter(monkeypatch: pytest.MonkeyPatch) 
                  "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun"):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
+    monkeypatch.setattr(main.random, "random", lambda: 0.0)
 
     main.main()
 

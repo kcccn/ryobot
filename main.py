@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import sys
 from typing import Any
 
@@ -143,6 +144,8 @@ async def _run(
             max_iterations=max_iterations,
             max_tokens=bot.max_tokens,
         )
+        if random.random() > bot.response_probability:
+            return
         await ryo_agent.run(payload)
     finally:
         await http_client.aclose()
