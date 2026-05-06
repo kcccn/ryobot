@@ -411,7 +411,7 @@ async def test_comment_on_pr_uses_context_when_pr_number_is_zero() -> None:
     assert captured["method"] == "POST"
     assert captured["url"].endswith("/repos/acme/widgets/issues/12/comments")
     body = json.loads(captured["body"])
-    assert body["body"] == "LGTM!"
+    assert body["body"] == "**bot**\n\nLGTM!"
     assert "Commented on PR #12" == result
 
 

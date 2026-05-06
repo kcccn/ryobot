@@ -52,6 +52,28 @@ class CommentOnPRArgs(BaseModel):
     body: str
 
 
+class ReviewComment(BaseModel):
+    path: str = Field(description="File path being commented on")
+    line: int = Field(description="Line number in the file to comment on")
+    body: str = Field(description="The review comment text")
+
+
+class CreatePRReviewArgs(BaseModel):
+    pr_number: int = Field(description="Pull request number")
+    event: str = Field(
+        default="COMMENT",
+        description="Review action: COMMENT (neutral), APPROVE, or REQUEST_CHANGES",
+    )
+    body: str = Field(
+        default="",
+        description="Overall review summary (required for APPROVE/REQUEST_CHANGES)",
+    )
+    comments: list[ReviewComment] = Field(
+        default_factory=list,
+        description="Inline line-specific comments to attach to this review",
+    )
+
+
 class DispatchWorkflowArgs(BaseModel):
     workflow_id: str
     ref: str = "main"
@@ -122,6 +144,20 @@ class GitHubSkillBase(BaseSkill):
 
     async def aclose(self) -> None:
         await self._api.aclose()
+
+    _BOT_DISPLAY_NAMES: dict[str, str] = {
+        "architect": "Ryo Architect",
+        "reviewer": "Ryo Reviewer",
+        "pm": "Ryo PM",
+        "explorer": "Ryo Explorer",
+        "coder": "Ryo Coder",
+    }
+
+    @staticmethod
+    def _bot_prefix() -> str:
+        identity = os.getenv("BOT_IDENTITY", "bot")
+        display = GitHubSkillBase._BOT_DISPLAY_NAMES.get(identity, identity)
+        return f"**{display}**\n\n"
 
     @staticmethod
     def _require_context() -> dict[str, Any]:
@@ -280,9 +316,61 @@ class CommentOnPR(GitHubSkillBase):
         pr_number = args.pr_number if args.pr_number else context["issue_number"]
         await self._api.post_json(
             f"/repos/{context['owner']}/{context['repo']}/issues/{pr_number}/comments",
-            json_body={"body": args.body},
+            json_body={"body": self._bot_prefix() + args.body},
         )
         return f"Commented on PR #{pr_number}"
+
+
+class CreatePRReview(GitHubSkillBase):
+    name = "create_pr_review"
+    description = (
+        "Submit a review on a pull request. Use this to do line-by-line code review. "
+        "First use read_code_diff to see what changed, then read_file to see full file context, "
+        "then submit your review with inline comments at specific lines. "
+        "event can be COMMENT (neutral feedback), APPROVE, or REQUEST_CHANGES. "
+        "Include a brief overall summary in body, and put detailed per-line feedback in comments "
+        "(each with file path, line number, and comment text). "
+        "ALWAYS use this instead of comment_on_pr when reviewing code — "
+        "inline comments on specific lines are far more useful than a generic overall comment."
+    )
+    args_model = CreatePRReviewArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+
+        review_body: dict[str, Any] = {
+            "event": args.event,
+        }
+        if args.body:
+            review_body["body"] = self._bot_prefix() + args.body
+        if args.comments:
+            review_body["comments"] = [
+                {
+                    "path": c.path,
+                    "line": c.line,
+                    "body": c.body,
+                    "side": "RIGHT",
+                }
+                for c in args.comments
+            ]
+
+        try:
+            result = await self._api.post_json(
+                f"/repos/{context['owner']}/{context['repo']}/pulls/{args.pr_number}/reviews",
+                json_body=review_body,
+            )
+        except httpx.HTTPStatusError as exc:
+            return (
+                f"GitHub API error ({exc.response.status_code}): "
+                f"{exc.response.text[:1000]}"
+            )
+        return (
+            f"Submitted {args.event} review on PR #{args.pr_number}\n"
+            f"State: {result.get('state', '?')}\n"
+            f"ID: {result.get('id', '?')}"
+        )
 
 
 class DispatchWorkflow(GitHubSkillBase):
