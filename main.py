@@ -15,9 +15,11 @@ from platforms.github import (
     CloseIssue,
     CommentOnPR,
     CreateIssue,
+    DispatchWorkflow,
     GitHubPlugin,
     ReadCodeDiff,
     ReadIssueMemory,
+    ReadWorkflowRun,
     SearchRepoMemory,
 )
 
@@ -76,6 +78,8 @@ async def _run(
             AddLabels(token=github_token, client=http_client),
             CloseIssue(token=github_token, client=http_client),
             CommentOnPR(token=github_token, client=http_client),
+            DispatchWorkflow(token=github_token, client=http_client),
+            ReadWorkflowRun(token=github_token, client=http_client),
         ]
         llm_client = AsyncOpenAI(
             api_key=deepseek_api_key,

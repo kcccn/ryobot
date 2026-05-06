@@ -4,8 +4,10 @@ from .skills import (
     CloseIssue,
     CommentOnPR,
     CreateIssue,
+    DispatchWorkflow,
     ReadCodeDiff,
     ReadIssueMemory,
+    ReadWorkflowRun,
     SearchRepoMemory,
 )
 
@@ -14,9 +16,11 @@ __all__ = [
     "CloseIssue",
     "CommentOnPR",
     "CreateIssue",
+    "DispatchWorkflow",
     "GITHUB_COMMENT_STATE_PATTERN",
     "GitHubPlugin",
     "ReadCodeDiff",
     "ReadIssueMemory",
+    "ReadWorkflowRun",
     "SearchRepoMemory",
 ]

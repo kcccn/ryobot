@@ -14,8 +14,10 @@ from platforms.github.skills import (
     CloseIssue,
     CommentOnPR,
     CreateIssue,
+    DispatchWorkflow,
     ReadCodeDiff,
     ReadIssueMemory,
+    ReadWorkflowRun,
     SearchRepoMemory,
 )
 
@@ -143,6 +145,8 @@ def test_github_skills_expose_complete_tool_definitions() -> None:
         labels_tool = AddLabels(token="secret-token", client=client).get_tool_definition()
         close_tool = CloseIssue(token="secret-token", client=client).get_tool_definition()
         comment_tool = CommentOnPR(token="secret-token", client=client).get_tool_definition()
+        dispatch_tool = DispatchWorkflow(token="secret-token", client=client).get_tool_definition()
+        run_tool = ReadWorkflowRun(token="secret-token", client=client).get_tool_definition()
     finally:
         import asyncio
 
@@ -157,6 +161,10 @@ def test_github_skills_expose_complete_tool_definitions() -> None:
     assert labels_tool["function"]["parameters"]["properties"]["labels"]["type"] == "array"
     assert close_tool["function"]["parameters"]["properties"]["issue_number"]["type"] == "integer"
     assert comment_tool["function"]["parameters"]["properties"]["body"]["type"] == "string"
+    assert dispatch_tool["function"]["name"] == "dispatch_workflow"
+    assert dispatch_tool["function"]["parameters"]["properties"]["workflow_id"]["type"] == "string"
+    assert run_tool["function"]["name"] == "read_workflow_run"
+    assert run_tool["function"]["parameters"]["properties"]["run_id"]["type"] == "integer"
 
 
 @pytest.mark.asyncio
@@ -351,3 +359,150 @@ async def test_comment_on_pr_uses_explicit_pr_number() -> None:
 
     assert captured["url"].endswith("/repos/acme/widgets/issues/200/comments")
     assert "Commented on PR #200" == result
+
+
+@pytest.mark.asyncio
+async def test_dispatch_workflow_posts_to_dispatches_endpoint() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["body"] = request.content.decode()
+        return httpx.Response(204)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = DispatchWorkflow(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(workflow_id="ci.yml", ref="feature/branch")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/repos/acme/widgets/actions/workflows/ci.yml/dispatches")
+    body = json.loads(captured["body"])
+    assert body["ref"] == "feature/branch"
+    assert body["inputs"] == {}
+    assert "Dispatched workflow 'ci.yml'" in result
+    assert "read_workflow_run" in result
+
+
+@pytest.mark.asyncio
+async def test_dispatch_workflow_passes_inputs_in_body() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content.decode()
+        return httpx.Response(204)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = DispatchWorkflow(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        await skill.execute(workflow_id="test.yml", ref="main", inputs={"suite": "unit"})
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    body = json.loads(captured["body"])
+    assert body["inputs"] == {"suite": "unit"}
+
+
+@pytest.mark.asyncio
+async def test_read_workflow_run_by_run_id() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "name": "CI",
+                "status": "completed",
+                "conclusion": "success",
+                "created_at": "2025-01-01T00:00:00Z",
+                "html_url": "https://github.test/acme/widgets/actions/runs/999",
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = ReadWorkflowRun(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(run_id=999, workflow_id="")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["url"].endswith("/repos/acme/widgets/actions/runs/999")
+    assert "Status: completed" in result
+    assert "Conclusion: success" in result
+    assert "https://github.test/acme/widgets/actions/runs/999" in result
+
+
+@pytest.mark.asyncio
+async def test_read_workflow_run_latest_by_workflow_id() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "total_count": 3,
+                "workflow_runs": [
+                    {
+                        "name": "CI",
+                        "status": "in_progress",
+                        "conclusion": None,
+                        "created_at": "2025-06-01T12:00:00Z",
+                        "html_url": "https://github.test/acme/widgets/actions/runs/42",
+                    }
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = ReadWorkflowRun(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(workflow_id="ci.yml", run_id=0)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "/repos/acme/widgets/actions/workflows/ci.yml/runs" in captured["url"]
+    assert "per_page=1" in captured["url"]
+    assert "Status: in_progress" in result
+    assert "Conclusion: N/A" in result
+
+
+@pytest.mark.asyncio
+async def test_read_workflow_run_returns_error_when_no_identifier() -> None:
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={})),
+        base_url="https://api.github.test",
+    )
+    skill = ReadWorkflowRun(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(workflow_id="", run_id=0)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Must provide either workflow_id or run_id." == result

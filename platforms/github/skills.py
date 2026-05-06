@@ -43,6 +43,17 @@ class CommentOnPRArgs(BaseModel):
     body: str
 
 
+class DispatchWorkflowArgs(BaseModel):
+    workflow_id: str
+    ref: str = "main"
+    inputs: dict[str, str] = {}
+
+
+class ReadWorkflowRunArgs(BaseModel):
+    workflow_id: str = ""
+    run_id: int = 0
+
+
 class GitHubSkillBase(BaseSkill):
     """Shared GitHub client plumbing for skills."""
 
@@ -187,3 +198,67 @@ class CommentOnPR(GitHubSkillBase):
             json_body={"body": args.body},
         )
         return f"Commented on PR #{pr_number}"
+
+
+class DispatchWorkflow(GitHubSkillBase):
+    name = "dispatch_workflow"
+    description = (
+        "Trigger a GitHub Actions workflow by its filename (e.g. 'ci.yml') "
+        "or numeric ID. The workflow must have a workflow_dispatch trigger. "
+        "Use this to run tests, lint, deploy, or any CI pipeline already "
+        "defined in the repository."
+    )
+    args_model = DispatchWorkflowArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        inputs = args.inputs if isinstance(args.inputs, dict) else {}
+        await self._api.post_no_content(
+            f"/repos/{context['owner']}/{context['repo']}/actions/workflows/{args.workflow_id}/dispatches",
+            json_body={"ref": args.ref, "inputs": inputs},
+        )
+        return (
+            f"Dispatched workflow '{args.workflow_id}' on ref '{args.ref}'. "
+            f"Use read_workflow_run with workflow_id='{args.workflow_id}' to check the result."
+        )
+
+
+class ReadWorkflowRun(GitHubSkillBase):
+    name = "read_workflow_run"
+    description = (
+        "Read the status of a GitHub Actions workflow run. "
+        "If run_id is provided, reads that specific run. "
+        "Otherwise reads the latest run for the given workflow_id. "
+        "Returns status, conclusion, duration, and a link to the run."
+    )
+    args_model = ReadWorkflowRunArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+
+        if args.run_id > 0:
+            run = await self._api.get_json(
+                f"/repos/{context['owner']}/{context['repo']}/actions/runs/{args.run_id}"
+            )
+        elif args.workflow_id:
+            runs = await self._api.get_json(
+                f"/repos/{context['owner']}/{context['repo']}/actions/workflows/{args.workflow_id}/runs",
+                params={"per_page": 1},
+            )
+            if not runs.get("workflow_runs"):
+                return f"No runs found for workflow '{args.workflow_id}'."
+            run = runs["workflow_runs"][0]
+        else:
+            return "Must provide either workflow_id or run_id."
+
+        return "\n".join(
+            [
+                f"Workflow: {run.get('name') or args.workflow_id}",
+                f"Status: {run.get('status')}",
+                f"Conclusion: {run.get('conclusion') or 'N/A'}",
+                f"Created: {run.get('created_at')}",
+                f"URL: {run.get('html_url')}",
+            ]
+        )

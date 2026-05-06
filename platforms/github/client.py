@@ -88,6 +88,20 @@ class GitHubApiClient:
         response.raise_for_status()
         return response.json()
 
+    async def post_no_content(
+        self,
+        path: str,
+        *,
+        json_body: dict[str, Any],
+        accept: str = "application/vnd.github+json",
+    ) -> None:
+        response = await self._client.post(
+            path,
+            json=json_body,
+            headers=self._headers(accept=accept),
+        )
+        response.raise_for_status()
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()

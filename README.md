@@ -114,6 +114,8 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 | `add_labels` | 写 | 为 Issue 添加标签 |
 | `close_issue` | 写 | 关闭 Issue |
 | `comment_on_pr` | 写 | 在 PR 下发布评论 |
+| `dispatch_workflow` | 写 | 触发仓库中已有的 GitHub Actions workflow（如测试、部署） |
+| `read_workflow_run` | 读 | 查看 workflow 运行状态和结果 |
 
 Agent 在单次执行中最多进行 5 轮工具调用。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息。
 
@@ -261,6 +263,7 @@ on:
 permissions:
   issues: write
   pull-requests: read
+  actions: write
 
 jobs:
   run-ryobot:
