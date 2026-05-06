@@ -126,6 +126,7 @@ async def _run(
             plugin=plugin,
             cooldown_seconds=cooldown_seconds,
             max_iterations=max_iterations,
+            max_tokens=bot.max_tokens,
         )
         await ryo_agent.run(payload)
     finally:

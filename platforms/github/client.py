@@ -122,7 +122,7 @@ class GitHubApiClient:
 
     @staticmethod
     def _retryable(response: httpx.Response) -> bool:
-        return response.status_code in (429, 500, 502, 503, 504)
+        return response.status_code in (403, 429, 500, 502, 503, 504)
 
     async def _with_retry(self, request: Any) -> httpx.Response:
         attempt = 0
@@ -133,6 +133,7 @@ class GitHubApiClient:
             try:
                 response = await request()
                 if not self._retryable(response):
+                    response.raise_for_status()
                     return response
                 if attempt >= 3:
                     response.raise_for_status()
@@ -148,7 +149,7 @@ class GitHubApiClient:
 
     @staticmethod
     def _retry_delay(response: httpx.Response | None, fallback: float) -> float:
-        if response is not None and response.status_code == 429:
+        if response is not None and response.status_code in (403, 429):
             header = response.headers.get("Retry-After", "")
             if header:
                 try:

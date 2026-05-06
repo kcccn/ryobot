@@ -60,7 +60,7 @@ class _AnthropicCompletions:
         request: dict[str, Any] = {
             "model": model,
             "messages": anthropic_messages,
-            "max_tokens": 4096,
+            "max_tokens": kwargs.get("max_tokens", 4096),
         }
         if system_parts:
             request["system"] = "\n\n".join(system_parts)
@@ -138,13 +138,21 @@ def _convert_response(response: Any) -> "_FakeResponse":
                 name=getattr(block, "name", ""),
                 input_obj=getattr(block, "input", {}),
             ))
+        elif block_type == "thinking":
+            thinking_text = getattr(block, "thinking", "")
+            if thinking_text:
+                text_parts.append(f"[思考]{thinking_text}[/思考]")
 
     text = "\n".join(text_parts) if text_parts else ""
     message = _FakeMessage(
         content=text or None,
         tool_calls=tool_calls or None,
     )
-    return _FakeResponse(choices=[_FakeChoice(message=message)])
+    return _FakeResponse(
+        choices=[_FakeChoice(message=message)],
+        stop_reason=getattr(response, "stop_reason", None),
+        usage=getattr(response, "usage", None),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +160,10 @@ def _convert_response(response: Any) -> "_FakeResponse":
 # ---------------------------------------------------------------------------
 
 class _FakeResponse:
-    def __init__(self, *, choices: list["_FakeChoice"]) -> None:
+    def __init__(self, *, choices: list["_FakeChoice"], stop_reason: str | None = None, usage: Any = None) -> None:
         self.choices = choices
+        self.stop_reason = stop_reason
+        self.usage = usage
 
 
 class _FakeChoice:

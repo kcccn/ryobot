@@ -14,3 +14,4 @@ class BotConfig:
     base_url: str | None = None
     api_key_env: str | None = None
     provider: str = "openai"
+    max_tokens: int = 4096

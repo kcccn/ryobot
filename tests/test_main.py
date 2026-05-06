@@ -9,8 +9,9 @@ from typing import Any
 import pytest
 
 
-README_PATH = Path("D:/ryobot/README.md")
-WORKFLOW_PATH = Path("D:/ryobot/.github/workflows/github-ryobot.yml")
+_PROJECT_ROOT = Path(__file__).parent.parent
+README_PATH = _PROJECT_ROOT / "README.md"
+WORKFLOW_PATH = _PROJECT_ROOT / ".github" / "workflows" / "github-ryobot.yml"
 
 
 def valid_payload() -> dict[str, Any]:
@@ -171,6 +172,64 @@ def test_readme_brands_project_as_ryo_ghost_engine() -> None:
     assert "GitHub Actions" in content
     assert "<!-- ryo:{identity}: {...} -->" in content
     assert "DEEPSEEK_API_KEY" in content
+
+
+def test_main_uses_anthropic_adapter_when_bot_provider_is_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    main = import_main_module()
+    payload = valid_payload()
+    captured: dict[str, Any] = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        async def aclose(self) -> None:
+            pass
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["openai_called"] = True
+
+    class FakeAnthropicAdapter:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["anthropic_kwargs"] = kwargs
+
+    class FakeGitHubPlugin:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeSkill:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+    class FakeRyoAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["ryo_agent_kwargs"] = kwargs
+
+        async def run(self, raw_event: Any) -> None:
+            pass
+
+    monkeypatch.setattr(main, "BOT_IDENTITY", "reviewer")
+    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthro-key")
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(main, "AsyncOpenAI", _FakeOpenAI)
+    monkeypatch.setattr(main, "AnthropicAdapter", FakeAnthropicAdapter)
+    monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
+    for name in ("ReadIssueMemory", "SearchRepoMemory", "ReadCodeDiff",
+                 "CreateIssue", "AddLabels", "CloseIssue",
+                 "CommentOnPR", "DispatchWorkflow", "ReadWorkflowRun"):
+        monkeypatch.setattr(main, name, FakeSkill)
+    monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
+
+    main.main()
+
+    assert "openai_called" not in captured
+    assert captured["anthropic_kwargs"]["api_key"] == "anthro-key"
+    assert captured["anthropic_kwargs"]["base_url"] == "https://api.anthropic.com/v1"
+    assert captured["ryo_agent_kwargs"]["persona"]["model"] == "claude-sonnet-4-6"
+    assert captured["ryo_agent_kwargs"]["max_tokens"] == 4096
 
 
 def test_workflow_passes_github_event_payload_and_secret() -> None:

@@ -22,7 +22,7 @@ class PluginEvent(BaseModel):
 class HistorySnapshot(BaseModel):
     """Conversation history plus persisted subconscious state."""
 
-    messages: list[dict[str, str]] = Field(default_factory=list)
+    messages: list[dict[str, Any]] = Field(default_factory=list)
     subconscious: dict[str, Any] = Field(default_factory=dict)
     last_bot_comment_at: str | None = None
 

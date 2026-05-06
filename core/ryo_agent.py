@@ -32,6 +32,7 @@ class RyoAgent:
         plugin: BasePlugin,
         cooldown_seconds: int = 0,
         max_iterations: int = 5,
+        max_tokens: int = 4096,
     ) -> None:
         if "model" not in persona or "system_prompt" not in persona:
             raise ValueError("persona must include 'model' and 'system_prompt'.")
@@ -42,6 +43,7 @@ class RyoAgent:
         self.plugin = plugin
         self.cooldown_seconds = cooldown_seconds
         self.max_iterations = max_iterations
+        self.max_tokens = max_tokens
         self._skills_by_name = {skill.name: skill for skill in skills}
 
     async def run(self, raw_event: Any) -> None:
@@ -111,6 +113,7 @@ class RyoAgent:
         request: dict[str, Any] = {
             "model": self.persona["model"],
             "messages": messages,
+            "max_tokens": self.max_tokens,
         }
         if tools:
             request["tools"] = tools
