@@ -28,6 +28,12 @@ on:
         type: number
         default: 300
 
+permissions:
+  issues: write
+  pull-requests: write
+  actions: write
+  contents: write
+
 jobs:
   run-ryobot:
     strategy:
