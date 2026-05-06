@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-
 import re
 import sys
 from typing import Any
@@ -44,6 +43,23 @@ DEFAULT_COOLDOWN_SECONDS = 120
 DEFAULT_MARKER_AUTHOR_LOGINS = frozenset({"github-actions[bot]"})
 
 BOT_IDENTITY = os.getenv("BOT_IDENTITY", "architect")
+
+
+def _log_event(payload: dict[str, Any]) -> None:
+    kind = (
+        "schedule" if "schedule" in payload
+        else "workflow_dispatch" if isinstance(payload.get("inputs"), dict)
+        else "issue_comment" if "comment" in payload
+        else "issues" if "issue" in payload
+        else "pull_request" if "pull_request" in payload
+        else "unknown"
+    )
+    number = ""
+    if "issue" in payload:
+        number = f" #{(payload['issue'] or {}).get('number', '?')}"
+    elif "pull_request" in payload:
+        number = f" #{(payload['pull_request'] or {}).get('number', '?')}"
+    print(f"[main] event={kind}{number} bot={BOT_IDENTITY}", file=sys.stderr)
 
 
 def _contains_own_marker(payload: dict[str, Any], identity: str) -> bool:
@@ -104,7 +120,10 @@ def main() -> None:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
 
+    _log_event(payload)
+
     if _contains_own_marker(payload, BOT_IDENTITY):
+        print(f"SKIP: event already contains {BOT_IDENTITY} marker", file=sys.stderr)
         raise SystemExit(0)
 
     if "repository" not in payload:

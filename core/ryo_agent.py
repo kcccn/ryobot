@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import sys
+import time
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from json import JSONDecodeError
@@ -17,6 +19,20 @@ DEFAULT_FALLBACK_MESSAGE = "I'm sorry, but I couldn't complete your request righ
 TRUSTED_MUTATION_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 DEFAULT_MAX_TOOL_RESULT_CHARS = 20000
 NO_REPLY_TOOL_NAME = "no_reply"
+LOG_TRUNCATE = 500
+
+
+def _log(msg: str, *, end: str = "\n") -> None:
+    ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", end=end, file=sys.stderr, flush=True)
+
+
+def _gh_group(title: str) -> None:
+    print(f"::group::{title}", file=sys.stderr, flush=True)
+
+
+def _gh_endgroup() -> None:
+    print("::endgroup::", file=sys.stderr, flush=True)
 
 
 class ChatMessage(TypedDict, total=False):
@@ -58,6 +74,16 @@ class RyoAgent:
         event = self.plugin.parse_event(raw_event)
         history = await self.plugin.fetch_history(event)
 
+        kind = "PR" if event.is_pull_request else "Issue"
+        _gh_group(f"Run: {kind} #{event.issue_number} by {event.author} "
+                  f"({event.owner}/{event.repo})")
+        _log(f"model={self.persona['model']} cooldown={self.cooldown_seconds}s "
+             f"max_iterations={self.max_iterations} skills={len(self.skills)}")
+        _log(f"event message: {event.message[:LOG_TRUNCATE]}")
+        if history.subconscious:
+            _log(f"subconscious: {json.dumps(history.subconscious, ensure_ascii=False)[:LOG_TRUNCATE]}")
+        _log(f"history messages: {len(history.messages)}")
+
         if self.cooldown_seconds > 0 and history.last_bot_comment_at:
             try:
                 last_at = datetime.fromisoformat(history.last_bot_comment_at.replace("Z", "+00:00"))
@@ -65,9 +91,16 @@ class RyoAgent:
                 jitter = random.uniform(0.5, 1.5)
                 effective_cooldown = self.cooldown_seconds * jitter
                 if elapsed < effective_cooldown:
+                    _log(f"SKIP: within cooldown (elapsed={elapsed:.0f}s < "
+                         f"effective_cooldown={effective_cooldown:.0f}s)")
+                    _gh_endgroup()
                     return
+                _log(f"cooldown passed (elapsed={elapsed:.0f}s >= "
+                     f"effective_cooldown={effective_cooldown:.0f}s)")
             except (ValueError, TypeError):
                 pass
+        elif history.last_bot_comment_at:
+            _log("cooldown disabled or no prior bot comment")
 
         messages: list[ChatMessage] = [
             {"role": "system", "content": self.persona["system_prompt"]},
@@ -79,26 +112,52 @@ class RyoAgent:
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
 
+        _log(f"available tools: {', '.join(t['function']['name'] for t in tools)}")
+
         try:
-            for _ in range(self.max_iterations):
+            for i in range(self.max_iterations):
+                _log(f"--- iteration {i + 1}/{self.max_iterations} ---")
+                t_start = time.monotonic()
                 response = await self._create_completion_with_retry(messages=messages, tools=tools)
+                t_elapsed = time.monotonic() - t_start
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
 
+                reasoning = getattr(assistant_message, "reasoning_content", None) or None
+                if reasoning:
+                    _log(f"reasoning ({t_elapsed:.1f}s): {reasoning[:LOG_TRUNCATE]}")
+                else:
+                    _log(f"LLM response ({t_elapsed:.1f}s)")
+
                 if tool_calls:
+                    tool_names = [
+                        getattr(getattr(tc, "function", None), "name", "?")
+                        for tc in tool_calls
+                    ]
+                    _log(f"tool calls: {tool_names}")
                     msg: ChatMessage = {
                         "role": "assistant",
                         "content": self._extract_text_content(assistant_message),
                         "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
                     }
-                    reasoning = getattr(assistant_message, "reasoning_content", None) or None
                     if reasoning:
                         msg["reasoning_content"] = reasoning
                     messages.append(msg)
                     for tool_call in tool_calls:
+                        tool_name = getattr(getattr(tool_call, "function", None), "name", "")
+                        args_raw = getattr(getattr(tool_call, "function", None), "arguments", "{}")
+                        _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
                         tool_result = await self._execute_tool_call(tool_call, event=event)
-                        if isinstance(tool_result, _NoReplyResult):
+                        if tool_name == NO_REPLY_TOOL_NAME:
+                            # Extract reason from args
+                            try:
+                                reason = json.loads(args_raw).get("reason", "(no reason)")
+                            except Exception:
+                                reason = "(no reason)"
+                            _log(f"  <- no_reply: {reason}")
+                            _gh_endgroup()
                             return
+                        _log(f"  <- result: {_truncate_log(tool_result)}")
                         messages.append(
                             {
                                 "role": "tool",
@@ -110,12 +169,18 @@ class RyoAgent:
 
                 reply_text = self._extract_text_content(assistant_message).strip()
                 if reply_text:
+                    _log(f"reply ({len(reply_text)} chars): {reply_text[:LOG_TRUNCATE]}")
                     await self.plugin.send_reply(event, reply_text, subconscious)
+                    _log("reply posted")
+                    _gh_endgroup()
                     return
 
+                _log("WARN: no tool calls and no text reply, breaking")
                 break
 
+            _log("WARN: max iterations reached, sending fallback message")
             await self.plugin.send_reply(event, DEFAULT_FALLBACK_MESSAGE, subconscious)
+            _gh_endgroup()
         finally:
             clear_skill_context(context_token)
 
@@ -149,8 +214,10 @@ class RyoAgent:
             except Exception:
                 attempt += 1
                 if attempt > max_retries:
+                    _log("LLM call failed after {attempt} retries, giving up")
                     raise
                 delay = 2 ** (attempt - 1)
+                _log(f"LLM call failed (attempt {attempt}), retrying in {delay}s...")
                 await asyncio.sleep(delay)
 
     def _available_skills_for_event(self, event: PluginEvent) -> Sequence[BaseSkill]:
@@ -281,6 +348,11 @@ def _truncate_text(text: str, max_chars: int) -> str:
         return text
     omitted = len(text) - max_chars
     return f"{text[:max_chars]}\n[truncated: {omitted} chars omitted]"
+
+
+def _truncate_log(result: Any) -> str:
+    text = result if isinstance(result, str) else str(result)
+    return _truncate_text(text, LOG_TRUNCATE)
 
 
 class _NoReplyArgs(BaseModel):
