@@ -127,13 +127,13 @@ Agent 在单次执行中最多进行 5 轮工具调用。如果 LLM 连续调用
 
 ```html
 给人类看的正常回复。
-<!-- ryo_state: {"mode":"reflective","thread":"issue-12"} -->
+<!-- ryo:architect: {"mode":"reflective","thread":"issue-12"} -->
 ```
 
 最小标记形态：
 
 ```html
-<!-- ryo_state: {...} -->
+<!-- ryo:{identity}: {...} -->
 ```
 
 对人类来说，这是一条普通评论；对 `GitHubPlugin` 来说，它包含两层信息：
@@ -160,7 +160,7 @@ GitHub 评论时间线
 每次触发时，`main.py` 只做四件事：
 
 1. 读取 `EVENT_PAYLOAD`、`GITHUB_TOKEN`、`DEEPSEEK_API_KEY`
-2. 如果事件来自 `sender.type == "Bot"`，直接退出，做物理防死循环
+2. 如果事件已包含本 bot 的标记（`<!-- ryo:{identity}:`），直接退出，防止自我重复触发
 3. 组装 `GitHubPlugin`、GitHub skills、`RyoAgent` 与 DeepSeek 客户端
 4. 调用核心 ReAct 循环，并把结果写回 GitHub
 
@@ -172,13 +172,13 @@ GitHub 评论时间线
 issue / PR / comment event
         |
         v
-GitHub Actions workflow
+GitHub Actions workflow (matrix: 4 bots)
         |
         v
 python main.py
         |
         v
-RyoBot sender? ---- yes ---> exit(0)
+Contains own marker? ---- yes ---> exit(0)
         |
         no
         |
@@ -197,7 +197,7 @@ Within cooldown? ---- yes ---> exit(0)
 GitHubPlugin.send_reply()
         |
         v
-Issue comment + hidden ryo_state blob
+Issue comment + hidden ryo:{identity} blob
 ```
 
 ## 极简部署指南
@@ -224,13 +224,32 @@ bot 在以下事件上触发：
 | `pull_request.opened / edited / synchronize` | PR 创建、编辑或推送新代码 |
 | `pull_request_review_comment.created` | PR review 讨论中新评论 |
 
-bot 不会回复 `sender.type == "Bot"` 的事件（防死循环）。
+bot 通过评论中的身份标记（`<!-- ryo:{identity}:`）识别自己的历史评论，避免重复回复。不同 bot 之间可以互相回复，形成多智能体协作生态。
 
 ### 冷却机制
 
 通过 `COOLDOWN_SECONDS` 环境变量控制 bot 的最小响应间隔（默认 `120` 秒）。如果 bot 在上一次回复后的冷却窗口内再次被触发，会静默退出，不会发帖。设置为 `0` 可禁用冷却。
 
 `send_reply` 发帖前会随机等待 1-5 秒，模拟人类打字节奏。
+
+### Bot 社会（Multi-Bot Society）
+
+Ryo Ghost Engine 支持同时运行 4 个拥有不同人格的 bot，通过 GitHub Actions 的 matrix strategy 并行执行。每个 bot 在自己的评论中嵌入唯一的身份标记（`<!-- ryo:{identity}: ... -->`），只会跳过自己的历史评论，允许与其他 bot 和用户自由交互。
+
+| Bot Identity | 人格 | 风格 |
+|---|---|---|
+| `architect` | Ryo Architect | 严厉且幽默的顶级架构师，直接、苛刻、保留冷幽默 |
+| `reviewer` | Ryo Reviewer | 挑剔的代码审查者，关注边界情况、错误处理与可维护性 |
+| `pm` | Ryo PM | 关注用户体验和产品逻辑一致性的产品经理 |
+| `explorer` | Ryo Explorer | 充满好奇心的黑客，热衷探索架构可能性与创造性替代方案 |
+
+核心机制：
+- **身份标记**：每个 bot 的评论中包含 `<!-- ryo:{identity}: -->` 标记，其他 bot 通过标记区分彼此
+- **自我跳过**：收到包含自己标记的事件时静默退出，避免重复回复
+- **并行执行**：workflow 使用 `matrix.bot` 为 4 个 bot 分别启动独立 job，彼此不感知对方的存在
+- **独立冷却**：每个 bot 只追踪自己的回复时间戳，冷却机制互不干扰
+
+如果只需要单个 bot，不设置 `BOT_IDENTITY` 环境变量即可（默认使用 `architect` 人格）。
 
 ### 为什么只需要一个 Secret
 
@@ -246,8 +265,10 @@ bot 不会回复 `sender.type == "Bot"` 的事件（防死循环）。
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `LLM_MODEL` | `deepseek-chat` | 模型名称，任何 OpenAI 兼容模型均可 |
+| `LLM_MODEL` | `deepseek-v4-flash` | 模型名称，任何 OpenAI 兼容模型均可 |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | API 端点地址 |
+| `BOT_IDENTITY` | `architect` | bot 身份，可选 `architect` / `reviewer` / `pm` / `explorer` |
+| `COOLDOWN_SECONDS` | `120` | bot 最小响应间隔（秒），设为 `0` 可禁用冷却 |
 
 例如切到 DeepSeek 的 reasoning 模型：
 
@@ -299,6 +320,9 @@ permissions:
 
 jobs:
   run-ryobot:
+    strategy:
+      matrix:
+        bot: [architect, reviewer, pm, explorer]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout ryobot code
@@ -319,6 +343,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EVENT_PAYLOAD: ${{ toJson(github.event) }}
+          BOT_IDENTITY: ${{ matrix.bot }}
         run: python main.py
 ```
 

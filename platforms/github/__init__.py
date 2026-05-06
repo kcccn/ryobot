@@ -1,4 +1,4 @@
-from .plugin import GITHUB_COMMENT_STATE_PATTERN, GitHubPlugin
+from .plugin import GitHubPlugin
 from .skills import (
     AddLabels,
     CloseIssue,
@@ -17,7 +17,6 @@ __all__ = [
     "CommentOnPR",
     "CreateIssue",
     "DispatchWorkflow",
-    "GITHUB_COMMENT_STATE_PATTERN",
     "GitHubPlugin",
     "ReadCodeDiff",
     "ReadIssueMemory",

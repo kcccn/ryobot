@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from core.plugins import PluginEvent
-from platforms.github.plugin import GITHUB_COMMENT_STATE_PATTERN, GitHubPlugin
+from platforms.github.plugin import GitHubPlugin
 
 
 def build_issue_comment_payload(*, body: str = "hello", comment_id: int = 99) -> dict[str, Any]:
@@ -30,13 +30,14 @@ def build_plugin(
     handler: httpx.MockTransport | None = None,
     *,
     token: str = "secret-token",
+    identity: str = "architect",
 ) -> GitHubPlugin:
     transport = handler or httpx.MockTransport(lambda request: httpx.Response(200, json={}))
     client = httpx.AsyncClient(
         transport=transport,
         base_url="https://api.github.test",
     )
-    return GitHubPlugin(token=token, client=client, api_base_url="https://api.github.test")
+    return GitHubPlugin(token=token, client=client, api_base_url="https://api.github.test", identity=identity)
 
 
 def test_parse_event_normalizes_issue_comment_payload() -> None:
@@ -79,7 +80,7 @@ async def test_send_reply_posts_comment_with_hidden_state_marker() -> None:
     assert captured["accept"] == "application/vnd.github+json"
     assert captured["auth"] == "Bearer secret-token"
     assert captured["payload"]["body"].endswith(
-        '<!-- ryo_state: {"mode":"reflective"} -->'
+        '<!-- ryo:architect: {"mode":"reflective"} -->'
     )
 
 
@@ -93,7 +94,7 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
         },
         {
             "id": 2,
-            "body": 'RyoBot reply\n<!-- ryo_state: {"mode":"draft"} -->',
+            "body": 'RyoBot reply\n<!-- ryo:architect: {"mode":"draft"} -->',
             "user": {"login": "ryobot"},
         },
         {
@@ -103,12 +104,12 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
         },
         {
             "id": 3,
-            "body": 'new RyoBot reply\n<!-- ryo_state: {"mode":"final","step":2} -->',
+            "body": 'new RyoBot reply\n<!-- ryo:architect: {"mode":"final","step":2} -->',
             "user": {"login": "ryobot"},
         },
         {
             "id": 4,
-            "body": 'broken marker\n<!-- ryo_state: not-json -->',
+            "body": 'broken marker\n<!-- ryo:architect: not-json -->',
             "user": {"login": "ryobot"},
         },
     ]
@@ -126,17 +127,26 @@ async def test_fetch_history_extracts_latest_valid_subconscious_and_skips_trigge
         {"role": "user", "content": "first user comment"},
         {"role": "assistant", "content": "RyoBot reply"},
         {"role": "assistant", "content": "new RyoBot reply"},
-        {"role": "user", "content": "broken marker"},
+        {"role": "assistant", "content": "broken marker"},
     ]
     assert snapshot.subconscious == {"mode": "final", "step": 2}
 
 
-def test_comment_state_pattern_matches_expected_marker() -> None:
-    body = 'hello\n<!-- ryo_state: {"mode":"focus"} -->'
-    match = GITHUB_COMMENT_STATE_PATTERN.search(body)
+def test_state_pattern_matches_own_identity_marker() -> None:
+    plugin = build_plugin(identity="architect")
+    body = 'hello\n<!-- ryo:architect: {"mode":"focus"} -->'
+    match = plugin._state_pattern.search(body)
 
     assert match is not None
     assert match.group("payload") == '{"mode":"focus"}'
+
+
+def test_state_pattern_ignores_other_identity_marker() -> None:
+    plugin = build_plugin(identity="architect")
+    body = 'hello\n<!-- ryo:reviewer: {"mode":"focus"} -->'
+    match = plugin._state_pattern.search(body)
+
+    assert match is None
 
 
 def build_issue_payload(*, action: str = "opened", number: int = 12, title: str = "Bug found", body: str = "Steps") -> dict[str, Any]:
@@ -249,7 +259,7 @@ async def test_fetch_history_tracks_bot_timestamp() -> None:
         {"id": 1, "body": "human comment", "user": {"login": "human", "type": "User"}},
         {
             "id": 2,
-            "body": "bot reply\n<!-- ryo_state: {} -->",
+            "body": "bot reply\n<!-- ryo:architect: {} -->",
             "user": {"login": "ryobot[bot]", "type": "Bot"},
             "created_at": "2025-06-15T10:30:00Z",
         },
@@ -265,3 +275,79 @@ async def test_fetch_history_tracks_bot_timestamp() -> None:
     await plugin.aclose()
 
     assert snapshot.last_bot_comment_at == "2025-06-15T10:30:00Z"
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_only_tracks_own_bot_for_cooldown() -> None:
+    comments = [
+        {
+            "id": 1,
+            "body": 'msg\n<!-- ryo:reviewer: {} -->',
+            "user": {"login": "ryobot[bot]", "type": "Bot"},
+            "created_at": "2025-06-15T10:00:00Z",
+        },
+        {
+            "id": 2,
+            "body": 'msg\n<!-- ryo:architect: {} -->',
+            "user": {"login": "ryobot[bot]", "type": "Bot"},
+            "created_at": "2025-06-15T10:30:00Z",
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=comments)
+
+    plugin = build_plugin(httpx.MockTransport(handler), identity="architect")
+    event = plugin.parse_event(build_issue_comment_payload(comment_id=99))
+
+    snapshot = await plugin.fetch_history(event)
+    await plugin.aclose()
+
+    assert snapshot.last_bot_comment_at == "2025-06-15T10:30:00Z"
+
+
+@pytest.mark.asyncio
+async def test_fetch_history_includes_other_bot_messages() -> None:
+    comments = [
+        {
+            "id": 1,
+            "body": 'reviewer reply\n<!-- ryo:reviewer: {} -->',
+            "user": {"login": "ryobot[bot]", "type": "Bot"},
+        },
+        {
+            "id": 2,
+            "body": 'architect reply\n<!-- ryo:architect: {} -->',
+            "user": {"login": "ryobot[bot]", "type": "Bot"},
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=comments)
+
+    plugin = build_plugin(httpx.MockTransport(handler), identity="architect")
+    event = plugin.parse_event(build_issue_comment_payload(comment_id=99))
+
+    snapshot = await plugin.fetch_history(event)
+    await plugin.aclose()
+
+    assert len(snapshot.messages) == 2
+    assert all(m["role"] == "assistant" for m in snapshot.messages)
+    assert snapshot.messages[0]["content"] == "reviewer reply"
+    assert snapshot.messages[1]["content"] == "architect reply"
+
+
+@pytest.mark.asyncio
+async def test_send_reply_embeds_correct_identity_marker() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(201, json={"id": 123})
+
+    plugin = build_plugin(httpx.MockTransport(handler), identity="reviewer")
+    event = plugin.parse_event(build_issue_comment_payload())
+
+    await plugin.send_reply(event, "Review done", {"mode": "done"})
+    await plugin.aclose()
+
+    assert '<!-- ryo:reviewer: {"mode":"done"} -->' in captured["payload"]["body"]

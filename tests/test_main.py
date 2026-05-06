@@ -13,9 +13,8 @@ README_PATH = Path("D:/ryobot/README.md")
 WORKFLOW_PATH = Path("D:/ryobot/.github/workflows/github-ryobot.yml")
 
 
-def valid_payload(*, sender_type: str = "User") -> dict[str, Any]:
+def valid_payload() -> dict[str, Any]:
     return {
-        "sender": {"type": sender_type},
         "action": "created",
         "issue": {"id": 1001, "number": 12},
         "comment": {
@@ -30,20 +29,53 @@ def valid_payload(*, sender_type: str = "User") -> dict[str, Any]:
     }
 
 
+def payload_with_comment_body(body: str) -> dict[str, Any]:
+    p = valid_payload()
+    p["comment"]["body"] = body  # type: ignore[index]
+    return p
+
+
 def import_main_module():
     return importlib.import_module("main")
 
 
-def test_main_exits_zero_for_ryobot_sender(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_exits_zero_when_event_contains_own_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     main = import_main_module()
-    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(valid_payload(sender_type="Bot")))
+    payload = payload_with_comment_body('previous bot reply\n<!-- ryo:architect: {} -->')
+    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
     monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
+    monkeypatch.setenv("BOT_IDENTITY", "architect")
 
     with pytest.raises(SystemExit) as exc:
         main.main()
 
     assert exc.value.code == 0
+
+
+def test_main_proceeds_when_event_contains_other_bot_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    main = import_main_module()
+    payload = payload_with_comment_body('other bot reply\n<!-- ryo:reviewer: {} -->')
+    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(payload))
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
+    monkeypatch.setenv("BOT_IDENTITY", "architect")
+
+    # Should not exit — other bot's marker is not ours
+    monkeypatch.setattr(main.asyncio, "run", lambda *a, **kw: None)
+    main.main()  # no SystemExit
+
+
+def test_main_proceeds_when_no_marker_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    main = import_main_module()
+    monkeypatch.setenv("EVENT_PAYLOAD", json.dumps(valid_payload()))
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
+    monkeypatch.setenv("BOT_IDENTITY", "architect")
+
+    # Should not exit — no marker at all
+    monkeypatch.setattr(main.asyncio, "run", lambda *a, **kw: None)
+    main.main()
 
 
 def test_main_fails_when_required_env_vars_are_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,8 +156,9 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     assert captured["openai_kwargs"]["api_key"] == "ds-token"
     assert captured["openai_kwargs"]["base_url"] == "https://api.deepseek.com"
     assert captured["plugin_kwargs"]["token"] == "gh-token"
+    assert captured["plugin_kwargs"]["identity"] == "architect"
     assert len(captured["skill_kwargs"]) == 9
-    assert captured["ryo_agent_kwargs"]["persona"]["model"] == "deepseek-chat"
+    assert captured["ryo_agent_kwargs"]["persona"]["model"] == "deepseek-v4-flash"
     assert "严厉且幽默的顶级架构师" in captured["ryo_agent_kwargs"]["persona"]["system_prompt"]
     assert captured["http_client_closed"] is True
 
@@ -136,7 +169,7 @@ def test_readme_brands_project_as_ryo_ghost_engine() -> None:
     assert "Ryo Ghost Engine" in content
     assert "Serverless" in content
     assert "GitHub Actions" in content
-    assert "<!-- ryo_state: {...} -->" in content
+    assert "<!-- ryo:{identity}: {...} -->" in content
     assert "DEEPSEEK_API_KEY" in content
 
 
@@ -147,3 +180,4 @@ def test_workflow_passes_github_event_payload_and_secret() -> None:
     assert "GITHUB_TOKEN: ${{ github.token }}" in content
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in content
     assert "EVENT_PAYLOAD: ${{ toJson(github.event) }}" in content
+    assert "BOT_IDENTITY: ${{ matrix.bot }}" in content

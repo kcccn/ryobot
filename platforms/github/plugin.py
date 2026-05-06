@@ -13,12 +13,8 @@ from core.plugins import BasePlugin, HistorySnapshot, PluginEvent
 
 from .client import GitHubApiClient
 
-GITHUB_COMMENT_STATE_PATTERN = re.compile(
-    r"<!--\s*ryo_state:\s*(?P<payload>\{.*?\})\s*-->",
-    re.DOTALL,
-)
-GITHUB_COMMENT_MARKER_PATTERN = re.compile(
-    r"<!--\s*ryo_state:.*?-->",
+_RYO_ANY_MARKER_PATTERN = re.compile(
+    r"<!--\s*ryo:\w+:.*?-->",
     re.DOTALL,
 )
 
@@ -32,8 +28,18 @@ class GitHubPlugin(BasePlugin):
         token: str | None = None,
         client: httpx.AsyncClient | None = None,
         api_base_url: str | None = None,
+        identity: str = "architect",
     ) -> None:
         self._api = GitHubApiClient(token=token, client=client, api_base_url=api_base_url)
+        self._identity = identity
+        self._state_pattern = re.compile(
+            rf"<!--\s*ryo:{re.escape(identity)}:\s*(?P<payload>\{{.*?\}})\s*-->",
+            re.DOTALL,
+        )
+        self._marker_pattern = re.compile(
+            rf"<!--\s*ryo:{re.escape(identity)}:.*?-->",
+            re.DOTALL,
+        )
 
     def parse_event(self, raw_payload: Any) -> PluginEvent:
         if not isinstance(raw_payload, dict):
@@ -166,23 +172,24 @@ class GitHubPlugin(BasePlugin):
             if int(comment.get("id", 0)) == event.comment_id:
                 continue
 
-            user = comment.get("user") or {}
-            is_bot = str(user.get("type") or "") == "Bot"
-            if is_bot:
-                last_bot_comment_at = str(comment.get("created_at") or "")
-
             body = str(comment.get("body") or "")
-            match = GITHUB_COMMENT_STATE_PATTERN.search(body)
-            if match:
-                visible_content = GITHUB_COMMENT_MARKER_PATTERN.sub("", body).strip()
-                messages.append({"role": "assistant", "content": visible_content})
+            clean_body = _RYO_ANY_MARKER_PATTERN.sub("", body).strip()
+
+            our_match = self._state_pattern.search(body)
+            if our_match:
+                messages.append({"role": "assistant", "content": clean_body})
                 try:
-                    subconscious = json.loads(match.group("payload"))
+                    subconscious = json.loads(our_match.group("payload"))
                 except json.JSONDecodeError:
                     pass
+                last_bot_comment_at = str(comment.get("created_at") or "")
                 continue
 
-            messages.append({"role": "user", "content": GITHUB_COMMENT_MARKER_PATTERN.sub("", body).strip()})
+            if _RYO_ANY_MARKER_PATTERN.search(body):
+                messages.append({"role": "assistant", "content": clean_body})
+                continue
+
+            messages.append({"role": "user", "content": clean_body})
 
         return HistorySnapshot(
             messages=messages,
@@ -198,7 +205,7 @@ class GitHubPlugin(BasePlugin):
     ) -> None:
         await asyncio.sleep(random.uniform(1, 5))
         state_blob = json.dumps(subconscious or {}, ensure_ascii=False, separators=(",", ":"))
-        body = f"{content}\n<!-- ryo_state: {state_blob} -->"
+        body = f"{content}\n<!-- ryo:{self._identity}: {state_blob} -->"
         await self._api.post_json(
             f"/repos/{event.owner}/{event.repo}/issues/{event.issue_number}/comments",
             json_body={"body": body},

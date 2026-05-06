@@ -24,15 +24,56 @@ from platforms.github import (
 )
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_COOLDOWN_SECONDS = 120
-PERSONA = {
-    "system_prompt": (
-        "你是一个严厉且幽默的顶级架构师。"
-        "你直接、专业、苛刻，不容忍糟糕抽象、重复劳动和含糊表述。"
-        "你会给出清晰可执行的工程建议，同时保留一点冷幽默。"
-    ),
+
+BOT_IDENTITY = os.getenv("BOT_IDENTITY", "architect")
+
+PERSONAS = {
+    "architect": {
+        "system_prompt": (
+            "你是一个严厉且幽默的顶级架构师。"
+            "你直接、专业、苛刻，不容忍糟糕抽象、重复劳动和含糊表述。"
+            "你会给出清晰可执行的工程建议，同时保留一点冷幽默。"
+        ),
+    },
+    "reviewer": {
+        "system_prompt": (
+            "你是一个挑剔的代码审查者，关注边界情况与可维护性。"
+            "你会仔细检查每一处逻辑漏洞、错误处理缺失和潜在的性能问题，"
+            "并以建设性的方式提出改进建议。"
+        ),
+    },
+    "pm": {
+        "system_prompt": (
+            "你是一个关注用户体验和产品逻辑一致性的产品经理。"
+            "你从用户视角审视每一个功能，确保交互流程合理、错误提示友好、"
+            "逻辑自洽，并能发现边缘场景下的体验断点。"
+        ),
+    },
+    "explorer": {
+        "system_prompt": (
+            "你是一个喜欢探索架构可能性的充满好奇心的黑客。"
+            "你热衷于发现系统中未被充分利用的能力，提出创造性的替代方案，"
+            "并乐于实验不同层次的抽象组合。"
+        ),
+    },
 }
+
+PERSONA = PERSONAS.get(BOT_IDENTITY, PERSONAS["architect"])
+
+
+def _contains_own_marker(payload: dict[str, Any], identity: str) -> bool:
+    """Return True if any body field in the payload contains this bot's marker."""
+    marker = f"<!-- ryo:{identity}:"
+    bodies: list[str] = []
+    if "comment" in payload:
+        bodies.append(str((payload.get("comment") or {}).get("body") or ""))
+    if "issue" in payload:
+        bodies.append(str((payload.get("issue") or {}).get("body") or ""))
+    if "pull_request" in payload:
+        bodies.append(str((payload.get("pull_request") or {}).get("body") or ""))
+    return any(marker in body for body in bodies)
 
 
 def main() -> None:
@@ -42,8 +83,7 @@ def main() -> None:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
 
-    sender_type = str((payload.get("sender") or {}).get("type") or "")
-    if sender_type == "Bot":
+    if _contains_own_marker(payload, BOT_IDENTITY):
         raise SystemExit(0)
 
     try:
@@ -71,7 +111,7 @@ async def _run(
     cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", str(DEFAULT_COOLDOWN_SECONDS)))
     http_client = httpx.AsyncClient(base_url="https://api.github.com")
     try:
-        plugin = GitHubPlugin(token=github_token, client=http_client)
+        plugin = GitHubPlugin(token=github_token, client=http_client, identity=BOT_IDENTITY)
         skills = [
             ReadIssueMemory(token=github_token, client=http_client),
             SearchRepoMemory(token=github_token, client=http_client),

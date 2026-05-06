@@ -24,6 +24,9 @@ permissions:
 
 jobs:
   run-ryobot:
+    strategy:
+      matrix:
+        bot: [architect, reviewer, pm, explorer]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -42,4 +45,5 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EVENT_PAYLOAD: ${{ toJson(github.event) }}
+          BOT_IDENTITY: ${{ matrix.bot }}
         run: python main.py
