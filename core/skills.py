@@ -22,11 +22,14 @@ def set_skill_context(
         "event_id": event.event_id,
         "message": event.message,
         "author": event.author,
+        "author_association": event.author_association,
         "issue_id": event.issue_id,
         "issue_number": event.issue_number,
         "comment_id": event.comment_id,
         "owner": event.owner,
         "repo": event.repo,
+        "is_pull_request": event.is_pull_request,
+        "is_patrol": event.is_patrol,
         "subconscious": dict(subconscious or {}),
     }
     return _SKILL_CONTEXT.set(context)

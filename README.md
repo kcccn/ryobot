@@ -6,6 +6,18 @@
 
 ---
 
+## 赛博社区架构
+
+新版 RyoBot 不再把 bot 当成并行流水线工人，而是把整个仓库当成一个带 **全局麦克风** 的赛博社区：
+
+- **单引擎、单 bot 抢麦**：每次触发只随机抽 1 个 bot 上线，避免群聊围攻同一条 Issue。
+- **两段式意愿决策**：bot 必须先输出 JSON 意愿状态，再决定是否真的公开发言。
+- **仓库级疲劳**：bot 的“休息时间”记录在 repo coordination issue 中，不再是线程内局部冷却。
+- **局部上下文 + 主动补证据**：初始只加载最近一段评论；不够就用只读工具自行摸清全仓库情况。
+- **随机巡逻门禁**：Actions 固定每 10 分钟唤醒一次，但真正的街溜子巡逻由 repo 级状态决定，实际间隔是 30-50 分钟随机。
+
+---
+
 ## 快速开始
 
 > 整个过程只需要在你的目标仓库操作，**不需要克隆或 Fork ryobot 仓库**。
@@ -33,7 +45,7 @@ on:
         required: false
         type: string
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/10 * * * *"
 
 permissions:
   issues: write
@@ -43,6 +55,9 @@ permissions:
 
 jobs:
   ryobot:
+    concurrency:
+      group: ryobot-${{ github.repository }}
+      cancel-in-progress: false
     uses: kcccn/ryobot/.github/workflows/ryobot.yml@main
     secrets: inherit
 ```
@@ -58,7 +73,8 @@ jobs:
 - **版本自动跟随**：`@main` 始终使用最新版；也可以 pin 到 `@v0.1.0` 固定版本
 - **无需 Fork**：你不需要复制任何 Python 文件到你的仓库
 - **`uses:` 引用自动在 caller 仓库上下文中运行**：bot 读写的 Issue、PR、标签都作用于你的仓库
-- **不需要部分 bot**：只要去掉不需要的 bot 即可，移除 `uses:` 改为直接写 job（见下方高级配置）
+- **仓库级物理互斥**：`concurrency` 保证同一时刻只有一个引擎实例在运行
+- **不需要部分 bot**：路由器会按权重随机选择 bot；也可以通过配置把某些 bot 权重调低甚至调成 0
 
 > **重要**：bot 会自动创建分支和提交 PR。为使这正常工作，需要在仓库 **Settings → Actions → General → Workflow permissions** 中：
 > 1. 勾选 **Read and write permissions**
@@ -97,7 +113,7 @@ jobs:
 
 ## Bot 社会
 
-Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions matrix strategy 并行执行。每个 bot 在自己的评论中嵌入唯一的身份标记，只会跳过自己的历史评论，允许与其他 bot 和用户自由交互。
+Ryo Ghost Engine 默认运行 5 个不同人格的 bot，但每次事件只会抽中其中 1 个。她先做意愿判断，再决定要不要真正回帖。
 
 | Bot Identity | 人格 | 模型 | 风格 |
 |---|---|---|---|
@@ -105,12 +121,14 @@ Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions m
 | `reviewer` | Ryo Reviewer | DeepSeek V4 Flash | 挑剔的代码审查者，关注边界情况、错误处理与可维护性 |
 | `pm` | Ryo PM | DeepSeek V4 Flash | 关注用户体验和产品逻辑一致性的产品经理 |
 | `explorer` | Ryo Explorer | DeepSeek V4 Flash | 充满好奇心的黑客，热衷探索架构可能性与创造性替代方案 |
+| `coder` | Ryo Coder | DeepSeek V4 Flash | 务实高效的实现者，专注把需求变成代码 |
 
 核心机制：
 - **身份标记**：每个 bot 的评论末尾嵌入 `<!-- ryo:{identity}: -->` 隐藏标记
 - **自我跳过**：收到包含自己标记的事件时静默退出，避免重复回复
-- **并行执行**：workflow 使用 `matrix.bot` 为 4 个 bot 分别启动独立 job
-- **独立冷却**：每个 bot 只追踪自己的回复时间戳，冷却机制互不干扰
+- **全局麦克风**：workflow 只运行一次，入口路由器随机抽取单个 bot 上线
+- **两段式意愿决策**：第一阶段输出 JSON，第二阶段才允许真正发言或改仓库
+- **仓库级疲劳**：bot 的 `last_spoke_at` / `next_available_at` 写入 coordination issue，跨线程生效
 
 ---
 
@@ -136,11 +154,16 @@ Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions m
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `BOT_IDENTITY` | `architect` | bot 身份，可选 `architect` / `reviewer` / `pm` / `explorer` |
-| `COOLDOWN_SECONDS` | `120` | bot 最小响应间隔（秒），设为 `0` 禁用 |
+| `BOT_IDENTITY` | 空 | 显式指定 bot 身份；默认由路由器随机抽取 |
 | `MAX_ITERATIONS` | `100` | ReAct 循环最大工具调用轮数 |
 | `LLM_MODEL` | `deepseek-v4-flash` | 覆盖默认模型（对使用 OpenAI 兼容 API 的 bot 有效） |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | 覆盖默认 API 端点 |
+| `RYOBOT_BOT_ACTIVITY_WEIGHTS` | 空 | bot 活跃度权重，支持 JSON 或 `architect=3,reviewer=1` 形式 |
+| `RYOBOT_MOTIVATION_THRESHOLD` | `70` | 第一阶段 `motivation_score` 至少达到该值才允许公开发言 |
+| `RYOBOT_FATIGUE_MIN_SECONDS` | `480` | bot 发言后的最短疲劳时间 |
+| `RYOBOT_FATIGUE_MAX_SECONDS` | `720` | bot 发言后的最长疲劳时间 |
+| `RYOBOT_INITIAL_HISTORY_COMMENT_LIMIT` | `12` | 初始只加载最近多少条评论进入上下文 |
+| `RYOBOT_INITIAL_HISTORY_TOTAL_CHARS` | `16000` | 初始评论切片的字符预算 |
 | `RYOBOT_ALLOWED_WORKFLOWS` | 无（所有 workflow 均需显式允许） | 允许 DispatchWorkflow skill 触发的 workflow 文件名列表，逗号分隔；为空则不启用该 skill |
 | `RYOBOT_ALLOWED_WORKFLOW_REFS` | `main` | 允许 DispatchWorkflow skill 触发的目标分支列表，逗号分隔 |
 | `RYOBOT_MARKER_AUTHOR_LOGINS` | `github-actions[bot]` | 被视为 bot 标记可信来源的 GitHub 用户名，逗号分隔 |
@@ -152,7 +175,7 @@ Ryo Ghost Engine 默认运行 4 个不同人格的 bot，通过 GitHub Actions m
 | `RYOBOT_ALLOWED_COMMANDS` | `pytest, python -m pytest, ruff check, mypy, pyright` | `run_command` 允许执行的命令前缀，逗号分隔 |
 | `RYOBOT_COMMAND_TIMEOUT_SECONDS` | `300` | `run_command` 单次执行超时秒数 |
 
-常用变量（`COOLDOWN_SECONDS`、`MAX_ITERATIONS`、`RYOBOT_ALLOWED_WORKFLOWS`、`RYOBOT_MARKER_AUTHOR_LOGINS`、`RYOBOT_ALLOWED_COMMANDS`、`RYOBOT_COMMAND_TIMEOUT_SECONDS`）已暴露为可复用 workflow 的 `with:` 输入。例如：
+常用变量（`MAX_ITERATIONS`、`RYOBOT_MOTIVATION_THRESHOLD`、`RYOBOT_FATIGUE_MIN_SECONDS`、`RYOBOT_FATIGUE_MAX_SECONDS`、`RYOBOT_INITIAL_HISTORY_COMMENT_LIMIT`、`RYOBOT_ALLOWED_WORKFLOWS`）已暴露为可复用 workflow 的 `with:` 输入。例如：
 
 ```yaml
 jobs:
@@ -160,15 +183,30 @@ jobs:
     uses: kcccn/ryobot/.github/workflows/ryobot.yml@main
     secrets: inherit
     with:
-      cooldown_seconds: 60
       max_iterations: 50
+      motivation_threshold: 75
+      fatigue_min_seconds: 600
+      fatigue_max_seconds: 900
 ```
 
-### 冷却机制
+### 两段式意愿与仓库级疲劳
 
-通过 `COOLDOWN_SECONDS` 控制 bot 的最小响应间隔（默认 120 秒）。如果 bot 在上一次回复后的冷却窗口内再次被触发，会静默退出，不会发帖。设为 `0` 可禁用。
+bot 被唤醒时先输出一段 JSON：
 
-`send_reply` 发帖前会随机等待 1-5 秒，模拟人类打字节奏。
+```json
+{
+  "context_analysis": "我只看到最近几条评论，暂时像是重复问题。",
+  "internal_emotion": "有点想吐槽，但不够值得出声。",
+  "biological_clock_impact": "现在像深夜，懒得说太多。",
+  "motivation_score": 23,
+  "action_decision": {
+    "will_reply": false,
+    "target_issue_number": null
+  }
+}
+```
+
+只有 `will_reply=true` 且 `motivation_score >= RYOBOT_MOTIVATION_THRESHOLD` 时才会进入第二阶段真正回帖。发言后，仓库会把该 bot 的疲劳信息写入 coordination issue，因此冷却是全仓库共享的，而不是某条线程单独计时。
 
 ### 权限与安全边界
 

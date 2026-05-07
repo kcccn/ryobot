@@ -24,7 +24,7 @@ on:
         required: false
         type: string
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/10 * * * *"
 
 permissions:
   issues: write
@@ -34,6 +34,9 @@ permissions:
 
 jobs:
   run-ryobot:
+    concurrency:
+      group: ryobot-${{ github.repository }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -47,16 +50,16 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -e .[dev]
 
-      - name: Run Bots Sequentially
+      - name: Run RyoBot Engine
         env:
           GITHUB_TOKEN: ${{ github.token }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           EVENT_PAYLOAD: ${{ toJson(github.event) }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          RYOBOT_MOTIVATION_THRESHOLD: 70
+          RYOBOT_FATIGUE_MIN_SECONDS: 480
+          RYOBOT_FATIGUE_MAX_SECONDS: 720
+          RYOBOT_INITIAL_HISTORY_COMMENT_LIMIT: 12
+          RYOBOT_INITIAL_HISTORY_TOTAL_CHARS: 16000
           RYOBOT_ALLOWED_WORKFLOWS: github-ryobot.yml
-        run: |
-          for bot in architect reviewer pm explorer coder; do
-            echo "::group::Running $bot"
-            BOT_IDENTITY=$bot python main.py || echo "::warning::$bot exited with code $?"
-            echo "::endgroup::"
-          done
+        run: python main.py

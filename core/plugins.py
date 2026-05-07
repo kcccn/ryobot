@@ -19,6 +19,7 @@ class PluginEvent(BaseModel):
     owner: str
     repo: str
     is_pull_request: bool = False
+    is_patrol: bool = False
 
 
 class HistorySnapshot(BaseModel):
@@ -26,9 +27,43 @@ class HistorySnapshot(BaseModel):
 
     messages: list[dict[str, Any]] = Field(default_factory=list)
     subconscious: dict[str, Any] = Field(default_factory=dict)
-    last_bot_comment_at: str | None = None
     mind_body: str = ""
     mind_issue_number: int = 0
+    runtime_state: RepoRuntimeState = Field(default_factory=lambda: RepoRuntimeState())
+    patrol_brief: str = ""
+
+
+class BotFatigueState(BaseModel):
+    last_spoke_at: str | None = None
+    next_available_at: str | None = None
+
+
+class RoutingRecord(BaseModel):
+    event_id: str = ""
+    bot_identity: str = ""
+    reason: str = ""
+    target_issue_number: int | None = None
+    routed_at: str | None = None
+
+
+class RepoRuntimeState(BaseModel):
+    next_patrol_after: str | None = None
+    bot_fatigue: dict[str, BotFatigueState] = Field(default_factory=dict)
+    last_routing: RoutingRecord = Field(default_factory=RoutingRecord)
+    coordination_issue_number: int = 0
+
+
+class ActionDecision(BaseModel):
+    will_reply: bool
+    target_issue_number: int | None = None
+
+
+class WillDecision(BaseModel):
+    context_analysis: str
+    internal_emotion: str
+    biological_clock_impact: str
+    motivation_score: int = Field(ge=0, le=100)
+    action_decision: ActionDecision
 
 
 class BasePlugin(ABC):
@@ -43,6 +78,10 @@ class BasePlugin(ABC):
         """Return prior chat messages plus structured subconscious state."""
 
     @abstractmethod
+    async def resolve_target_event(self, event: PluginEvent, issue_number: int) -> PluginEvent:
+        """Resolve another issue or pull request within the same repository."""
+
+    @abstractmethod
     async def send_reply(
         self,
         event: PluginEvent,
@@ -50,3 +89,7 @@ class BasePlugin(ABC):
         subconscious: dict[str, Any] | None = None,
     ) -> None:
         """Deliver the final assistant reply back through the platform."""
+
+    @abstractmethod
+    async def update_runtime_state(self, state: RepoRuntimeState) -> RepoRuntimeState:
+        """Persist repo-wide runtime state used for routing and fatigue tracking."""

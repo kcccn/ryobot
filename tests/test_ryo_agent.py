@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -8,8 +9,14 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from core.plugins import BasePlugin, HistorySnapshot, PluginEvent
-from core.ryo_agent import DEFAULT_FALLBACK_MESSAGE, RyoAgent
+from core.plugins import (
+    BasePlugin,
+    BotFatigueState,
+    HistorySnapshot,
+    PluginEvent,
+    RepoRuntimeState,
+)
+from core.ryo_agent import RyoAgent
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
 
@@ -59,9 +66,7 @@ class FakePlugin(BasePlugin):
         self,
         *,
         event: PluginEvent | None = None,
-        history_messages: list[dict[str, str]] | None = None,
-        subconscious: dict[str, Any] | None = None,
-        last_bot_comment_at: str | None = None,
+        history_by_issue: dict[int, HistorySnapshot] | None = None,
     ) -> None:
         self._event = event or PluginEvent(
             event_id="evt-1",
@@ -73,20 +78,40 @@ class FakePlugin(BasePlugin):
             owner="acme",
             repo="widgets",
         )
-        self._history_messages = list(history_messages or [])
-        self._subconscious = dict(subconscious or {})
-        self._last_bot_comment_at = last_bot_comment_at
+        self._history_by_issue = history_by_issue or {
+            self._event.issue_number: HistorySnapshot(
+                messages=[],
+                subconscious={},
+                runtime_state=RepoRuntimeState(),
+            )
+        }
         self.sent_replies: list[tuple[PluginEvent, str, dict[str, Any] | None]] = []
+        self.updated_runtime_states: list[RepoRuntimeState] = []
+        self.resolved_targets: list[int] = []
 
     def parse_event(self, raw_payload: Any) -> PluginEvent:
         return self._event
 
     async def fetch_history(self, event: PluginEvent) -> HistorySnapshot:
-        assert event == self._event
-        return HistorySnapshot(
-            messages=list(self._history_messages),
-            subconscious=dict(self._subconscious),
-            last_bot_comment_at=self._last_bot_comment_at,
+        return self._history_by_issue.get(
+            event.issue_number,
+            HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState()),
+        )
+
+    async def resolve_target_event(self, event: PluginEvent, issue_number: int) -> PluginEvent:
+        self.resolved_targets.append(issue_number)
+        return PluginEvent(
+            event_id=f"{event.event_id}:target:{issue_number}",
+            message=f"target #{issue_number}",
+            author="system",
+            author_association="OWNER",
+            issue_id=str(issue_number),
+            issue_number=issue_number,
+            comment_id=0,
+            owner=event.owner,
+            repo=event.repo,
+            is_pull_request=(issue_number == 77),
+            is_patrol=True,
         )
 
     async def send_reply(
@@ -96,6 +121,10 @@ class FakePlugin(BasePlugin):
         subconscious: dict[str, Any] | None = None,
     ) -> None:
         self.sent_replies.append((event, content, subconscious))
+
+    async def update_runtime_state(self, state: RepoRuntimeState) -> RepoRuntimeState:
+        self.updated_runtime_states.append(state)
+        return state
 
 
 class EchoArgs(BaseModel):
@@ -117,19 +146,11 @@ class MutatingSkill(EchoSkill):
     description = "Mutate external state."
     mutates_state = True
 
-    async def execute(self, **kwargs: Any) -> str:
-        args = self.args_model.model_validate(kwargs)
-        return f"mutated:{args.text}"
-
 
 class TrustedReadSkill(EchoSkill):
     name = "trusted_read"
     description = "Read broader trusted-only context."
     requires_trusted_author = True
-
-    async def execute(self, **kwargs: Any) -> str:
-        args = self.args_model.model_validate(kwargs)
-        return f"trusted:{args.text}"
 
 
 class ContextAwareSkill(BaseSkill):
@@ -143,7 +164,7 @@ class ContextAwareSkill(BaseSkill):
             "owner": context["owner"],
             "repo": context["repo"],
             "issue_number": context["issue_number"],
-            "subconscious": context["subconscious"],
+            "is_patrol": context["is_patrol"],
         }
 
 
@@ -151,415 +172,260 @@ def build_response(message: FakeMessage) -> FakeResponse:
     return FakeResponse(choices=[FakeChoice(message=message)])
 
 
-@pytest.mark.asyncio
-async def test_run_sends_direct_reply_without_tool_calls() -> None:
-    fake_completions = FakeCompletions(
-        [build_response(FakeMessage(content="Final answer"))]
-    )
+def build_agent(
+    *,
+    plugin: FakePlugin,
+    responses: list[FakeResponse],
+    skills: list[BaseSkill] | None = None,
+    threshold: int = 70,
+) -> tuple[RyoAgent, FakeCompletions]:
+    fake_completions = FakeCompletions(responses)
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin(
-        history_messages=[{"role": "assistant", "content": "Previous reply"}],
-        subconscious={"mode": "reflective"},
-        event=PluginEvent(
-            event_id="evt-1",
-            message="Need help",
-            author="octocat",
-            issue_id="1001",
-            issue_number=12,
-            comment_id=21,
-            owner="acme",
-            repo="widgets",
-        ),
-    )
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
+    agent = RyoAgent(
+        persona={"identity": "architect", "model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        skills=skills or [EchoSkill()],
         llm_client=llm_client,
         plugin=plugin,
+        motivation_threshold=threshold,
+        fatigue_min_seconds=480,
+        fatigue_max_seconds=480,
+    )
+    return agent, fake_completions
+
+
+@pytest.mark.asyncio
+async def test_run_skips_when_decision_says_no_reply() -> None:
+    plugin = FakePlugin()
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "nothing new",
+                            "internal_emotion": "lazy",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 20,
+                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            )
+        ],
     )
 
-    await ryo_agent.run(raw_event={"payload": "ignored"})
+    await agent.run(raw_event={})
+
+    assert plugin.sent_replies == []
+    assert plugin.updated_runtime_states[-1].last_routing.reason == "bot chose silence"
+
+
+@pytest.mark.asyncio
+async def test_run_replies_after_passing_will_decision() -> None:
+    plugin = FakePlugin(
+        history_by_issue={
+            12: HistorySnapshot(
+                messages=[{"role": "assistant", "content": "Previous reply"}],
+                subconscious={"mode": "reflective"},
+                runtime_state=RepoRuntimeState(),
+            )
+        }
+    )
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "worth answering",
+                            "internal_emotion": "awake",
+                            "biological_clock_impact": "daytime",
+                            "motivation_score": 90,
+                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="Final answer")),
+        ],
+    )
+
+    await agent.run(raw_event={})
 
     assert plugin.sent_replies == [
         (plugin.parse_event(None), "Final answer", {"mode": "reflective"})
     ]
-    assert fake_completions.calls[0]["messages"] == [
-        {"role": "system", "content": "You are helpful."},
-        {"role": "assistant", "content": "Previous reply"},
-        {"role": "user", "content": "Need help"},
-    ]
+    assert fake_completions.calls[1]["messages"][-1]["content"] == "hello"
+    fatigue = plugin.updated_runtime_states[-1].bot_fatigue["architect"]
+    assert fatigue.last_spoke_at is not None
 
 
 @pytest.mark.asyncio
-async def test_run_hides_mutating_tools_from_untrusted_authors() -> None:
-    fake_completions = FakeCompletions(
-        [build_response(FakeMessage(content="Read-only answer"))]
+async def test_run_patrol_resolves_target_before_replying() -> None:
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="patrol",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
     )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
     plugin = FakePlugin(
-        event=PluginEvent(
-            event_id="evt-1",
-            message="Need help",
-            author="octocat",
-            issue_id="1001",
-            issue_number=12,
-            comment_id=21,
-            owner="acme",
-            repo="widgets",
-            author_association="CONTRIBUTOR",
-        ),
+        event=patrol_event,
+        history_by_issue={
+            0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief"),
+            77: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState()),
+        },
     )
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill(), MutatingSkill()],
-        llm_client=llm_client,
+    agent, _ = build_agent(
         plugin=plugin,
-    )
-
-    await ryo_agent.run(raw_event={})
-
-    tool_names = [
-        tool["function"]["name"]
-        for tool in fake_completions.calls[0]["tools"]
-    ]
-    assert tool_names == ["echo", "no_reply"]
-
-
-@pytest.mark.asyncio
-async def test_run_exposes_mutating_tools_to_trusted_authors() -> None:
-    fake_completions = FakeCompletions(
-        [build_response(FakeMessage(content="Can act"))]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin(
-        event=PluginEvent(
-            event_id="evt-1",
-            message="Please label this",
-            author="maintainer",
-            issue_id="1001",
-            issue_number=12,
-            comment_id=21,
-            owner="acme",
-            repo="widgets",
-            author_association="MEMBER",
-        ),
-    )
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill(), MutatingSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
-    )
-
-    await ryo_agent.run(raw_event={})
-
-    tool_names = [
-        tool["function"]["name"]
-        for tool in fake_completions.calls[0]["tools"]
-    ]
-    assert tool_names == ["echo", "mutate", "no_reply"]
-
-
-@pytest.mark.asyncio
-async def test_run_rejects_mutating_tool_calls_from_untrusted_authors() -> None:
-    fake_completions = FakeCompletions(
-        [
+        responses=[
             build_response(
                 FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-1",
-                            function=FakeFunction(name="mutate", arguments='{"text":"close it"}'),
-                        )
-                    ]
+                    content=json.dumps(
+                        {
+                            "context_analysis": "pr needs attention",
+                            "internal_emotion": "curious",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 88,
+                            "action_decision": {"will_reply": True, "target_issue_number": 77},
+                        }
+                    )
                 )
             ),
-            build_response(FakeMessage(content="Recovered")),
-        ]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin(
-        event=PluginEvent(
-            event_id="evt-1",
-            message="Close this",
-            author="octocat",
-            issue_id="1001",
-            issue_number=12,
-            comment_id=21,
-            owner="acme",
-            repo="widgets",
-            author_association="NONE",
-        ),
-    )
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[MutatingSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
+            build_response(FakeMessage(content="Patrol reply")),
+        ],
     )
 
-    await ryo_agent.run(raw_event={})
+    await agent.run(raw_event={})
 
-    assert fake_completions.calls[1]["messages"][-1]["content"] == (
-        "Tool error: Tool 'mutate' is not available for author association 'NONE'."
-    )
+    assert plugin.resolved_targets == [77]
+    assert plugin.sent_replies[0][0].issue_number == 77
+    assert plugin.updated_runtime_states[-1].next_patrol_after is not None
 
 
 @pytest.mark.asyncio
-async def test_run_hides_trusted_read_tools_from_untrusted_authors() -> None:
-    fake_completions = FakeCompletions(
-        [build_response(FakeMessage(content="Read-only answer"))]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+async def test_run_skips_when_bot_is_fatigued() -> None:
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     plugin = FakePlugin(
-        event=PluginEvent(
-            event_id="evt-1",
-            message="Need help",
-            author="octocat",
-            issue_id="1001",
-            issue_number=12,
-            comment_id=21,
-            owner="acme",
-            repo="widgets",
-            author_association="CONTRIBUTOR",
-        ),
+        history_by_issue={
+            12: HistorySnapshot(
+                messages=[],
+                subconscious={},
+                runtime_state=RepoRuntimeState(
+                    bot_fatigue={"architect": BotFatigueState(last_spoke_at=None, next_available_at=future)}
+                ),
+            )
+        }
     )
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill(), TrustedReadSkill()],
-        llm_client=llm_client,
+    agent, _ = build_agent(
         plugin=plugin,
-    )
-
-    await ryo_agent.run(raw_event={})
-
-    tool_names = [
-        tool["function"]["name"]
-        for tool in fake_completions.calls[0]["tools"]
-    ]
-    assert tool_names == ["echo", "no_reply"]
-
-
-@pytest.mark.asyncio
-async def test_run_rejects_trusted_read_tool_calls_from_untrusted_authors() -> None:
-    fake_completions = FakeCompletions(
-        [
+        responses=[
             build_response(
                 FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-1",
-                            function=FakeFunction(name="trusted_read", arguments='{"text":"other thread"}'),
-                        )
-                    ]
+                    content=json.dumps(
+                        {
+                            "context_analysis": "would reply",
+                            "internal_emotion": "ready",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 95,
+                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                        }
+                    )
                 )
-            ),
-            build_response(FakeMessage(content="Recovered")),
-        ]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin(
-        event=PluginEvent(
-            event_id="evt-1",
-            message="Read elsewhere",
-            author="octocat",
-            issue_id="1001",
-            issue_number=12,
-            comment_id=21,
-            owner="acme",
-            repo="widgets",
-            author_association="NONE",
-        ),
-    )
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[TrustedReadSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
+            )
+        ],
     )
 
-    await ryo_agent.run(raw_event={})
-
-    assert fake_completions.calls[1]["messages"][-1]["content"] == (
-        "Tool error: Tool 'trusted_read' is not available for author association 'NONE'."
-    )
-
-
-@pytest.mark.asyncio
-async def test_run_exits_without_reply_when_no_reply_tool_is_called() -> None:
-    fake_completions = FakeCompletions(
-        [
-            build_response(
-                FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-no-reply",
-                            function=FakeFunction(name="no_reply", arguments='{"reason":"nothing useful to add"}'),
-                        )
-                    ]
-                )
-            ),
-        ]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin()
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
-    )
-
-    await ryo_agent.run(raw_event={})
+    await agent.run(raw_event={})
 
     assert plugin.sent_replies == []
+    assert "fatigue cooldown active" in plugin.updated_runtime_states[-1].last_routing.reason
 
 
 @pytest.mark.asyncio
-async def test_run_executes_tool_call_then_sends_final_reply() -> None:
-    fake_completions = FakeCompletions(
-        [
-            build_response(
-                FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-1",
-                            function=FakeFunction(name="echo", arguments='{"text":"ping"}'),
-                        )
-                    ]
-                )
-            ),
-            build_response(FakeMessage(content="Done")),
-        ]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin()
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
-    )
-
-    await ryo_agent.run(raw_event={"payload": "ignored"})
-
-    assert plugin.sent_replies == [
-        (plugin.parse_event(None), "Done", {})
-    ]
-    second_call_messages = fake_completions.calls[1]["messages"]
-    assert second_call_messages[-2]["tool_calls"][0]["function"]["name"] == "echo"
-    assert second_call_messages[-1] == {
-        "role": "tool",
-        "tool_call_id": "call-1",
-        "content": "echo:ping",
-    }
-
-
-@pytest.mark.asyncio
-async def test_run_surfaces_unknown_tool_errors_back_into_loop() -> None:
-    fake_completions = FakeCompletions(
-        [
-            build_response(
-                FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-1",
-                            function=FakeFunction(name="missing", arguments="{}"),
-                        )
-                    ]
-                )
-            ),
-            build_response(FakeMessage(content="Recovered")),
-        ]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin()
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
-    )
-
-    await ryo_agent.run(raw_event={})
-
-    assert plugin.sent_replies == [
-        (plugin.parse_event(None), "Recovered", {})
-    ]
-    assert fake_completions.calls[1]["messages"][-1]["content"].startswith("Tool error:")
-    assert "Unknown tool 'missing'" in fake_completions.calls[1]["messages"][-1]["content"]
-
-
-@pytest.mark.asyncio
-async def test_run_surfaces_validation_errors_back_into_loop() -> None:
-    fake_completions = FakeCompletions(
-        [
-            build_response(
-                FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-1",
-                            function=FakeFunction(name="echo", arguments='{"wrong":"shape"}'),
-                        )
-                    ]
-                )
-            ),
-            build_response(FakeMessage(content="Recovered")),
-        ]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin()
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
-    )
-
-    await ryo_agent.run(raw_event={})
-
-    assert plugin.sent_replies == [
-        (plugin.parse_event(None), "Recovered", {})
-    ]
-    assert "Tool error:" in fake_completions.calls[1]["messages"][-1]["content"]
-    assert "Validation failed for tool 'echo'" in fake_completions.calls[1]["messages"][-1]["content"]
-
-
-@pytest.mark.asyncio
-async def test_run_sends_fallback_after_max_iterations() -> None:
-    repeated_tool_call = build_response(
-        FakeMessage(
-            tool_calls=[
-                FakeToolCall(
-                    id="call-1",
-                    function=FakeFunction(name="echo", arguments='{"text":"loop"}'),
-                )
-            ]
+async def test_stage_one_hides_mutating_tools_from_untrusted_authors() -> None:
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="Need help",
+            author="octocat",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+            author_association="CONTRIBUTOR",
         )
     )
-    fake_completions = FakeCompletions([repeated_tool_call for _ in range(5)])
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin(subconscious={"mode": "loop"})
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
-        llm_client=llm_client,
+    agent, fake_completions = build_agent(
         plugin=plugin,
-        max_iterations=5,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "no rights",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            )
+        ],
+        skills=[EchoSkill(), MutatingSkill(), TrustedReadSkill()],
     )
 
-    await ryo_agent.run(raw_event={})
+    await agent.run(raw_event={})
 
-    assert plugin.sent_replies == [
-        (plugin.parse_event(None), DEFAULT_FALLBACK_MESSAGE, {"mode": "loop"})
-    ]
+    tool_names = [tool["function"]["name"] for tool in fake_completions.calls[0]["tools"]]
+    assert tool_names == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_decision_json_retries_until_valid() -> None:
+    plugin = FakePlugin()
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(FakeMessage(content="not json")),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "valid now",
+                            "internal_emotion": "settled",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    assert len(fake_completions.calls) == 2
+    assert plugin.sent_replies == []
 
 
 @pytest.mark.asyncio
 async def test_run_sets_runtime_context_for_skills() -> None:
     clear_skill_context()
-    fake_completions = FakeCompletions(
-        [
+    plugin = FakePlugin()
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
             build_response(
                 FakeMessage(
                     tool_calls=[
@@ -570,126 +436,25 @@ async def test_run_sets_runtime_context_for_skills() -> None:
                     ]
                 )
             ),
-            build_response(FakeMessage(content="Done")),
-        ]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin(subconscious={"memory": "sticky"})
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[ContextAwareSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
-    )
-
-    await ryo_agent.run(raw_event={})
-
-    tool_message = fake_completions.calls[1]["messages"][-1]
-    assert '"owner": "acme"' in tool_message["content"]
-    assert '"repo": "widgets"' in tool_message["content"]
-    assert '"issue_number": 12' in tool_message["content"]
-    assert '"memory": "sticky"' in tool_message["content"]
-    assert get_skill_context() == {}
-
-
-@pytest.mark.asyncio
-async def test_run_truncates_large_tool_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RYOBOT_MAX_TOOL_RESULT_CHARS", "10")
-    fake_completions = FakeCompletions(
-        [
             build_response(
                 FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-1",
-                            function=FakeFunction(name="echo", arguments='{"text":"abcdefghijklmnop"}'),
-                        )
-                    ]
+                    content=json.dumps(
+                        {
+                            "context_analysis": "done",
+                            "internal_emotion": "done",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                        }
+                    )
                 )
             ),
-            build_response(FakeMessage(content="Done")),
-        ]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    plugin = FakePlugin()
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
+        ],
+        skills=[ContextAwareSkill()],
     )
 
-    await ryo_agent.run(raw_event={})
+    await agent.run(raw_event={})
 
-    tool_message = fake_completions.calls[1]["messages"][-1]["content"]
-    assert tool_message.startswith("echo:abcde")
-    assert "[truncated:" in tool_message
-
-
-@pytest.mark.asyncio
-async def test_run_skips_when_within_cooldown() -> None:
-    fake_completions = FakeCompletions(
-        [build_response(FakeMessage(content="Should not be called"))]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    recent_ts = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
-    plugin = FakePlugin(last_bot_comment_at=recent_ts)
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
-        cooldown_seconds=120,
-    )
-
-    await ryo_agent.run(raw_event={})
-
-    # No reply sent and no LLM call made
-    assert plugin.sent_replies == []
-    assert fake_completions.calls == []
-
-
-@pytest.mark.asyncio
-async def test_run_proceeds_when_cooldown_expired() -> None:
-    fake_completions = FakeCompletions(
-        [build_response(FakeMessage(content="Final answer"))]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    old_ts = (datetime.now(timezone.utc) - timedelta(seconds=300)).isoformat()
-    plugin = FakePlugin(last_bot_comment_at=old_ts)
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
-        cooldown_seconds=120,
-    )
-
-    await ryo_agent.run(raw_event={})
-
-    assert plugin.sent_replies == [
-        (plugin.parse_event(None), "Final answer", {})
-    ]
-
-
-@pytest.mark.asyncio
-async def test_run_proceeds_when_no_bot_history() -> None:
-    fake_completions = FakeCompletions(
-        [build_response(FakeMessage(content="First response"))]
-    )
-    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
-    # No prior bot comments — should proceed regardless of cooldown config
-    plugin = FakePlugin(last_bot_comment_at=None)
-    ryo_agent = RyoAgent(
-        persona={"model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
-        skills=[EchoSkill()],
-        llm_client=llm_client,
-        plugin=plugin,
-        cooldown_seconds=120,
-    )
-
-    await ryo_agent.run(raw_event={})
-
-    assert plugin.sent_replies == [
-        (plugin.parse_event(None), "First response", {})
-    ]
+    tool_result = fake_completions.calls[1]["messages"][-1]["content"]
+    assert '"owner": "acme"' in tool_result
+    assert '"is_patrol": false' in tool_result.lower()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import re
 import sys
 from typing import Any
@@ -44,78 +45,11 @@ from platforms.llm import AnthropicAdapter
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
-DEFAULT_COOLDOWN_SECONDS = 120
 DEFAULT_MARKER_AUTHOR_LOGINS = frozenset({"github-actions[bot]"})
-
-BOT_IDENTITY = os.getenv("BOT_IDENTITY", "architect")
-
-
-def _log_event(payload: dict[str, Any]) -> None:
-    kind = (
-        "schedule" if "schedule" in payload
-        else "workflow_dispatch" if isinstance(payload.get("inputs"), dict)
-        else "issue_comment" if "comment" in payload
-        else "issues" if "issue" in payload
-        else "pull_request" if "pull_request" in payload
-        else "unknown"
-    )
-    number = ""
-    if "issue" in payload:
-        number = f" #{(payload['issue'] or {}).get('number', '?')}"
-    elif "pull_request" in payload:
-        number = f" #{(payload['pull_request'] or {}).get('number', '?')}"
-    print(f"[main] event={kind}{number} bot={BOT_IDENTITY}", file=sys.stderr)
-
-
-def _contains_own_marker(payload: dict[str, Any], identity: str) -> bool:
-    """Return True if any body field in the payload contains this bot's marker."""
-    marker = f"<!-- ryo:{identity}:"
-    trusted_marker_authors = _marker_author_logins_from_env()
-    body_sources: list[tuple[str, str]] = []
-    if "comment" in payload:
-        comment = payload.get("comment") or {}
-        body_sources.append((
-            str(comment.get("body") or ""),
-            str((comment.get("user") or {}).get("login") or ""),
-        ))
-    if "issue" in payload:
-        issue = payload.get("issue") or {}
-        body_sources.append((
-            str(issue.get("body") or ""),
-            str((issue.get("user") or {}).get("login") or ""),
-        ))
-    if "pull_request" in payload:
-        pull_request = payload.get("pull_request") or {}
-        body_sources.append((
-            str(pull_request.get("body") or ""),
-            str((pull_request.get("user") or {}).get("login") or ""),
-        ))
-    return any(marker in body and login in trusted_marker_authors for body, login in body_sources)
-
-
+DEFAULT_MOTIVATION_THRESHOLD = 70
+DEFAULT_FATIGUE_MIN_SECONDS = 480
+DEFAULT_FATIGUE_MAX_SECONDS = 720
 _TRUSTED_AUTHOR_ASSOCIATIONS: frozenset[str] = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
-
-
-def _detect_fix_command(payload: dict[str, Any]) -> bool:
-    """Return True if a trusted author issued the /fix command."""
-    bodies: list[tuple[str, str]] = []
-    if "comment" in payload:
-        comment = payload.get("comment") or {}
-        bodies.append((
-            str(comment.get("body") or ""),
-            str(comment.get("author_association") or ""),
-        ))
-    if "issue" in payload:
-        issue = payload.get("issue") or {}
-        bodies.append((
-            str(issue.get("body") or ""),
-            str(issue.get("author_association") or ""),
-        ))
-    return any(
-        re.search(r"(?<!\w)/fix\b", body, re.IGNORECASE)
-        and author_assoc in _TRUSTED_AUTHOR_ASSOCIATIONS
-        for body, author_assoc in bodies
-    )
 
 
 def main() -> None:
@@ -125,28 +59,17 @@ def main() -> None:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1) from exc
 
-    _log_event(payload)
+    payload = _ensure_repository_context(payload)
+    bot_identity = _selected_bot_identity(payload)
+    _log_event(payload, bot_identity)
 
-    if _contains_own_marker(payload, BOT_IDENTITY):
-        print(f"SKIP: event already contains {BOT_IDENTITY} marker", file=sys.stderr)
+    if _contains_own_marker(payload, bot_identity):
+        print(f"SKIP: event already contains {bot_identity} marker", file=sys.stderr)
         raise SystemExit(0)
-
-    if "repository" not in payload:
-        if "schedule" in payload:
-            repo_full = os.getenv("GITHUB_REPOSITORY", "")
-            if "/" not in repo_full:
-                print("Skipping schedule event: GITHUB_REPOSITORY not set.", file=sys.stderr)
-                raise SystemExit(0)
-            owner, repo = repo_full.split("/", 1)
-            payload["repository"] = {"owner": {"login": owner}, "name": repo}
-            payload["_patrol"] = True
-        else:
-            print("Skipping event without repository context.", file=sys.stderr)
-            raise SystemExit(0)
 
     try:
         github_token = _require_env("GITHUB_TOKEN")
-        bot = get_bot(BOT_IDENTITY)
+        bot = get_bot(bot_identity)
         api_key_env = bot.api_key_env or "DEEPSEEK_API_KEY"
         api_key = _require_env(api_key_env)
     except ValueError as exc:
@@ -169,29 +92,30 @@ async def _run(
 ) -> None:
     base_url = os.getenv("LLM_BASE_URL") or bot.base_url or DEEPSEEK_BASE_URL
     model = os.getenv("LLM_MODEL") or bot.model or DEFAULT_MODEL
-    cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", str(DEFAULT_COOLDOWN_SECONDS)))
     max_iterations = int(os.getenv("MAX_ITERATIONS", "100"))
-    roster_lines = [
-        f"- {b.display_name}（{b.identity}）：{b.description}"
-        for b in list_bots()
-    ]
+    motivation_threshold = int(os.getenv("RYOBOT_MOTIVATION_THRESHOLD", str(DEFAULT_MOTIVATION_THRESHOLD)))
+    fatigue_min_seconds = int(os.getenv("RYOBOT_FATIGUE_MIN_SECONDS", str(DEFAULT_FATIGUE_MIN_SECONDS)))
+    fatigue_max_seconds = int(os.getenv("RYOBOT_FATIGUE_MAX_SECONDS", str(DEFAULT_FATIGUE_MAX_SECONDS)))
+    roster_lines = [f"- {b.display_name}（{b.identity}）：{b.description}" for b in list_bots()]
     roster = "当前 Bot 社会成员：\n" + "\n".join(roster_lines)
     system_prompt = f"{roster}\n\n{bot.system_prompt}"
     if _detect_fix_command(payload):
-        system_prompt = (
-            "/FIX MODE ACTIVE: 可信维护者发出了 /fix 命令。"
-            "你必须立即切换到实现模式。不要讨论、不要分析、不要提问。"
-            "直接读取 Issue → 读代码 → 写修复 → 创建分支 → 提交 PR。"
-            "如果有不确定的实现细节，按最佳判断进行，在 PR 描述中记录假设。"
-            "此指令覆盖你正常的讨论/巡逻行为。\n\n"
-            + system_prompt
+        system_prompt += (
+            "\n\n补充信号：可信维护者触发了 /fix。"
+            "这会显著提高你对直接实现或推动修复的意愿，但不会跳过意愿评估、全局麦克风、或疲劳机制。"
         )
+
     http_client = httpx.AsyncClient(
         base_url="https://api.github.com",
         timeout=httpx.Timeout(30.0, connect=10.0),
     )
     try:
-        plugin = GitHubPlugin(token=github_token, client=http_client, identity=BOT_IDENTITY, display_name=bot.display_name)
+        plugin = GitHubPlugin(
+            token=github_token,
+            client=http_client,
+            identity=bot.identity,
+            display_name=bot.display_name,
+        )
         all_skills = [
             ReadIssueMemory(token=github_token, client=http_client),
             SearchRepoMemory(token=github_token, client=http_client),
@@ -226,24 +150,22 @@ async def _run(
         if bot.provider == "anthropic":
             llm_client = AnthropicAdapter(api_key=api_key, base_url=base_url)
         else:
-            llm_client = AsyncOpenAI(
-                api_key=api_key,
-                base_url=base_url,
-            )
+            llm_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         ryo_agent = RyoAgent(
-            persona={"model": model, "system_prompt": system_prompt},
+            persona={
+                "identity": bot.identity,
+                "display_name": bot.display_name,
+                "model": model,
+                "system_prompt": system_prompt,
+            },
             skills=skills,
             llm_client=llm_client,
             plugin=plugin,
-            cooldown_seconds=cooldown_seconds,
             max_iterations=max_iterations,
             max_tokens=bot.max_tokens,
-        )
-        is_fix = _detect_fix_command(payload)
-        is_patrol = (
-            payload.get("_patrol", False)
-            or "schedule" in payload
-            or isinstance(payload.get("inputs"), dict)
+            motivation_threshold=motivation_threshold,
+            fatigue_min_seconds=fatigue_min_seconds,
+            fatigue_max_seconds=fatigue_max_seconds,
         )
         await ryo_agent.run(payload)
     finally:
@@ -259,6 +181,101 @@ def _load_event_payload() -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("EVENT_PAYLOAD must decode to a JSON object.")
     return payload
+
+
+def _ensure_repository_context(payload: dict[str, Any]) -> dict[str, Any]:
+    if "repository" in payload:
+        return payload
+    if "schedule" in payload or isinstance(payload.get("inputs"), dict):
+        repo_full = os.getenv("GITHUB_REPOSITORY", "")
+        if "/" not in repo_full:
+            raise ValueError("Skipping schedule/workflow_dispatch event: GITHUB_REPOSITORY not set.")
+        owner, repo = repo_full.split("/", 1)
+        payload = dict(payload)
+        payload["repository"] = {"owner": {"login": owner}, "name": repo}
+        payload["_patrol"] = True
+        return payload
+    raise ValueError("Skipping event without repository context.")
+
+
+def _selected_bot_identity(payload: dict[str, Any]) -> str:
+    explicit_identity = os.getenv("BOT_IDENTITY", "").strip()
+    if explicit_identity:
+        return explicit_identity
+    identities = [bot.identity for bot in list_bots()]
+    weights = _bot_activity_weights(identities)
+    return random.choices(identities, weights=weights, k=1)[0]
+
+
+def _bot_activity_weights(identities: list[str]) -> list[float]:
+    configured = os.getenv("RYOBOT_BOT_ACTIVITY_WEIGHTS", "").strip()
+    if not configured:
+        return [1.0] * len(identities)
+    parsed: dict[str, float] = {}
+    try:
+        if configured.startswith("{"):
+            loaded = json.loads(configured)
+            if isinstance(loaded, dict):
+                for key, value in loaded.items():
+                    parsed[str(key)] = max(float(value), 0.0)
+        else:
+            for chunk in configured.split(","):
+                if "=" not in chunk:
+                    continue
+                key, raw_value = chunk.split("=", 1)
+                parsed[key.strip()] = max(float(raw_value.strip()), 0.0)
+    except (ValueError, json.JSONDecodeError):
+        return [1.0] * len(identities)
+    weights = [parsed.get(identity, 1.0) for identity in identities]
+    return weights if any(weight > 0 for weight in weights) else [1.0] * len(identities)
+
+
+def _log_event(payload: dict[str, Any], identity: str) -> None:
+    kind = (
+        "schedule" if "schedule" in payload
+        else "workflow_dispatch" if isinstance(payload.get("inputs"), dict)
+        else "issue_comment" if "comment" in payload
+        else "issues" if "issue" in payload
+        else "pull_request" if "pull_request" in payload
+        else "unknown"
+    )
+    number = ""
+    if "issue" in payload:
+        number = f" #{(payload['issue'] or {}).get('number', '?')}"
+    elif "pull_request" in payload:
+        number = f" #{(payload['pull_request'] or {}).get('number', '?')}"
+    print(f"[main] event={kind}{number} bot={identity}", file=sys.stderr)
+
+
+def _contains_own_marker(payload: dict[str, Any], identity: str) -> bool:
+    marker = f"<!-- ryo:{identity}:"
+    trusted_marker_authors = _marker_author_logins_from_env()
+    body_sources: list[tuple[str, str]] = []
+    if "comment" in payload:
+        comment = payload.get("comment") or {}
+        body_sources.append((str(comment.get("body") or ""), str((comment.get("user") or {}).get("login") or "")))
+    if "issue" in payload:
+        issue = payload.get("issue") or {}
+        body_sources.append((str(issue.get("body") or ""), str((issue.get("user") or {}).get("login") or "")))
+    if "pull_request" in payload:
+        pull_request = payload.get("pull_request") or {}
+        body_sources.append((str(pull_request.get("body") or ""), str((pull_request.get("user") or {}).get("login") or "")))
+    return any(marker in body and login in trusted_marker_authors for body, login in body_sources)
+
+
+def _detect_fix_command(payload: dict[str, Any]) -> bool:
+    bodies: list[tuple[str, str]] = []
+    if "comment" in payload:
+        comment = payload.get("comment") or {}
+        bodies.append((str(comment.get("body") or ""), str(comment.get("author_association") or "")))
+    if "issue" in payload:
+        issue = payload.get("issue") or {}
+        bodies.append((str(issue.get("body") or ""), str(issue.get("author_association") or "")))
+    return any(
+        re.search(r"(?<!\w)/fix\b", body, re.IGNORECASE)
+        and author_assoc in _TRUSTED_AUTHOR_ASSOCIATIONS
+        for body, author_assoc in bodies
+    )
 
 
 def _require_env(name: str) -> str:
