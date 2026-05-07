@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from core.skills import BaseSkill, get_skill_context
 
 from .client import GitHubApiClient
-from .utils import csv_env, max_chars_from_env, truncate_text
+from .utils import csv_env, max_chars_from_env, sanitize_mentions, truncate_text
 
 
 class EmptyArgs(BaseModel):
@@ -272,7 +272,7 @@ class CreateIssue(GitHubSkillBase):
             f"/repos/{context['owner']}/{context['repo']}/issues",
             json_body={
                 "title": args.title,
-                "body": args.body,
+                "body": sanitize_mentions(args.body),
                 "labels": args.labels,
             },
         )
@@ -335,7 +335,7 @@ class UpdateIssue(GitHubSkillBase):
         if args.title:
             body["title"] = args.title
         if args.body:
-            body["body"] = args.body
+            body["body"] = sanitize_mentions(args.body)
         if not body:
             return "Nothing to update: both title and body are empty."
         await self._api.patch_json(
@@ -362,7 +362,7 @@ class CommentOnPR(GitHubSkillBase):
         pr_number = args.pr_number if args.pr_number else context["issue_number"]
         await self._api.post_json(
             f"/repos/{context['owner']}/{context['repo']}/issues/{pr_number}/comments",
-            json_body={"body": self._bot_prefix() + args.body},
+            json_body={"body": self._bot_prefix() + sanitize_mentions(args.body)},
         )
         return f"Commented on PR #{pr_number}"
 
@@ -390,13 +390,13 @@ class CreatePRReview(GitHubSkillBase):
             "event": args.event,
         }
         if args.body:
-            review_body["body"] = self._bot_prefix() + args.body
+            review_body["body"] = self._bot_prefix() + sanitize_mentions(args.body)
         if args.comments:
             review_body["comments"] = [
                 {
                     "path": c.path,
                     "line": c.line,
-                    "body": c.body,
+                    "body": sanitize_mentions(c.body),
                     "side": "RIGHT",
                 }
                 for c in args.comments
@@ -953,7 +953,7 @@ class CreatePullRequest(GitHubSkillBase):
             "base": base,
         }
         if args.body:
-            body["body"] = args.body
+            body["body"] = sanitize_mentions(args.body)
 
         try:
             result = await self._api.post_json(

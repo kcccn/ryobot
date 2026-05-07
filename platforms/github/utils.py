@@ -24,3 +24,8 @@ def truncate_text(text: str, max_chars: int) -> str:
 def csv_env(name: str) -> set[str]:
     raw = os.getenv(name, "")
     return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def sanitize_mentions(text: str) -> str:
+    """Insert a zero-width space after every @ to prevent GitHub mention notifications."""
+    return text.replace("@", "@​")

@@ -13,7 +13,7 @@ import httpx
 from core.plugins import BasePlugin, HistorySnapshot, PluginEvent
 
 from .client import GitHubApiClient
-from .utils import max_chars_from_env, truncate_text
+from .utils import max_chars_from_env, sanitize_mentions, truncate_text
 
 _RYO_ANY_MARKER_PATTERN = re.compile(
     r"<!--\s*ryo:\w+:.*?-->",
@@ -330,7 +330,7 @@ class GitHubPlugin(BasePlugin):
             return
         await asyncio.sleep(random.uniform(1, 5))
         state_blob = json.dumps(subconscious or {}, ensure_ascii=False, separators=(",", ":"))
-        body = f"**{self._display_name}**\n\n{_sanitize_mentions(content)}\n<!-- ryo:{self._identity}: {state_blob} -->"
+        body = f"**{self._display_name}**\n\n{sanitize_mentions(content)}\n<!-- ryo:{self._identity}: {state_blob} -->"
         await self._api.post_json(
             f"/repos/{event.owner}/{event.repo}/issues/{event.issue_number}/comments",
             json_body={"body": body},
@@ -417,11 +417,6 @@ def _comment_sort_key(comment: dict[str, Any]) -> tuple[str, int]:
     except (TypeError, ValueError):
         comment_id = 0
     return (created_at, comment_id)
-
-
-def _sanitize_mentions(text: str) -> str:
-    """Insert a zero-width space after every @ to prevent GitHub mention notifications."""
-    return text.replace("@", "@​")
 
 
 def _mind_issue_template(display_name: str, identity: str) -> str:
