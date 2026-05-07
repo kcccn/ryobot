@@ -114,7 +114,7 @@ def test_parse_event_treats_workflow_dispatch_with_empty_inputs_as_patrol() -> N
 
     assert event.is_patrol is True
     assert event.issue_number == 0
-    assert "Patrol mode" in event.message
+    assert "Street lurker mode" in event.message
 
 
 @pytest.mark.asyncio

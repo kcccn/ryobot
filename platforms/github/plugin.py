@@ -126,7 +126,7 @@ class GitHubPlugin(BasePlugin):
         title = str(issue.get("title") or "")
         body = str(issue.get("body") or "")
         kind = "PR" if is_pull_request else "Issue"
-        message = f"[Patrol target {kind} #{issue_number}]\n\n{title}"
+        message = f"[Street Lurker target {kind} #{issue_number}]\n\n{title}"
         if body:
             message += f"\n\n{body}"
         message = truncate_text(
@@ -280,7 +280,7 @@ class GitHubPlugin(BasePlugin):
                 dispatcher = inputs.get("dispatcher", "system")
                 return PluginEvent(
                     event_id=f"github:{owner}/{repo}:workflow_dispatch:issue:{issue_number}",
-                    message=f"[Patrol dispatch from {dispatcher}: check issue #{issue_number}]",
+                    message=f"[Street Lurker dispatch from {dispatcher}: check issue #{issue_number}]",
                     author="system",
                     author_association="OWNER",
                     issue_id="",
@@ -293,8 +293,8 @@ class GitHubPlugin(BasePlugin):
         return PluginEvent(
             event_id=f"github:{owner}/{repo}:schedule:{datetime.now(timezone.utc).isoformat()}",
             message=(
-                "Patrol mode: inspect the repo's last 24 hours, decide whether anything is worth "
-                "talking about, and if so pick exactly one issue or PR."
+                "Street lurker mode: inspect the repo's last 24 hours, decide whether anything is worth "
+                "doing or talking about, and if so pick exactly one issue/PR or act directly."
             ),
             author="system",
             author_association="OWNER",
@@ -604,7 +604,7 @@ def _coordination_issue_template(state: RepoRuntimeState) -> str:
     return (
         "# 🎙️ RyoBot Coordination\n\n"
         "This issue stores repo-wide runtime state for the single-engine social simulation.\n\n"
-        f"- next_patrol_after: {state.next_patrol_after or 'immediately'}\n"
+        f"- next_patrol_after: {state.next_patrol_after or 'immediately'} (street-lurker gate)\n"
         f"- last_route: {state.last_routing.bot_identity or 'n/a'} / {state.last_routing.reason or 'n/a'}\n\n"
         "## Bot Fatigue\n\n"
         + "\n".join(fatigue_lines)

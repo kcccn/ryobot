@@ -6,6 +6,7 @@ import random
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from typing import Any, TypedDict
@@ -52,6 +53,17 @@ class ReflectionDecision(BaseModel):
     summary: str = ""
 
 
+@dataclass
+class ExecutionOutcome:
+    kind: str
+    reason: str
+    mutated_tool_names: set[str] = field(default_factory=set)
+
+    @property
+    def acted(self) -> bool:
+        return self.kind in {"replied_on_thread", "acted_without_thread_reply"}
+
+
 class RyoAgent:
     """Hexagonal application service for the two-stage RyoBot interaction loop."""
 
@@ -89,7 +101,7 @@ class RyoAgent:
         runtime_state = history.runtime_state.model_copy(deep=True)
         identity = str(self.persona["identity"])
 
-        kind = "Patrol" if event.is_patrol else "PR" if event.is_pull_request else "Issue"
+        kind = "Street Lurker" if event.is_patrol else "PR" if event.is_pull_request else "Issue"
         target_label = f"#{event.issue_number}" if event.issue_number else "repo-scan"
         _gh_group(f"Run: {kind} {target_label} as {identity} ({event.owner}/{event.repo})")
         _log(
@@ -100,7 +112,7 @@ class RyoAgent:
 
         try:
             if event.is_patrol and not _patrol_due(runtime_state):
-                _log(f"SKIP: patrol gate closed until {runtime_state.next_patrol_after}")
+                _log(f"SKIP: street-lurker gate closed until {runtime_state.next_patrol_after}")
                 return
 
             decision = await self._decide(event=event, history=history)
@@ -137,22 +149,24 @@ class RyoAgent:
                 active_event = await self.plugin.resolve_target_event(event, target_issue_number)
                 active_history = await self.plugin.fetch_history(active_event)
                 _log(
-                    f"patrol target resolved to "
+                    f"street-lurker target resolved to "
                     f"{'PR' if active_event.is_pull_request else 'Issue'} #{active_event.issue_number}"
                 )
 
-            replied = await self._reply(event=active_event, history=active_history)
-            if replied:
+            outcome = await self._reply(event=active_event, history=active_history)
+            if outcome.acted:
                 try:
                     await self._reflect(event=active_event, history=active_history)
                 except Exception as exc:  # pragma: no cover - defensive logging only
                     _log(f"WARN: reflection pass failed: {exc}")
             runtime_state.last_routing.event_id = event.event_id
             runtime_state.last_routing.bot_identity = identity
-            runtime_state.last_routing.reason = "replied" if replied else "no_reply"
-            runtime_state.last_routing.target_issue_number = active_event.issue_number if replied else target_issue_number
+            runtime_state.last_routing.reason = outcome.reason
+            runtime_state.last_routing.target_issue_number = (
+                active_event.issue_number if outcome.acted else target_issue_number
+            )
             runtime_state.last_routing.routed_at = _utcnow_iso()
-            if replied:
+            if outcome.acted:
                 runtime_state = _mark_bot_fatigue(
                     runtime_state,
                     identity=identity,
@@ -175,18 +189,26 @@ class RyoAgent:
         ]
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
+        self._log_available_tools("will", tools)
         try:
             for i in range(self.max_iterations):
                 _log(f"--- will iteration {i + 1}/{self.max_iterations} ---")
+                t_start = time.monotonic()
                 response = await self._create_completion_with_retry(messages=messages, tools=tools)
+                t_elapsed = time.monotonic() - t_start
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
+                self._log_stage_response("will", assistant_message, elapsed_seconds=t_elapsed)
                 if tool_calls:
+                    self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     for tool_call in tool_calls:
+                        tool_name, args_raw = self._tool_call_details(tool_call)
+                        _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
                         tool_result = await self._execute_tool_call(tool_call, event=event)
                         if isinstance(tool_result, _NoReplyResult):
                             break
+                        _log(f"  <- result: {_truncate_log(tool_result)}")
                         messages.append(
                             {
                                 "role": "tool",
@@ -202,6 +224,7 @@ class RyoAgent:
                 try:
                     decision = WillDecision.model_validate_json(decision_text)
                 except ValidationError as exc:
+                    _log(f"WARN: invalid will JSON: {_truncate_log(exc)}")
                     messages.append(self._assistant_message_payload(assistant_message))
                     messages.append(
                         {
@@ -216,6 +239,7 @@ class RyoAgent:
                 try:
                     self._validate_decision(event=event, decision=decision)
                 except ValueError as exc:
+                    _log(f"WARN: invalid will decision constraint: {exc}")
                     messages.append(self._assistant_message_payload(assistant_message))
                     messages.append(
                         {
@@ -236,7 +260,7 @@ class RyoAgent:
             action_decision=ActionDecision(will_reply=False, target_issue_number=None),
         )
 
-    async def _reply(self, *, event: PluginEvent, history: Any) -> bool:
+    async def _reply(self, *, event: PluginEvent, history: Any) -> ExecutionOutcome:
         system_prompt = self._reply_prompt(history=history)
         messages: list[ChatMessage] = [
             {"role": "system", "content": system_prompt},
@@ -247,8 +271,9 @@ class RyoAgent:
         tools = [skill.get_tool_definition() for skill in [*available_skills, *self._control_skills_by_name.values()]]
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
+        executed_tool_names: set[str] = set()
 
-        _log(f"available tools: {', '.join(t['function']['name'] for t in tools)}")
+        self._log_available_tools("reply", tools)
 
         try:
             for i in range(self.max_iterations):
@@ -259,22 +284,13 @@ class RyoAgent:
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
 
-                reasoning = getattr(assistant_message, "reasoning_content", None) or None
-                if reasoning:
-                    _log(f"reasoning ({t_elapsed:.1f}s): {reasoning[:LOG_TRUNCATE]}")
-                else:
-                    _log(f"LLM response ({t_elapsed:.1f}s)")
+                self._log_stage_response("reply", assistant_message, elapsed_seconds=t_elapsed)
 
                 if tool_calls:
-                    tool_names = [
-                        getattr(getattr(tc, "function", None), "name", "?")
-                        for tc in tool_calls
-                    ]
-                    _log(f"tool calls: {tool_names}")
+                    self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     for tool_call in tool_calls:
-                        tool_name = getattr(getattr(tool_call, "function", None), "name", "")
-                        args_raw = getattr(getattr(tool_call, "function", None), "arguments", "{}")
+                        tool_name, args_raw = self._tool_call_details(tool_call)
                         _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
                         tool_result = await self._execute_tool_call(tool_call, event=event)
                         if tool_name == NO_REPLY_TOOL_NAME:
@@ -283,7 +299,15 @@ class RyoAgent:
                             except Exception:
                                 reason = "(no reason)"
                             _log(f"  <- no_reply: {reason}")
-                            return False
+                            if executed_tool_names:
+                                return ExecutionOutcome(
+                                    kind="acted_without_thread_reply",
+                                    reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
+                                    mutated_tool_names=set(executed_tool_names),
+                                )
+                            return ExecutionOutcome(kind="no_action", reason="no_reply")
+                        if self._is_mutating_tool(tool_name):
+                            executed_tool_names.add(tool_name)
                         _log(f"  <- result: {_truncate_log(tool_result)}")
                         messages.append(
                             {
@@ -296,17 +320,49 @@ class RyoAgent:
 
                 reply_text = self._extract_text_content(assistant_message).strip()
                 if reply_text:
+                    if event.issue_number == 0:
+                        _log(f"street-lurker note ({len(reply_text)} chars): {reply_text[:LOG_TRUNCATE]}")
+                        if executed_tool_names:
+                            return ExecutionOutcome(
+                                kind="acted_without_thread_reply",
+                                reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
+                                mutated_tool_names=set(executed_tool_names),
+                            )
+                        _log("WARN: text produced during repo-scan without a thread target; treating as no action")
+                        return ExecutionOutcome(kind="no_action", reason="no_action")
                     _log(f"reply ({len(reply_text)} chars): {reply_text[:LOG_TRUNCATE]}")
                     await self.plugin.send_reply(event, reply_text, subconscious)
                     _log("reply posted")
-                    return True
+                    return ExecutionOutcome(
+                        kind="replied_on_thread",
+                        reason=_reason_from_tools(executed_tool_names, default="replied"),
+                        mutated_tool_names=set(executed_tool_names),
+                    )
+
+                if executed_tool_names:
+                    _log("reply stage finished without thread reply after mutating tools")
+                    return ExecutionOutcome(
+                        kind="acted_without_thread_reply",
+                        reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
+                        mutated_tool_names=set(executed_tool_names),
+                    )
 
                 _log("WARN: no tool calls and no text reply, breaking")
                 break
 
+            if executed_tool_names:
+                _log("reply stage hit the iteration limit after mutating tools")
+                return ExecutionOutcome(
+                    kind="acted_without_thread_reply",
+                    reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
+                    mutated_tool_names=set(executed_tool_names),
+                )
+            if event.issue_number == 0:
+                _log("WARN: max iterations reached during repo-scan with no concrete action")
+                return ExecutionOutcome(kind="no_action", reason="no_action")
             _log("WARN: max iterations reached, sending fallback message")
             await self.plugin.send_reply(event, DEFAULT_FALLBACK_MESSAGE, subconscious)
-            return True
+            return ExecutionOutcome(kind="replied_on_thread", reason="replied")
         finally:
             clear_skill_context(context_token)
 
@@ -322,18 +378,26 @@ class RyoAgent:
         ]
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
+        self._log_available_tools("reflection", tools)
         try:
             for i in range(self.max_iterations):
                 _log(f"--- reflection iteration {i + 1}/{self.max_iterations} ---")
+                t_start = time.monotonic()
                 response = await self._create_completion_with_retry(messages=messages, tools=tools)
+                t_elapsed = time.monotonic() - t_start
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
+                self._log_stage_response("reflection", assistant_message, elapsed_seconds=t_elapsed)
                 if tool_calls:
+                    self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     for tool_call in tool_calls:
+                        tool_name, args_raw = self._tool_call_details(tool_call)
+                        _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
                         tool_result = await self._execute_tool_call(tool_call, event=event)
                         if isinstance(tool_result, _NoReplyResult):
                             return
+                        _log(f"  <- result: {_truncate_log(tool_result)}")
                         messages.append(
                             {
                                 "role": "tool",
@@ -348,7 +412,8 @@ class RyoAgent:
                     return
                 try:
                     decision = ReflectionDecision.model_validate_json(reflection_text)
-                except ValidationError:
+                except ValidationError as exc:
+                    _log(f"WARN: invalid reflection JSON: {_truncate_log(exc)}")
                     return
                 _log(f"reflection result: {decision.action} {decision.summary[:LOG_TRUNCATE]}")
                 return
@@ -467,8 +532,8 @@ class RyoAgent:
             "\n1. 当前看到的上下文是故意片面的；如果信息不够，先使用只读工具继续了解。"
             "\n2. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
             "\n3. 如果这是被动事件，target_issue_number 必须为 null。"
-            "\n4. 如果这是巡逻事件，target_issue_number 可以是 issue 或 PR 编号，也可以为 null。"
-            "\n5. 只有当你真的准备公开发言时，will_reply 才能为 true。"
+            "\n4. 如果这是街溜子事件，target_issue_number 可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
+            "\n5. 只有当你真的准备公开发言或直接动手推进时，will_reply 才能为 true。"
             "\n6. 不要输出 Markdown，不要解释，不要包裹代码块。"
         )
 
@@ -478,7 +543,7 @@ class RyoAgent:
     def _decision_user_prompt(self, *, event: PluginEvent, history: Any) -> str:
         prompt = event.message
         if event.is_patrol and history.patrol_brief:
-            prompt += f"\n\n仓库近 24 小时动态早报：\n{history.patrol_brief}"
+            prompt += f"\n\n街溜子模式仓库近 24 小时动态早报：\n{history.patrol_brief}"
         return prompt
 
     def _reflection_prompt(self, *, history: Any) -> str:
@@ -498,7 +563,7 @@ class RyoAgent:
     def _reflection_user_prompt(self, *, event: PluginEvent, history: Any) -> str:
         prompt = f"事件内容：\n{event.message}"
         if event.is_patrol and history.patrol_brief:
-            prompt += f"\n\n巡逻早报：\n{history.patrol_brief}"
+            prompt += f"\n\n街溜子早报：\n{history.patrol_brief}"
         prompt += "\n\n请判断这次任务后是否需要沉淀、修订或归档长期记忆。"
         return prompt
 
@@ -528,8 +593,6 @@ class RyoAgent:
             return False, "bot chose silence"
         if decision.motivation_score < self.motivation_threshold:
             return False, f"motivation {decision.motivation_score} below threshold {self.motivation_threshold}"
-        if event.is_patrol and decision.action_decision.target_issue_number is None:
-            return False, "patrol found no interesting target"
 
         fatigue_state = runtime_state.bot_fatigue.get(str(self.persona["identity"]))
         if fatigue_state and fatigue_state.next_available_at:
@@ -618,9 +681,47 @@ class RyoAgent:
             message["tool_calls"] = [self._serialize_tool_call(call) for call in tool_calls]
         return message
 
+    def _log_available_tools(self, stage: str, tools: list[dict[str, Any]]) -> None:
+        tool_names = [tool["function"]["name"] for tool in tools]
+        _log(f"{stage} available tools: {', '.join(tool_names)}")
+
+    def _log_stage_response(self, stage: str, assistant_message: Any, *, elapsed_seconds: float) -> None:
+        reasoning = getattr(assistant_message, "reasoning_content", None) or None
+        if reasoning:
+            _log(f"{stage} reasoning ({elapsed_seconds:.1f}s): {reasoning[:LOG_TRUNCATE]}")
+        else:
+            _log(f"{stage} LLM response ({elapsed_seconds:.1f}s)")
+
+    def _log_tool_calls(self, tool_calls: list[Any]) -> None:
+        tool_names = [getattr(getattr(tc, "function", None), "name", "?") for tc in tool_calls]
+        _log(f"tool calls: {tool_names}")
+
+    @staticmethod
+    def _tool_call_details(tool_call: Any) -> tuple[str, str]:
+        function = getattr(tool_call, "function", None)
+        return getattr(function, "name", ""), getattr(function, "arguments", "{}")
+
+    def _is_mutating_tool(self, tool_name: str) -> bool:
+        skill = self._skills_by_name.get(tool_name)
+        return bool(skill and skill.mutates_state)
+
 
 def _is_trusted_mutation_author(author_association: str) -> bool:
     return author_association.upper() in TRUSTED_MUTATION_AUTHOR_ASSOCIATIONS
+
+
+def _reason_from_tools(tool_names: set[str], *, default: str) -> str:
+    if "merge_pull_request" in tool_names:
+        return "merged_pr"
+    if "close_issue" in tool_names:
+        return "closed_issue"
+    if "dispatch_workflow" in tool_names:
+        return "dispatched_workflow"
+    if "create_pull_request" in tool_names:
+        return "created_pr"
+    if tool_names:
+        return default
+    return "no_action"
 
 
 def _patrol_due(runtime_state: RepoRuntimeState) -> bool:

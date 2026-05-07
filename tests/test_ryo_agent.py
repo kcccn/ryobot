@@ -148,6 +148,26 @@ class MutatingSkill(EchoSkill):
     mutates_state = True
 
 
+class CreatePullRequestTestSkill(MutatingSkill):
+    name = "create_pull_request"
+
+
+class MergePullRequestTestSkill(MutatingSkill):
+    name = "merge_pull_request"
+
+
+class AddLabelsTestSkill(MutatingSkill):
+    name = "add_labels"
+
+
+class CloseIssueTestSkill(MutatingSkill):
+    name = "close_issue"
+
+
+class DispatchWorkflowTestSkill(MutatingSkill):
+    name = "dispatch_workflow"
+
+
 class TrustedReadSkill(EchoSkill):
     name = "trusted_read"
     description = "Read broader trusted-only context."
@@ -325,6 +345,136 @@ async def test_run_patrol_resolves_target_before_replying() -> None:
     assert plugin.resolved_targets == [77]
     assert plugin.sent_replies[0][0].issue_number == 77
     assert plugin.updated_runtime_states[-1].next_patrol_after is not None
+
+
+@pytest.mark.asyncio
+async def test_street_lurker_repo_scan_can_act_without_thread_reply() -> None:
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="street lurker",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=patrol_event,
+        history_by_issue={
+            0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")
+        },
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "clear fix",
+                            "internal_emotion": "itchy",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 91,
+                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-pr",
+                            function=FakeFunction(
+                                name="create_pull_request",
+                                arguments='{"text":"ship it"}',
+                            ),
+                        )
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content="")),
+            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+        ],
+        skills=[CreatePullRequestTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    assert plugin.sent_replies == []
+    assert plugin.updated_runtime_states[-1].last_routing.reason == "created_pr"
+    fatigue = plugin.updated_runtime_states[-1].bot_fatigue["architect"]
+    assert fatigue.last_spoke_at is not None
+
+
+@pytest.mark.asyncio
+async def test_street_lurker_reply_stage_exposes_full_mutation_tools_for_trusted_repo_scan() -> None:
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="street lurker",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=patrol_event,
+        history_by_issue={
+            0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")
+        },
+    )
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "let's go",
+                            "internal_emotion": "ready",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 95,
+                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-no-reply",
+                            function=FakeFunction(name="no_reply", arguments='{"reason":"pass"}'),
+                        )
+                    ]
+                )
+            ),
+        ],
+        skills=[
+            EchoSkill(),
+            CreatePullRequestTestSkill(),
+            MergePullRequestTestSkill(),
+            AddLabelsTestSkill(),
+            CloseIssueTestSkill(),
+            DispatchWorkflowTestSkill(),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    tool_names = [tool["function"]["name"] for tool in fake_completions.calls[1]["tools"]]
+    assert "create_pull_request" in tool_names
+    assert "merge_pull_request" in tool_names
+    assert "add_labels" in tool_names
+    assert "close_issue" in tool_names
+    assert "dispatch_workflow" in tool_names
 
 
 @pytest.mark.asyncio
@@ -519,6 +669,49 @@ async def test_decide_replays_reasoning_content_after_tool_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_will_stage_logs_reasoning_and_tool_details(capsys: pytest.CaptureFixture[str]) -> None:
+    plugin = FakePlugin()
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction(name="echo", arguments='{"text":"probe"}'),
+                        )
+                    ],
+                    reasoning_content="Need one more clue.",
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "done",
+                            "internal_emotion": "steady",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    stderr = capsys.readouterr().err
+    assert "will available tools: echo" in stderr
+    assert "will reasoning" in stderr
+    assert "tool calls: ['echo']" in stderr
+    assert '-> echo({"text":"probe"})' in stderr
+    assert "<- result: echo:probe" in stderr
+
+
+@pytest.mark.asyncio
 async def test_decision_prompt_prefers_memory_before_repo_context() -> None:
     plugin = FakePlugin()
     agent, fake_completions = build_agent(
@@ -608,6 +801,67 @@ async def test_reflection_pass_can_commit_memory_after_reply() -> None:
     reflection_tool_names = [tool["function"]["name"] for tool in fake_completions.calls[2]["tools"]]
     assert "commit_memory" in reflection_tool_names
     assert fake_completions.calls[3]["messages"][-1]["content"] == "echo:durable fact"
+
+
+@pytest.mark.asyncio
+async def test_reflection_stage_logs_reasoning_and_tool_details(capsys: pytest.CaptureFixture[str]) -> None:
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="hello",
+            author="octocat",
+            author_association="OWNER",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+        )
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "reply once",
+                            "internal_emotion": "steady",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 90,
+                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="Public reply")),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-memory",
+                            function=FakeFunction(
+                                name="retrieve_memory",
+                                arguments=json.dumps({"text": "durable fact"}),
+                            ),
+                        )
+                    ],
+                    reasoning_content="Check whether this is already known.",
+                )
+            ),
+            build_response(FakeMessage(content='{"action":"noop","summary":"nothing new"}')),
+        ],
+        skills=[EchoSkill(), RetrieveMemoryTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    stderr = capsys.readouterr().err
+    assert "reflection available tools: echo, retrieve_memory" in stderr
+    assert "reflection reasoning" in stderr
+    assert "tool calls: ['retrieve_memory']" in stderr
+    assert '-> retrieve_memory({"text": "durable fact"})' in stderr
+    assert "<- result: echo:durable fact" in stderr
 
 
 @pytest.mark.asyncio
