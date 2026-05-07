@@ -99,6 +99,24 @@ def test_parse_event_normalizes_issue_comment_payload() -> None:
     assert event.is_pull_request is False
 
 
+def test_parse_event_treats_workflow_dispatch_with_empty_inputs_as_patrol() -> None:
+    plugin = build_plugin()
+
+    event = plugin.parse_event(
+        {
+            "inputs": {},
+            "repository": {
+                "name": "widgets",
+                "owner": {"login": "acme"},
+            },
+        }
+    )
+
+    assert event.is_patrol is True
+    assert event.issue_number == 0
+    assert "Patrol mode" in event.message
+
+
 @pytest.mark.asyncio
 async def test_fetch_history_returns_partial_context_and_runtime_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RYOBOT_INITIAL_HISTORY_COMMENT_LIMIT", "2")

@@ -70,7 +70,7 @@ class GitHubPlugin(BasePlugin):
         is_patrol = (
             "schedule" in raw_payload
             or raw_payload.get("_patrol")
-            or (raw_payload.get("inputs") and isinstance(raw_payload["inputs"], dict))
+            or isinstance(raw_payload.get("inputs"), dict)
         )
         if is_patrol:
             return self._parse_patrol(raw_payload, owner, repo)
