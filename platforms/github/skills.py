@@ -1109,6 +1109,8 @@ DEFAULT_ALLOWED_COMMANDS = frozenset({
     "ruff check",
     "mypy",
     "pyright",
+    "python -m pip install",
+    "pip install",
 })
 SHELL_METACHARS = frozenset({"|", "&", ";", "<", ">", "`", "$", "\n", "\r"})
 SAFE_ENV_KEYS = frozenset({
