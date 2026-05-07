@@ -112,6 +112,22 @@ class GitHubApiClient:
         )
         return response.json()
 
+    async def delete_json(
+        self,
+        path: str,
+        *,
+        accept: str = "application/vnd.github+json",
+    ) -> Any:
+        response = await self._with_retry(
+            lambda: self._client.delete(
+                path,
+                headers=self._headers(accept=accept),
+            ),
+        )
+        if response.status_code == 204:
+            return {}
+        return response.json()
+
     async def post_no_content(
         self,
         path: str,

@@ -127,6 +127,10 @@ class CreateBranchArgs(BaseModel):
     base_branch: str = Field(default="", description="Branch to create from (empty for repo default)")
 
 
+class DeleteBranchArgs(BaseModel):
+    branch: str = Field(description="Name of the branch to delete")
+
+
 class CreatePullRequestArgs(BaseModel):
     title: str = Field(description="PR title")
     head: str = Field(description="Branch containing the changes")
@@ -923,6 +927,31 @@ class CreateBranch(GitHubSkillBase):
             f"Created branch '{args.branch}' from '{base}' (SHA: {base_sha[:7]})\n"
             f"URL: {result.get('url', '')}"
         )
+
+
+class DeleteBranch(GitHubSkillBase):
+    name = "delete_branch"
+    description = (
+        "Delete a branch from the repository. "
+        "Use this to clean up stale feature/fix branches after their PR has been merged or closed. "
+        "You cannot delete the default branch."
+    )
+    args_model = DeleteBranchArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        try:
+            await self._api.delete_json(
+                f"/repos/{context['owner']}/{context['repo']}/git/refs/heads/{args.branch}",
+            )
+        except httpx.HTTPStatusError as exc:
+            return (
+                f"GitHub API error ({exc.response.status_code}): "
+                f"{exc.response.text[:1000]}"
+            )
+        return f"Deleted branch '{args.branch}'"
 
 
 class CreatePullRequest(GitHubSkillBase):
