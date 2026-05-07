@@ -37,6 +37,7 @@ class FakeToolCall:
 class FakeMessage:
     content: str | None = None
     tool_calls: list[FakeToolCall] = field(default_factory=list)
+    reasoning_content: str | None = None
 
 
 @dataclass
@@ -474,6 +475,47 @@ async def test_run_sets_runtime_context_for_skills() -> None:
     tool_result = fake_completions.calls[1]["messages"][-1]["content"]
     assert '"owner": "acme"' in tool_result
     assert '"is_patrol": false' in tool_result.lower()
+
+
+@pytest.mark.asyncio
+async def test_decide_replays_reasoning_content_after_tool_calls() -> None:
+    plugin = FakePlugin()
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction(name="echo", arguments='{"text":"probe"}'),
+                        )
+                    ],
+                    reasoning_content="I should inspect one clue first.",
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "after tool",
+                            "internal_emotion": "steady",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    assistant_msg = fake_completions.calls[1]["messages"][-2]
+    assert assistant_msg["role"] == "assistant"
+    assert assistant_msg["reasoning_content"] == "I should inspect one clue first."
+    assert assistant_msg["tool_calls"][0]["function"]["name"] == "echo"
 
 
 @pytest.mark.asyncio

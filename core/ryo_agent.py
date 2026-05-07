@@ -182,13 +182,7 @@ class RyoAgent:
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
                 if tool_calls:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": self._extract_text_content(assistant_message),
-                            "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
-                        }
-                    )
+                    messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     for tool_call in tool_calls:
                         tool_result = await self._execute_tool_call(tool_call, event=event)
                         if isinstance(tool_result, _NoReplyResult):
@@ -208,7 +202,7 @@ class RyoAgent:
                 try:
                     decision = WillDecision.model_validate_json(decision_text)
                 except ValidationError as exc:
-                    messages.append({"role": "assistant", "content": decision_text})
+                    messages.append(self._assistant_message_payload(assistant_message))
                     messages.append(
                         {
                             "role": "user",
@@ -222,7 +216,7 @@ class RyoAgent:
                 try:
                     self._validate_decision(event=event, decision=decision)
                 except ValueError as exc:
-                    messages.append({"role": "assistant", "content": decision_text})
+                    messages.append(self._assistant_message_payload(assistant_message))
                     messages.append(
                         {
                             "role": "user",
@@ -277,14 +271,7 @@ class RyoAgent:
                         for tc in tool_calls
                     ]
                     _log(f"tool calls: {tool_names}")
-                    msg: ChatMessage = {
-                        "role": "assistant",
-                        "content": self._extract_text_content(assistant_message),
-                        "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
-                    }
-                    if reasoning:
-                        msg["reasoning_content"] = reasoning
-                    messages.append(msg)
+                    messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     for tool_call in tool_calls:
                         tool_name = getattr(getattr(tool_call, "function", None), "name", "")
                         args_raw = getattr(getattr(tool_call, "function", None), "arguments", "{}")
@@ -342,13 +329,7 @@ class RyoAgent:
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
                 if tool_calls:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": self._extract_text_content(assistant_message),
-                            "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
-                        }
-                    )
+                    messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     for tool_call in tool_calls:
                         tool_result = await self._execute_tool_call(tool_call, event=event)
                         if isinstance(tool_result, _NoReplyResult):
@@ -619,6 +600,23 @@ class RyoAgent:
                 "arguments": getattr(function, "arguments", "{}"),
             },
         }
+
+    def _assistant_message_payload(
+        self,
+        assistant_message: Any,
+        *,
+        tool_calls: list[Any] | None = None,
+    ) -> ChatMessage:
+        message: ChatMessage = {
+            "role": "assistant",
+            "content": self._extract_text_content(assistant_message),
+        }
+        reasoning = getattr(assistant_message, "reasoning_content", None) or None
+        if reasoning:
+            message["reasoning_content"] = reasoning
+        if tool_calls:
+            message["tool_calls"] = [self._serialize_tool_call(call) for call in tool_calls]
+        return message
 
 
 def _is_trusted_mutation_author(author_association: str) -> bool:
