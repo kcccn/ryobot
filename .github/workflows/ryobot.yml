@@ -6,47 +6,36 @@ on:
       max_iterations:
         description: 'Maximum tool-call iterations per run'
         type: number
-        default: 100
       bot_activity_weights:
         description: 'JSON or key=value list of per-bot activity weights'
         type: string
-        default: ''
       motivation_threshold:
         description: 'Minimum motivation score required before public reply'
         type: number
-        default: 70
       fatigue_min_seconds:
         description: 'Minimum fatigue cooldown after a bot speaks'
         type: number
-        default: 480
       fatigue_max_seconds:
         description: 'Maximum fatigue cooldown after a bot speaks'
         type: number
-        default: 720
       initial_history_comment_limit:
         description: 'Recent comments to preload into the initial context slice'
         type: number
-        default: 12
       initial_history_total_chars:
         description: 'Character budget for the initial partial history slice'
         type: number
-        default: 16000
       allowed_workflows:
         description: 'Comma-separated workflow filenames that DispatchWorkflow skill may trigger (empty = disabled)'
         type: string
-        default: 'ryobot.yml'
       marker_author_logins:
         description: 'Comma-separated GitHub logins whose marker comments are trusted'
         type: string
-        default: 'github-actions[bot]'
       allowed_commands:
         description: 'Comma-separated command prefixes allowed for run_command (empty = safe defaults)'
         type: string
-        default: ''
       command_timeout_seconds:
         description: 'Maximum seconds per run_command execution'
         type: number
-        default: 300
 
 jobs:
   run-ryobot:
@@ -69,22 +58,31 @@ jobs:
       - name: Install RyoBot
         run: python -m pip install git+https://github.com/kcccn/ryobot.git
 
-      - name: Run Bots Sequentially
+      - name: Run RyoBot Engine
         env:
           GITHUB_TOKEN: ${{ github.token }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EVENT_PAYLOAD: ${{ toJson(github.event) }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          MAX_ITERATIONS: ${{ inputs.max_iterations }}
-          RYOBOT_BOT_ACTIVITY_WEIGHTS: ${{ inputs.bot_activity_weights }}
-          RYOBOT_MOTIVATION_THRESHOLD: ${{ inputs.motivation_threshold }}
-          RYOBOT_FATIGUE_MIN_SECONDS: ${{ inputs.fatigue_min_seconds }}
-          RYOBOT_FATIGUE_MAX_SECONDS: ${{ inputs.fatigue_max_seconds }}
-          RYOBOT_INITIAL_HISTORY_COMMENT_LIMIT: ${{ inputs.initial_history_comment_limit }}
-          RYOBOT_INITIAL_HISTORY_TOTAL_CHARS: ${{ inputs.initial_history_total_chars }}
-          RYOBOT_ALLOWED_WORKFLOWS: ${{ inputs.allowed_workflows }}
-          RYOBOT_MARKER_AUTHOR_LOGINS: ${{ inputs.marker_author_logins }}
-          RYOBOT_ALLOWED_COMMANDS: ${{ inputs.allowed_commands }}
-          RYOBOT_COMMAND_TIMEOUT_SECONDS: ${{ inputs.command_timeout_seconds }}
+          BOT_IDENTITY: ${{ vars.BOT_IDENTITY || '' }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || '' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || '' }}
+          MAX_ITERATIONS: ${{ inputs.max_iterations || vars.RYOBOT_MAX_ITERATIONS || '100' }}
+          RYOBOT_BOT_ACTIVITY_WEIGHTS: ${{ inputs.bot_activity_weights || vars.RYOBOT_BOT_ACTIVITY_WEIGHTS || '' }}
+          RYOBOT_MOTIVATION_THRESHOLD: ${{ inputs.motivation_threshold || vars.RYOBOT_MOTIVATION_THRESHOLD || '70' }}
+          RYOBOT_FATIGUE_MIN_SECONDS: ${{ inputs.fatigue_min_seconds || vars.RYOBOT_FATIGUE_MIN_SECONDS || '480' }}
+          RYOBOT_FATIGUE_MAX_SECONDS: ${{ inputs.fatigue_max_seconds || vars.RYOBOT_FATIGUE_MAX_SECONDS || '720' }}
+          RYOBOT_INITIAL_HISTORY_COMMENT_LIMIT: ${{ inputs.initial_history_comment_limit || vars.RYOBOT_INITIAL_HISTORY_COMMENT_LIMIT || '12' }}
+          RYOBOT_INITIAL_HISTORY_TOTAL_CHARS: ${{ inputs.initial_history_total_chars || vars.RYOBOT_INITIAL_HISTORY_TOTAL_CHARS || '16000' }}
+          RYOBOT_ALLOWED_WORKFLOWS: ${{ inputs.allowed_workflows || vars.RYOBOT_ALLOWED_WORKFLOWS || '' }}
+          RYOBOT_ALLOWED_WORKFLOW_REFS: ${{ vars.RYOBOT_ALLOWED_WORKFLOW_REFS || 'main' }}
+          RYOBOT_MARKER_AUTHOR_LOGINS: ${{ inputs.marker_author_logins || vars.RYOBOT_MARKER_AUTHOR_LOGINS || 'github-actions[bot]' }}
+          RYOBOT_ALLOWED_COMMANDS: ${{ inputs.allowed_commands || vars.RYOBOT_ALLOWED_COMMANDS || '' }}
+          RYOBOT_COMMAND_TIMEOUT_SECONDS: ${{ inputs.command_timeout_seconds || vars.RYOBOT_COMMAND_TIMEOUT_SECONDS || '300' }}
+          RYOBOT_MAX_TOOL_RESULT_CHARS: ${{ vars.RYOBOT_MAX_TOOL_RESULT_CHARS || '20000' }}
+          RYOBOT_MAX_HISTORY_COMMENT_CHARS: ${{ vars.RYOBOT_MAX_HISTORY_COMMENT_CHARS || '12000' }}
+          RYOBOT_MAX_HISTORY_TOTAL_CHARS: ${{ vars.RYOBOT_MAX_HISTORY_TOTAL_CHARS || '80000' }}
+          RYOBOT_MAX_DIFF_CHARS: ${{ vars.RYOBOT_MAX_DIFF_CHARS || '50000' }}
+          RYOBOT_MAX_FILE_CHARS: ${{ vars.RYOBOT_MAX_FILE_CHARS || '30000' }}
         run: ryobot

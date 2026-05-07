@@ -154,14 +154,17 @@ def test_workflows_use_single_engine_and_repo_concurrency() -> None:
     reusable = REUSABLE_WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert 'cron: "*/10 * * * *"' in content
-    assert "group: ryobot-${{ github.repository }}" in content
-    assert "cancel-in-progress: false" in content
-    assert "python main.py" in content
+    assert "uses: ./.github/workflows/ryobot.yml" in content
+    assert "allowed_workflows: github-ryobot.yml" in content
+    assert "python main.py" not in content
     assert "for bot in architect reviewer pm explorer coder" not in content
 
     assert "group: ryobot-${{ github.repository }}" in reusable
+    assert "cancel-in-progress: false" in reusable
     assert "RYOBOT_MOTIVATION_THRESHOLD" in reusable
     assert "RYOBOT_FATIGUE_MIN_SECONDS" in reusable
+    assert "vars.RYOBOT_MOTIVATION_THRESHOLD" in reusable
+    assert "vars.RYOBOT_ALLOWED_WORKFLOWS" in reusable
     assert "ryobot" in reusable
     assert "for bot in architect reviewer pm explorer coder" not in reusable
 
@@ -173,3 +176,4 @@ def test_readme_brands_project_as_single_engine_social_simulation() -> None:
     assert "两段式意愿决策" in content
     assert "仓库级疲劳" in content
     assert "RYOBOT_MOTIVATION_THRESHOLD" in content
+    assert "Actions Variable" in content
