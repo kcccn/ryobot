@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import shlex
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -21,6 +24,36 @@ class EmptyArgs(BaseModel):
 class SearchRepoMemoryArgs(BaseModel):
     query: str
     limit: int = Field(default=5, ge=1, le=10)
+
+
+class CommitMemoryArgs(BaseModel):
+    title: str = Field(description="Memory issue title")
+    summary: str = Field(description="Human-readable summary of the durable memory")
+    tags: list[str] = Field(default_factory=list, description="Optional memory tags such as user:alice or module:api")
+
+
+class RetrieveMemoryArgs(BaseModel):
+    query: str = Field(description="Keywords for searching the memory issue database")
+    candidate_limit: int = Field(default=20, ge=1, le=20)
+    limit: int = Field(default=3, ge=1, le=10)
+
+
+class RefineMemoryArgs(BaseModel):
+    memory_issue_number: int = Field(ge=1, description="Closed memory issue number to update")
+    title: str = Field(default="", description="Replacement memory title, empty to keep unchanged")
+    summary: str = Field(default="", description="Replacement human-readable summary, empty to keep unchanged")
+    tags: list[str] = Field(default_factory=list, description="Replacement tag list, empty to keep unchanged")
+
+
+class ArchiveMemoryArgs(BaseModel):
+    memory_issue_number: int = Field(ge=1, description="Memory issue number to archive")
+    reason: str = Field(default="", description="Why this memory is being archived")
+
+
+class SearchRepoContextArgs(BaseModel):
+    query: str = Field(description="Keywords or GitHub issue search syntax for repo context lookup")
+    limit: int = Field(default=10, ge=1, le=20)
+    kind: str = Field(default="all", description="One of: all, issues, prs")
 
 
 class ReadCodeDiffArgs(BaseModel):
@@ -140,6 +173,10 @@ class CreatePullRequestArgs(BaseModel):
 
 DEFAULT_MAX_DIFF_CHARS = 50000
 DEFAULT_MAX_ISSUE_BODY_CHARS = 12000
+MEMORY_LABEL = "🧠 memory"
+DELETED_MEMORY_LABEL = "🗑️ deleted"
+MEMORY_SCHEMA_VERSION = 1
+_MEMORY_MARKER_RE = re.compile(r"<!--\s*ryo:memory:\s*(\{.*?\})\s*-->", re.DOTALL)
 
 
 class ReadWorkflowRunArgs(BaseModel):
@@ -198,6 +235,114 @@ class GitHubSkillBase(BaseSkill):
                 return results
             page += 1
 
+    @staticmethod
+    def _normalize_tags(tags: list[str]) -> list[str]:
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for raw in tags:
+            value = str(raw).strip()
+            if not value:
+                continue
+            key = value.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+        return normalized
+
+    @staticmethod
+    def _memory_source(context: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "issue_number": int(context.get("issue_number") or 0),
+            "comment_id": int(context.get("comment_id") or 0),
+            "is_pull_request": bool(context.get("is_pull_request")),
+        }
+
+    @staticmethod
+    def _memory_body(summary: str, metadata: dict[str, Any]) -> str:
+        cleaned_summary = summary.strip() or "(empty summary)"
+        return "\n".join(
+            [
+                "### 记忆摘要",
+                cleaned_summary,
+                "",
+                "---",
+                f"<!-- ryo:memory: {json.dumps(metadata, ensure_ascii=False, separators=(',', ':'))} -->",
+            ]
+        )
+
+    @staticmethod
+    def _parse_memory_body(body: str) -> tuple[str, dict[str, Any]]:
+        marker = _MEMORY_MARKER_RE.search(body or "")
+        metadata: dict[str, Any] = {}
+        visible_body = body or ""
+        if marker:
+            visible_body = visible_body[: marker.start()].rstrip()
+            try:
+                loaded = json.loads(marker.group(1))
+                if isinstance(loaded, dict):
+                    metadata = loaded
+            except json.JSONDecodeError:
+                metadata = {}
+        if visible_body.startswith("### 记忆摘要"):
+            visible_body = visible_body[len("### 记忆摘要") :].strip()
+        visible_body = re.sub(r"\n?---\s*$", "", visible_body).strip()
+        return visible_body, metadata
+
+    @staticmethod
+    def _labels_from_issue(issue: dict[str, Any]) -> list[str]:
+        labels: list[str] = []
+        for item in issue.get("labels", []):
+            if isinstance(item, dict):
+                value = str(item.get("name") or "").strip()
+            else:
+                value = str(item).strip()
+            if value:
+                labels.append(value)
+        return labels
+
+    @staticmethod
+    def _score_memory_candidate(query: str, issue: dict[str, Any], summary: str, metadata: dict[str, Any]) -> int:
+        query_text = query.strip().casefold()
+        terms = [part for part in re.split(r"\s+", query_text) if part]
+        title = str(issue.get("title") or "")
+        tags = [str(tag) for tag in metadata.get("tags", []) if str(tag).strip()]
+        haystack = "\n".join([title, summary, " ".join(tags)]).casefold()
+        score = 0
+        if query_text and query_text in haystack:
+            score += 50
+        score += sum(8 for term in terms if term in haystack)
+        score += sum(12 for term in terms if any(term in tag.casefold() for tag in tags))
+        timestamp = str(issue.get("updated_at") or metadata.get("updated_at") or issue.get("created_at") or "")
+        try:
+            updated_at = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            updated_at = None
+        if updated_at is not None:
+            age_days = max((datetime.now(timezone.utc) - updated_at).days, 0)
+            score += max(0, 10 - min(age_days // 30, 10))
+        return score
+
+    async def _ensure_repo_label(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        name: str,
+        color: str,
+        description: str,
+    ) -> None:
+        labels = await self._fetch_paginated(
+            f"/repos/{owner}/{repo}/labels",
+            params={"per_page": 100},
+        )
+        if any(str(label.get("name") or "") == name for label in labels):
+            return
+        await self._api.post_json(
+            f"/repos/{owner}/{repo}/labels",
+            json_body={"name": name, "color": color, "description": description},
+        )
+
 
 class ReadIssueMemory(GitHubSkillBase):
     name = "read_issue_memory"
@@ -243,6 +388,243 @@ class SearchRepoMemory(GitHubSkillBase):
             if len(lines) >= args.limit:
                 break
         return "\n".join(lines) if lines else "No similar issues found."
+
+
+class CommitMemory(GitHubSkillBase):
+    name = "commit_memory"
+    description = (
+        "Commit a durable repo memory into the closed GitHub issue memory database. "
+        "Use this only for long-lived facts worth remembering later."
+    )
+    args_model = CommitMemoryArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        await self._ensure_repo_label(
+            owner=context["owner"],
+            repo=context["repo"],
+            name=MEMORY_LABEL,
+            color="5319e7",
+            description="RyoBot long-term memory records",
+        )
+        now = datetime.now(timezone.utc).isoformat()
+        metadata = {
+            "schema_version": MEMORY_SCHEMA_VERSION,
+            "status": "active",
+            "tags": self._normalize_tags(args.tags),
+            "source": self._memory_source(context),
+            "created_at": now,
+            "updated_at": now,
+        }
+        created = await self._api.post_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues",
+            json_body={
+                "title": args.title.strip(),
+                "body": self._memory_body(args.summary, metadata),
+                "labels": [MEMORY_LABEL],
+            },
+        )
+        issue_number = int(created["number"])
+        await self._api.patch_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}",
+            json_body={"state": "closed"},
+        )
+        return f"Committed memory issue #{issue_number}: {args.title.strip()}"
+
+
+class RetrieveMemory(GitHubSkillBase):
+    name = "retrieve_memory"
+    description = (
+        "Search the closed GitHub issue memory database for durable prior knowledge. "
+        "Uses keyword search plus lightweight reranking over memory tags and recency."
+    )
+    args_model = RetrieveMemoryArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        query = (
+            f'repo:{context["owner"]}/{context["repo"]} is:issue is:closed '
+            f'label:"{MEMORY_LABEL}" {args.query}'
+        )
+        result = await self._api.get_json(
+            "/search/issues",
+            params={"q": query, "per_page": args.candidate_limit, "sort": "updated", "order": "desc"},
+        )
+        items = result.get("items", []) if isinstance(result, dict) else []
+        if not items:
+            return f"No memory results for: {args.query}"
+
+        issue_numbers = [int(item["number"]) for item in items]
+        detailed_items = await asyncio.gather(
+            *[
+                self._api.get_json(f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}")
+                for issue_number in issue_numbers
+            ]
+        )
+
+        ranked: list[tuple[int, dict[str, Any], str, dict[str, Any]]] = []
+        for issue in detailed_items:
+            labels = self._labels_from_issue(issue)
+            if MEMORY_LABEL not in labels or DELETED_MEMORY_LABEL in labels:
+                continue
+            summary, metadata = self._parse_memory_body(str(issue.get("body") or ""))
+            score = self._score_memory_candidate(args.query, issue, summary, metadata)
+            ranked.append((score, issue, summary, metadata))
+
+        if not ranked:
+            return f"No memory results for: {args.query}"
+
+        ranked.sort(
+            key=lambda item: (
+                item[0],
+                str(item[1].get("updated_at") or item[1].get("created_at") or ""),
+            ),
+            reverse=True,
+        )
+        lines = [f"Memory results for '{args.query}' ({len(ranked)} candidates):"]
+        for score, issue, summary, metadata in ranked[: args.limit]:
+            tags = ", ".join(str(tag) for tag in metadata.get("tags", [])) or "none"
+            lines.append(
+                f"  #{issue['number']} score={score} title={issue['title']} "
+                f"tags={tags} updated={issue.get('updated_at', '')} "
+                f"url={issue.get('html_url', '')}\n    {summary}"
+            )
+        return "\n".join(lines)
+
+
+class RefineMemory(GitHubSkillBase):
+    name = "refine_memory"
+    description = "Refine an existing closed memory issue when the stored long-term memory is incomplete or inaccurate."
+    args_model = RefineMemoryArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        await self._ensure_repo_label(
+            owner=context["owner"],
+            repo=context["repo"],
+            name=MEMORY_LABEL,
+            color="5319e7",
+            description="RyoBot long-term memory records",
+        )
+        issue = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}"
+        )
+        existing_summary, metadata = self._parse_memory_body(str(issue.get("body") or ""))
+        if not metadata:
+            metadata = {
+                "schema_version": MEMORY_SCHEMA_VERSION,
+                "status": "active",
+                "tags": [],
+                "source": self._memory_source(context),
+                "created_at": str(issue.get("created_at") or datetime.now(timezone.utc).isoformat()),
+            }
+        metadata["schema_version"] = MEMORY_SCHEMA_VERSION
+        metadata["status"] = "active"
+        metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if args.tags:
+            metadata["tags"] = self._normalize_tags(args.tags)
+        new_title = args.title.strip() or str(issue.get("title") or "")
+        new_summary = args.summary.strip() or existing_summary
+        updated = await self._api.patch_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}",
+            json_body={
+                "title": new_title,
+                "body": self._memory_body(new_summary, metadata),
+                "state": "closed",
+                "labels": self._labels_from_issue(issue) or [MEMORY_LABEL],
+            },
+        )
+        return f"Refined memory issue #{updated['number']}: {updated['title']}"
+
+
+class ArchiveMemory(GitHubSkillBase):
+    name = "archive_memory"
+    description = "Archive a noisy or stale memory issue by removing the memory label and marking it deleted."
+    args_model = ArchiveMemoryArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        await self._ensure_repo_label(
+            owner=context["owner"],
+            repo=context["repo"],
+            name=DELETED_MEMORY_LABEL,
+            color="8c8c8c",
+            description="Archived or deleted memory records",
+        )
+        issue = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}"
+        )
+        summary, metadata = self._parse_memory_body(str(issue.get("body") or ""))
+        if not metadata:
+            metadata = {
+                "schema_version": MEMORY_SCHEMA_VERSION,
+                "tags": [],
+                "source": self._memory_source(context),
+                "created_at": str(issue.get("created_at") or datetime.now(timezone.utc).isoformat()),
+            }
+        metadata["schema_version"] = MEMORY_SCHEMA_VERSION
+        metadata["status"] = "archived"
+        metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if args.reason.strip():
+            metadata["archive_reason"] = args.reason.strip()
+        labels = [label for label in self._labels_from_issue(issue) if label != MEMORY_LABEL and label != DELETED_MEMORY_LABEL]
+        labels.append(DELETED_MEMORY_LABEL)
+        updated = await self._api.patch_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}",
+            json_body={
+                "title": str(issue.get("title") or ""),
+                "body": self._memory_body(summary, metadata),
+                "state": "closed",
+                "labels": labels,
+            },
+        )
+        return f"Archived memory issue #{updated['number']}: {updated['title']}"
+
+
+class SearchRepoContext(GitHubSkillBase):
+    name = "search_repo_context"
+    description = (
+        "Search non-memory issues and pull requests across the repository. "
+        "This excludes archived memory records and is useful when the memory database is empty or weak."
+    )
+    args_model = SearchRepoContextArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        kind = args.kind.strip().lower()
+        if kind not in {"all", "issues", "prs"}:
+            return "Invalid kind. Use one of: all, issues, prs."
+        context = self._require_context()
+        filters = [f"repo:{context['owner']}/{context['repo']}", f"-label:\"{MEMORY_LABEL}\"", f"-label:\"{DELETED_MEMORY_LABEL}\""]
+        if kind == "issues":
+            filters.append("is:issue")
+        elif kind == "prs":
+            filters.append("is:pr")
+        q = " ".join([*filters, args.query])
+        result = await self._api.get_json(
+            "/search/issues",
+            params={"q": q, "per_page": args.limit, "sort": "updated", "order": "desc"},
+        )
+        items = result.get("items", []) if isinstance(result, dict) else []
+        if not items:
+            return f"No repo context results for: {args.query}"
+        lines = [f"Repo context results for '{args.query}' ({result.get('total_count', len(items))} total):"]
+        for item in items:
+            issue_type = "PR" if "pull_request" in item else "Issue"
+            labels = ", ".join(self._labels_from_issue(item)) or "none"
+            lines.append(
+                f"  #{item['number']} [{issue_type}] {item['title']} "
+                f"state={item.get('state', '')} labels={labels} "
+                f"updated={item.get('updated_at', '')} url={item.get('html_url', '')}"
+            )
+        return "\n".join(lines)
 
 
 class ReadCodeDiff(GitHubSkillBase):

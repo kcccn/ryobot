@@ -23,6 +23,7 @@ DEFAULT_FATIGUE_MIN_SECONDS = 480
 DEFAULT_FATIGUE_MAX_SECONDS = 720
 NO_REPLY_TOOL_NAME = "no_reply"
 LOG_TRUNCATE = 500
+MEMORY_MUTATION_TOOL_NAMES = frozenset({"commit_memory", "refine_memory", "archive_memory"})
 
 
 def _log(msg: str, *, end: str = "\n") -> None:
@@ -44,6 +45,11 @@ class ChatMessage(TypedDict, total=False):
     tool_calls: list[dict[str, Any]]
     tool_call_id: str
     reasoning_content: str | None
+
+
+class ReflectionDecision(BaseModel):
+    action: str
+    summary: str = ""
 
 
 class RyoAgent:
@@ -136,6 +142,11 @@ class RyoAgent:
                 )
 
             replied = await self._reply(event=active_event, history=active_history)
+            if replied:
+                try:
+                    await self._reflect(event=active_event, history=active_history)
+                except Exception as exc:  # pragma: no cover - defensive logging only
+                    _log(f"WARN: reflection pass failed: {exc}")
             runtime_state.last_routing.event_id = event.event_id
             runtime_state.last_routing.bot_identity = identity
             runtime_state.last_routing.reason = "replied" if replied else "no_reply"
@@ -312,6 +323,57 @@ class RyoAgent:
         finally:
             clear_skill_context(context_token)
 
+    async def _reflect(self, *, event: PluginEvent, history: Any) -> None:
+        reflection_skills = self._available_reflection_skills(event)
+        if not reflection_skills:
+            return
+        tools = [skill.get_tool_definition() for skill in reflection_skills]
+        messages: list[ChatMessage] = [
+            {"role": "system", "content": self._reflection_prompt(history=history)},
+            *history.messages,
+            {"role": "user", "content": self._reflection_user_prompt(event=event, history=history)},
+        ]
+        subconscious = dict(history.subconscious)
+        context_token = set_skill_context(event=event, subconscious=subconscious)
+        try:
+            for i in range(self.max_iterations):
+                _log(f"--- reflection iteration {i + 1}/{self.max_iterations} ---")
+                response = await self._create_completion_with_retry(messages=messages, tools=tools)
+                assistant_message = response.choices[0].message
+                tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
+                if tool_calls:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": self._extract_text_content(assistant_message),
+                            "tool_calls": [self._serialize_tool_call(call) for call in tool_calls],
+                        }
+                    )
+                    for tool_call in tool_calls:
+                        tool_result = await self._execute_tool_call(tool_call, event=event)
+                        if isinstance(tool_result, _NoReplyResult):
+                            return
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": getattr(tool_call, "id", ""),
+                                "content": str(tool_result),
+                            }
+                        )
+                    continue
+
+                reflection_text = self._extract_text_content(assistant_message).strip()
+                if not reflection_text:
+                    return
+                try:
+                    decision = ReflectionDecision.model_validate_json(reflection_text)
+                except ValidationError:
+                    return
+                _log(f"reflection result: {decision.action} {decision.summary[:LOG_TRUNCATE]}")
+                return
+        finally:
+            clear_skill_context(context_token)
+
     async def _create_completion(
         self,
         *,
@@ -422,10 +484,11 @@ class RyoAgent:
             '"motivation_score":0,"action_decision":{"will_reply":false,"target_issue_number":null}}'
             "\n规则："
             "\n1. 当前看到的上下文是故意片面的；如果信息不够，先使用只读工具继续了解。"
-            "\n2. 如果这是被动事件，target_issue_number 必须为 null。"
-            "\n3. 如果这是巡逻事件，target_issue_number 可以是 issue 或 PR 编号，也可以为 null。"
-            "\n4. 只有当你真的准备公开发言时，will_reply 才能为 true。"
-            "\n5. 不要输出 Markdown，不要解释，不要包裹代码块。"
+            "\n2. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
+            "\n3. 如果这是被动事件，target_issue_number 必须为 null。"
+            "\n4. 如果这是巡逻事件，target_issue_number 可以是 issue 或 PR 编号，也可以为 null。"
+            "\n5. 只有当你真的准备公开发言时，will_reply 才能为 true。"
+            "\n6. 不要输出 Markdown，不要解释，不要包裹代码块。"
         )
 
     def _reply_prompt(self, *, history: Any) -> str:
@@ -435,6 +498,27 @@ class RyoAgent:
         prompt = event.message
         if event.is_patrol and history.patrol_brief:
             prompt += f"\n\n仓库近 24 小时动态早报：\n{history.patrol_brief}"
+        return prompt
+
+    def _reflection_prompt(self, *, history: Any) -> str:
+        return (
+            self.persona["system_prompt"]
+            + self._mind_context(history)
+            + "\n\n你现在处于任务结束后的反思阶段。"
+            "\n你的目标是判断这次互动是否值得写入、修订或归档长期记忆。"
+            "\n可用工具只包含长期记忆 CRUD 和只读检索。"
+            "\n规则："
+            "\n1. 只有长期有效、未来大概率还会有价值的信息才值得记忆。"
+            "\n2. 如果要改记忆，优先先读取或检索已有记忆，再决定 commit_memory / refine_memory / archive_memory。"
+            "\n3. 如果没有值得沉淀的长期知识，输出 {\"action\":\"noop\",\"summary\":\"...\"}。"
+            "\n4. 如果你调用了记忆工具，最后仍然只输出一个 JSON 对象，action 只能是 noop、commit_memory、refine_memory 或 archive_memory。"
+        )
+
+    def _reflection_user_prompt(self, *, event: PluginEvent, history: Any) -> str:
+        prompt = f"事件内容：\n{event.message}"
+        if event.is_patrol and history.patrol_brief:
+            prompt += f"\n\n巡逻早报：\n{history.patrol_brief}"
+        prompt += "\n\n请判断这次任务后是否需要沉淀、修订或归档长期记忆。"
         return prompt
 
     def _mind_context(self, history: Any) -> str:
@@ -475,6 +559,18 @@ class RyoAgent:
             if next_available and datetime.now(timezone.utc) < next_available:
                 return False, f"fatigue cooldown active until {fatigue_state.next_available_at}"
         return True, "reply approved"
+
+    def _available_reflection_skills(self, event: PluginEvent) -> Sequence[BaseSkill]:
+        skills: list[BaseSkill] = []
+        for skill in self.skills:
+            if skill.mutates_state and skill.name not in MEMORY_MUTATION_TOOL_NAMES:
+                continue
+            if skill.requires_trusted_author and not _is_trusted_mutation_author(event.author_association):
+                continue
+            if skill.mutates_state and not _is_trusted_mutation_author(event.author_association):
+                continue
+            skills.append(skill)
+        return skills
 
     @staticmethod
     def _parse_tool_arguments(arguments: Any) -> dict[str, Any]:

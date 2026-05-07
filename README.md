@@ -15,6 +15,7 @@
 - **仓库级疲劳**：bot 的“休息时间”记录在 repo coordination issue 中，不再是线程内局部冷却。
 - **局部上下文 + 主动补证据**：初始只加载最近一段评论；不够就用只读工具自行摸清全仓库情况。
 - **随机巡逻门禁**：Actions 固定每 10 分钟唤醒一次，但真正的街溜子巡逻由 repo 级状态决定，实际间隔是 30-50 分钟随机。
+- **Issue 记忆数据库**：长期记忆存放在带 `🧠 memory` 标签的 closed issues 里，既可审计，也能直接被 bot 检索和修订。
 
 ---
 
@@ -250,6 +251,8 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 |---|---|---|
 | `read_issue_memory` | 读 | 读取当前 Issue 详情（标题、状态、正文） |
 | `search_repo_memory` | 读 | 在仓库内搜索相关 Issue |
+| `retrieve_memory` | 读 | 在 `🧠 memory` closed issues 中做关键词检索和轻量精排 |
+| `search_repo_context` | 读 | 检索全仓库非记忆类 Issue/PR，排除 `🧠 memory` 与 `🗑️ deleted` |
 | `read_code_diff` | 读 | 读取指定 PR 的 `.diff` 内容 |
 | `list_files` | 读 | 列出仓库目录结构 |
 | `read_file` | 读 | 读取仓库中任意文件内容 |
@@ -258,6 +261,9 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 | `list_repo_labels` | 读 | 列出仓库已有标签，供打标签前确认 |
 | `read_thread_comments` | 可信读 | 读取同仓库其他 Issue/PR 的评论和 PR review comments |
 | `create_issue` | 写 | 在仓库中创建新 Issue |
+| `commit_memory` | 写 | 创建一条新的 closed memory issue，写入长期记忆 |
+| `refine_memory` | 写 | 修订已有 memory issue 的摘要和标签 |
+| `archive_memory` | 写 | 将噪声记忆移出 `🧠 memory` 并标记 `🗑️ deleted` |
 | `add_labels` | 写 | 为 Issue/PR 添加仓库中已存在的标签 |
 | `close_issue` | 写 | 关闭 Issue |
 | `comment_on_pr` | 写 | 在 PR 下发布评论 |
@@ -273,11 +279,14 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 
 ---
 
-## Markdown 隐写术记忆系统
+## 双层记忆系统
 
-这个引擎不拥有数据库。
+RyoBot 现在有两层不同用途的“记忆”：
 
-相反，它把"潜意识状态"藏进 GitHub 评论的 HTML 注释中：
+- **线程内潜意识**：仍然藏在 GitHub 评论的 HTML 注释中，用于短期上下文和本轮会话状态。
+- **长期记忆数据库**：存放在带 `🧠 memory` 标签的 **closed issues** 里，用于跨线程、跨时间的可审计知识沉淀。
+
+### 线程内潜意识
 
 ```html
 给人类看的正常回复。
@@ -300,14 +309,32 @@ GitHub 评论时间线
         +--> 隐藏 HTML 注释 ---> 提取为 subconscious state
 ```
 
-这套机制的价值在于：
+### 长期记忆数据库
 
-- **追加式**：天然适合时间线系统
-- **同位存储**：记忆与对话就在同一个 Issue 里
-- **低耦合**：无需额外 Redis / Vector DB / RDBMS
-- **低维护**：状态托管给 GitHub，而不是新造一个状态系统
+长期记忆的载体不是外部向量库，而是 GitHub 自己的 closed issues：
 
-说白了，这不是"神奇 AI 长期记忆系统"，而是**利用 Markdown 和 HTML 注释做最小可行持久化**。
+- 活跃记忆：`state=closed` 且带 `🧠 memory`
+- 已归档记忆：移除 `🧠 memory`，增加 `🗑️ deleted`
+- v1 **只有关键词检索**，没有 embedding、没有向量重排、没有额外 secret
+
+memory issue 的正文格式如下：
+
+```markdown
+### 记忆摘要
+用户月月鸟在 #486 PR 中表现出对 Ascend NPU 算子优化的极高关注。
+
+---
+<!-- ryo:memory: {"schema_version":1,"status":"active","tags":["user:月月鸟","module:ascend-npu"],"source":{"issue_number":486,"comment_id":123,"is_pull_request":true},"created_at":"2026-05-07T00:00:00+00:00","updated_at":"2026-05-07T00:00:00+00:00"} -->
+```
+
+这层设计的价值在于：
+
+- **无感 RAG**：不需要额外数据库，GitHub issue 本身就是记忆分片
+- **白盒化**：直接在仓库里搜索 `label:"🧠 memory"` 就能看到 bot 的长期知识
+- **可修订**：`refine_memory` 会直接更新 issue，编辑历史天然可追溯
+- **可遗忘**：`archive_memory` 会把噪声记忆移出活跃库，而不是永远堆积
+
+如果后续要做 v2 向量检索，只需要在 HTML 注释元数据里增加可选 `vector` 字段，不需要改变 issue/label 这套存储契约。
 
 ---
 

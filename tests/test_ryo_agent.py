@@ -168,6 +168,22 @@ class ContextAwareSkill(BaseSkill):
         }
 
 
+class CommitMemoryTestSkill(EchoSkill):
+    name = "commit_memory"
+    description = "Store long-term memory."
+    mutates_state = True
+
+
+class RetrieveMemoryTestSkill(EchoSkill):
+    name = "retrieve_memory"
+    description = "Read long-term memory."
+
+
+class SearchRepoContextTestSkill(EchoSkill):
+    name = "search_repo_context"
+    description = "Search repo-wide issues and PRs."
+
+
 def build_response(message: FakeMessage) -> FakeResponse:
     return FakeResponse(choices=[FakeChoice(message=message)])
 
@@ -458,3 +474,128 @@ async def test_run_sets_runtime_context_for_skills() -> None:
     tool_result = fake_completions.calls[1]["messages"][-1]["content"]
     assert '"owner": "acme"' in tool_result
     assert '"is_patrol": false' in tool_result.lower()
+
+
+@pytest.mark.asyncio
+async def test_decision_prompt_prefers_memory_before_repo_context() -> None:
+    plugin = FakePlugin()
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "checked memory first",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            )
+        ],
+        skills=[RetrieveMemoryTestSkill(), SearchRepoContextTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    prompt = fake_completions.calls[0]["messages"][0]["content"]
+    tool_names = [tool["function"]["name"] for tool in fake_completions.calls[0]["tools"]]
+    assert "retrieve_memory" in prompt
+    assert "search_repo_context" in prompt
+    assert tool_names == ["retrieve_memory", "search_repo_context"]
+
+
+@pytest.mark.asyncio
+async def test_reflection_pass_can_commit_memory_after_reply() -> None:
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="hello",
+            author="octocat",
+            author_association="OWNER",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+        )
+    )
+    memory_skill = CommitMemoryTestSkill()
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "worth replying",
+                            "internal_emotion": "alert",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 95,
+                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="Public reply")),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-memory",
+                            function=FakeFunction(
+                                name="commit_memory",
+                                arguments=json.dumps({"text": "durable fact"}),
+                            ),
+                        )
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content='{"action":"commit_memory","summary":"stored it"}')),
+        ],
+        skills=[EchoSkill(), memory_skill],
+    )
+
+    await agent.run(raw_event={})
+
+    assert plugin.sent_replies[0][1] == "Public reply"
+    assert len(fake_completions.calls) == 4
+    reflection_tool_names = [tool["function"]["name"] for tool in fake_completions.calls[2]["tools"]]
+    assert "commit_memory" in reflection_tool_names
+    assert fake_completions.calls[3]["messages"][-1]["content"] == "echo:durable fact"
+
+
+@pytest.mark.asyncio
+async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
+    plugin = FakePlugin()
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "reply once",
+                            "internal_emotion": "steady",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 90,
+                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="Public reply")),
+            build_response(FakeMessage(content='{"action":"noop","summary":"nothing durable"}')),
+        ],
+        skills=[EchoSkill(), RetrieveMemoryTestSkill(), SearchRepoContextTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    assert plugin.sent_replies[0][1] == "Public reply"
+    assert len(fake_completions.calls) == 3
+    reflection_tool_names = [tool["function"]["name"] for tool in fake_completions.calls[2]["tools"]]
+    assert reflection_tool_names == ["echo", "retrieve_memory", "search_repo_context"]

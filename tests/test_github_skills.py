@@ -11,8 +11,10 @@ from core.plugins import PluginEvent
 from core.skills import clear_skill_context, set_skill_context
 from platforms.github.skills import (
     AddLabels,
+    ArchiveMemory,
     CloseIssue,
     CommentOnPR,
+    CommitMemory,
     CreateBranch,
     CreateIssue,
     CreatePullRequest,
@@ -25,8 +27,11 @@ from platforms.github.skills import (
     ReadIssueMemory,
     ReadThreadComments,
     ReadWorkflowRun,
+    RefineMemory,
+    RetrieveMemory,
     RunCommand,
     SearchCode,
+    SearchRepoContext,
     SearchRepoMemory,
     WriteFile,
 )
@@ -132,6 +137,235 @@ async def test_search_repo_memory_scopes_search_to_current_repo_and_respects_lim
 
 
 @pytest.mark.asyncio
+async def test_commit_memory_creates_labeled_closed_issue_with_metadata() -> None:
+    requests: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        requests.append((request.method, str(request.url), body))
+        if request.method == "GET" and request.url.path.endswith("/labels"):
+            return httpx.Response(200, json=[{"name": "bug"}])
+        if request.method == "POST" and request.url.path.endswith("/labels"):
+            return httpx.Response(201, json={"name": "🧠 memory"})
+        if request.method == "POST" and request.url.path.endswith("/issues"):
+            return httpx.Response(201, json={"number": 88, "title": "NPU user preference"})
+        if request.method == "PATCH" and request.url.path.endswith("/issues/88"):
+            return httpx.Response(200, json={"number": 88, "state": "closed"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = CommitMemory(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_pr_context()
+    try:
+        result = await skill.execute(
+            title="NPU user preference",
+            summary="月月鸟在 #486 PR 里持续关注 Ascend NPU 算子优化。",
+            tags=["user:月月鸟", "module:ascend-npu"],
+        )
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    create_issue = next(body for method, url, body in requests if method == "POST" and url.endswith("/issues"))
+    assert create_issue is not None
+    assert create_issue["labels"] == ["🧠 memory"]
+    assert "### 记忆摘要" in create_issue["body"]
+    assert "<!-- ryo:memory:" in create_issue["body"]
+    assert '"is_pull_request":true' in create_issue["body"]
+    assert result == "Committed memory issue #88: NPU user preference"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_memory_only_returns_active_memory_results() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/search/issues":
+            captured["url"] = str(request.url)
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"number": 30},
+                        {"number": 31},
+                    ]
+                },
+            )
+        if path.endswith("/issues/30"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": 30,
+                    "title": "Ascend focus",
+                    "body": "### 记忆摘要\n月月鸟关注 NPU 算子优化。\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"active\",\"tags\":[\"user:月月鸟\",\"module:npu\"],\"updated_at\":\"2026-05-01T00:00:00+00:00\"} -->",
+                    "labels": [{"name": "🧠 memory"}],
+                    "updated_at": "2026-05-01T00:00:00Z",
+                    "html_url": "https://github.test/30",
+                },
+            )
+        if path.endswith("/issues/31"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": 31,
+                    "title": "Archived noise",
+                    "body": "### 记忆摘要\n旧噪声。\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"archived\",\"tags\":[\"noise\"],\"updated_at\":\"2026-04-01T00:00:00+00:00\"} -->",
+                    "labels": [{"name": "🧠 memory"}, {"name": "🗑️ deleted"}],
+                    "updated_at": "2026-04-01T00:00:00Z",
+                    "html_url": "https://github.test/31",
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = RetrieveMemory(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(query="月月鸟 NPU", candidate_limit=20, limit=3)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    query = parse_qs(urlparse(captured["url"]).query)["q"][0]
+    assert 'label:"🧠 memory"' in query
+    assert "is:closed" in query
+    assert "#30" in result
+    assert "Ascend focus" in result
+    assert "#31" not in result
+
+
+@pytest.mark.asyncio
+async def test_refine_memory_updates_existing_body_and_metadata() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/labels"):
+            return httpx.Response(200, json=[{"name": "🧠 memory"}])
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "number": 45,
+                    "title": "Old title",
+                    "body": "### 记忆摘要\n旧总结\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"active\",\"tags\":[\"old\"],\"created_at\":\"2026-05-01T00:00:00+00:00\",\"updated_at\":\"2026-05-01T00:00:00+00:00\"} -->",
+                    "labels": [{"name": "🧠 memory"}],
+                },
+            )
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, json={"number": 45, "title": captured["body"]["title"]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = RefineMemory(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(
+            memory_issue_number=45,
+            title="New title",
+            summary="新总结",
+            tags=["user:moonbird"],
+        )
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["body"]["title"] == "New title"
+    assert captured["body"]["state"] == "closed"
+    assert "新总结" in captured["body"]["body"]
+    assert '"tags":["user:moonbird"]' in captured["body"]["body"]
+    assert result == "Refined memory issue #45: New title"
+
+
+@pytest.mark.asyncio
+async def test_archive_memory_removes_memory_label_and_marks_deleted() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path.endswith("/labels"):
+            return httpx.Response(200, json=[{"name": "🧠 memory"}])
+        if request.method == "POST" and path.endswith("/labels"):
+            return httpx.Response(201, json={"name": "🗑️ deleted"})
+        if request.method == "GET" and path.endswith("/issues/55"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": 55,
+                    "title": "Stale memory",
+                    "body": "### 记忆摘要\n旧总结\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"active\",\"tags\":[\"legacy\"],\"created_at\":\"2026-05-01T00:00:00+00:00\",\"updated_at\":\"2026-05-01T00:00:00+00:00\"} -->",
+                    "labels": [{"name": "🧠 memory"}, {"name": "legacy"}],
+                    "created_at": "2026-05-01T00:00:00Z",
+                },
+            )
+        if request.method == "PATCH":
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"number": 55, "title": "Stale memory"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ArchiveMemory(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(memory_issue_number=55, reason="no longer useful")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["body"]["labels"] == ["legacy", "🗑️ deleted"]
+    assert '"status":"archived"' in captured["body"]["body"]
+    assert '"archive_reason":"no longer useful"' in captured["body"]["body"]
+    assert result == "Archived memory issue #55: Stale memory"
+
+
+@pytest.mark.asyncio
+async def test_search_repo_context_excludes_memory_and_deleted_labels() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "total_count": 2,
+                "items": [
+                    {
+                        "number": 10,
+                        "title": "Open bug",
+                        "state": "open",
+                        "labels": [{"name": "bug"}],
+                        "html_url": "https://github.test/10",
+                        "updated_at": "2026-05-01T00:00:00Z",
+                    },
+                    {
+                        "number": 11,
+                        "title": "Fix bug",
+                        "state": "open",
+                        "labels": [{"name": "enhancement"}],
+                        "pull_request": {"url": "https://api.github.test/pulls/11"},
+                        "html_url": "https://github.test/11",
+                        "updated_at": "2026-05-02T00:00:00Z",
+                    },
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = SearchRepoContext(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(query="npu bug", limit=10, kind="all")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    query = parse_qs(urlparse(captured["url"]).query)["q"][0]
+    assert '-label:"🧠 memory"' in query
+    assert '-label:"🗑️ deleted"' in query
+    assert "[Issue]" in result
+    assert "[PR]" in result
+
+
+@pytest.mark.asyncio
 async def test_read_code_diff_requests_diff_media_type() -> None:
     captured: dict[str, str] = {}
 
@@ -188,6 +422,11 @@ def test_github_skills_expose_complete_tool_definitions() -> None:
     try:
         issue_tool = ReadIssueMemory(token="secret-token", client=client).get_tool_definition()
         search_tool = SearchRepoMemory(token="secret-token", client=client).get_tool_definition()
+        commit_memory_tool = CommitMemory(token="secret-token", client=client).get_tool_definition()
+        retrieve_memory_tool = RetrieveMemory(token="secret-token", client=client).get_tool_definition()
+        refine_memory_tool = RefineMemory(token="secret-token", client=client).get_tool_definition()
+        archive_memory_tool = ArchiveMemory(token="secret-token", client=client).get_tool_definition()
+        repo_context_tool = SearchRepoContext(token="secret-token", client=client).get_tool_definition()
         diff_tool = ReadCodeDiff(token="secret-token", client=client).get_tool_definition()
         create_tool = CreateIssue(token="secret-token", client=client).get_tool_definition()
         labels_tool = AddLabels(token="secret-token", client=client).get_tool_definition()
@@ -205,6 +444,11 @@ def test_github_skills_expose_complete_tool_definitions() -> None:
     assert issue_tool["function"]["name"] == "read_issue_memory"
     assert issue_tool["function"]["parameters"]["type"] == "object"
     assert search_tool["function"]["parameters"]["properties"]["query"]["type"] == "string"
+    assert commit_memory_tool["function"]["name"] == "commit_memory"
+    assert retrieve_memory_tool["function"]["parameters"]["properties"]["candidate_limit"]["type"] == "integer"
+    assert refine_memory_tool["function"]["parameters"]["properties"]["memory_issue_number"]["type"] == "integer"
+    assert archive_memory_tool["function"]["parameters"]["properties"]["reason"]["type"] == "string"
+    assert repo_context_tool["function"]["name"] == "search_repo_context"
     assert diff_tool["function"]["parameters"]["properties"]["pr_number"]["type"] == "integer"
     assert create_tool["function"]["name"] == "create_issue"
     assert create_tool["function"]["parameters"]["properties"]["title"]["type"] == "string"
