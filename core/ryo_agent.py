@@ -22,6 +22,8 @@ DEFAULT_MAX_TOOL_RESULT_CHARS = 20000
 DEFAULT_MOTIVATION_THRESHOLD = 70
 DEFAULT_FATIGUE_MIN_SECONDS = 480
 DEFAULT_FATIGUE_MAX_SECONDS = 720
+DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS = 60
+DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS = 180
 NO_REPLY_TOOL_NAME = "no_reply"
 LOG_TRUNCATE = 500
 MEMORY_MUTATION_TOOL_NAMES = frozenset({"commit_memory", "refine_memory", "archive_memory"})
@@ -79,6 +81,8 @@ class RyoAgent:
         motivation_threshold: int = DEFAULT_MOTIVATION_THRESHOLD,
         fatigue_min_seconds: int = DEFAULT_FATIGUE_MIN_SECONDS,
         fatigue_max_seconds: int = DEFAULT_FATIGUE_MAX_SECONDS,
+        street_lurker_fatigue_min_seconds: int = DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS,
+        street_lurker_fatigue_max_seconds: int = DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS,
     ) -> None:
         if "model" not in persona or "system_prompt" not in persona or "identity" not in persona:
             raise ValueError("persona must include 'model', 'identity', and 'system_prompt'.")
@@ -92,6 +96,11 @@ class RyoAgent:
         self.motivation_threshold = max(0, min(100, motivation_threshold))
         self.fatigue_min_seconds = max(0, fatigue_min_seconds)
         self.fatigue_max_seconds = max(self.fatigue_min_seconds, fatigue_max_seconds)
+        self.street_lurker_fatigue_min_seconds = max(0, street_lurker_fatigue_min_seconds)
+        self.street_lurker_fatigue_max_seconds = max(
+            self.street_lurker_fatigue_min_seconds,
+            street_lurker_fatigue_max_seconds,
+        )
         self._skills_by_name = {skill.name: skill for skill in skills}
         self._control_skills_by_name = {NO_REPLY_TOOL_NAME: _NoReplySkill()}
 
@@ -167,11 +176,12 @@ class RyoAgent:
             )
             runtime_state.last_routing.routed_at = _utcnow_iso()
             if outcome.acted:
+                fatigue_min_seconds, fatigue_max_seconds = self._fatigue_window_for_event(event)
                 runtime_state = _mark_bot_fatigue(
                     runtime_state,
                     identity=identity,
-                    min_seconds=self.fatigue_min_seconds,
-                    max_seconds=self.fatigue_max_seconds,
+                    min_seconds=fatigue_min_seconds,
+                    max_seconds=fatigue_max_seconds,
                 )
             await self.plugin.update_runtime_state(runtime_state)
         finally:
@@ -680,6 +690,14 @@ class RyoAgent:
         if tool_calls:
             message["tool_calls"] = [self._serialize_tool_call(call) for call in tool_calls]
         return message
+
+    def _fatigue_window_for_event(self, event: PluginEvent) -> tuple[int, int]:
+        if event.is_patrol:
+            return (
+                self.street_lurker_fatigue_min_seconds,
+                self.street_lurker_fatigue_max_seconds,
+            )
+        return (self.fatigue_min_seconds, self.fatigue_max_seconds)
 
     def _log_available_tools(self, stage: str, tools: list[dict[str, Any]]) -> None:
         tool_names = [tool["function"]["name"] for tool in tools]

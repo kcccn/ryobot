@@ -215,6 +215,8 @@ def build_agent(
     responses: list[FakeResponse],
     skills: list[BaseSkill] | None = None,
     threshold: int = 70,
+    street_lurker_fatigue_min_seconds: int = 60,
+    street_lurker_fatigue_max_seconds: int = 180,
 ) -> tuple[RyoAgent, FakeCompletions]:
     fake_completions = FakeCompletions(responses)
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
@@ -226,6 +228,8 @@ def build_agent(
         motivation_threshold=threshold,
         fatigue_min_seconds=480,
         fatigue_max_seconds=480,
+        street_lurker_fatigue_min_seconds=street_lurker_fatigue_min_seconds,
+        street_lurker_fatigue_max_seconds=street_lurker_fatigue_max_seconds,
     )
     return agent, fake_completions
 
@@ -408,6 +412,66 @@ async def test_street_lurker_repo_scan_can_act_without_thread_reply() -> None:
     assert plugin.updated_runtime_states[-1].last_routing.reason == "created_pr"
     fatigue = plugin.updated_runtime_states[-1].bot_fatigue["architect"]
     assert fatigue.last_spoke_at is not None
+
+
+@pytest.mark.asyncio
+async def test_street_lurker_actions_use_street_lurker_fatigue_window() -> None:
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="street lurker",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=patrol_event,
+        history_by_issue={
+            0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")
+        },
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "clear fix",
+                            "internal_emotion": "itchy",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 91,
+                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-pr",
+                            function=FakeFunction(name="create_pull_request", arguments='{"text":"ship it"}'),
+                        )
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content="")),
+            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+        ],
+        skills=[CreatePullRequestTestSkill()],
+        street_lurker_fatigue_min_seconds=0,
+        street_lurker_fatigue_max_seconds=0,
+    )
+
+    await agent.run(raw_event={})
+
+    fatigue = plugin.updated_runtime_states[-1].bot_fatigue["architect"]
+    assert fatigue.last_spoke_at == fatigue.next_available_at
 
 
 @pytest.mark.asyncio

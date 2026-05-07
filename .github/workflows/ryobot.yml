@@ -18,6 +18,12 @@ on:
       fatigue_max_seconds:
         description: 'Maximum fatigue cooldown after a bot speaks'
         type: number
+      street_lurker_fatigue_min_seconds:
+        description: 'Minimum fatigue cooldown after a street-lurker run acts'
+        type: number
+      street_lurker_fatigue_max_seconds:
+        description: 'Maximum fatigue cooldown after a street-lurker run acts'
+        type: number
       initial_history_comment_limit:
         description: 'Recent comments to preload into the initial context slice'
         type: number
@@ -73,6 +79,8 @@ jobs:
           RYOBOT_MOTIVATION_THRESHOLD: ${{ inputs.motivation_threshold || vars.RYOBOT_MOTIVATION_THRESHOLD || '70' }}
           RYOBOT_FATIGUE_MIN_SECONDS: ${{ inputs.fatigue_min_seconds || vars.RYOBOT_FATIGUE_MIN_SECONDS || '480' }}
           RYOBOT_FATIGUE_MAX_SECONDS: ${{ inputs.fatigue_max_seconds || vars.RYOBOT_FATIGUE_MAX_SECONDS || '720' }}
+          RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS: ${{ inputs.street_lurker_fatigue_min_seconds || vars.RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS || '60' }}
+          RYOBOT_STREET_LURKER_FATIGUE_MAX_SECONDS: ${{ inputs.street_lurker_fatigue_max_seconds || vars.RYOBOT_STREET_LURKER_FATIGUE_MAX_SECONDS || '180' }}
           RYOBOT_INITIAL_HISTORY_COMMENT_LIMIT: ${{ inputs.initial_history_comment_limit || vars.RYOBOT_INITIAL_HISTORY_COMMENT_LIMIT || '12' }}
           RYOBOT_INITIAL_HISTORY_TOTAL_CHARS: ${{ inputs.initial_history_total_chars || vars.RYOBOT_INITIAL_HISTORY_TOTAL_CHARS || '16000' }}
           RYOBOT_ALLOWED_WORKFLOWS: ${{ inputs.allowed_workflows || vars.RYOBOT_ALLOWED_WORKFLOWS || '' }}

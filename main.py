@@ -54,6 +54,8 @@ DEFAULT_MARKER_AUTHOR_LOGINS = frozenset({"github-actions[bot]"})
 DEFAULT_MOTIVATION_THRESHOLD = 70
 DEFAULT_FATIGUE_MIN_SECONDS = 480
 DEFAULT_FATIGUE_MAX_SECONDS = 720
+DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS = 60
+DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS = 180
 _TRUSTED_AUTHOR_ASSOCIATIONS: frozenset[str] = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 
@@ -101,6 +103,18 @@ async def _run(
     motivation_threshold = int(os.getenv("RYOBOT_MOTIVATION_THRESHOLD", str(DEFAULT_MOTIVATION_THRESHOLD)))
     fatigue_min_seconds = int(os.getenv("RYOBOT_FATIGUE_MIN_SECONDS", str(DEFAULT_FATIGUE_MIN_SECONDS)))
     fatigue_max_seconds = int(os.getenv("RYOBOT_FATIGUE_MAX_SECONDS", str(DEFAULT_FATIGUE_MAX_SECONDS)))
+    street_lurker_fatigue_min_seconds = int(
+        os.getenv(
+            "RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS",
+            os.getenv("RYOBOT_FATIGUE_MIN_SECONDS", str(DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS)),
+        )
+    )
+    street_lurker_fatigue_max_seconds = int(
+        os.getenv(
+            "RYOBOT_STREET_LURKER_FATIGUE_MAX_SECONDS",
+            os.getenv("RYOBOT_FATIGUE_MAX_SECONDS", str(DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS)),
+        )
+    )
     roster_lines = [f"- {b.display_name}（{b.identity}）：{b.description}" for b in list_bots()]
     roster = "当前 Bot 社会成员：\n" + "\n".join(roster_lines)
     system_prompt = f"{roster}\n\n{bot.system_prompt}"
@@ -176,6 +190,8 @@ async def _run(
             motivation_threshold=motivation_threshold,
             fatigue_min_seconds=fatigue_min_seconds,
             fatigue_max_seconds=fatigue_max_seconds,
+            street_lurker_fatigue_min_seconds=street_lurker_fatigue_min_seconds,
+            street_lurker_fatigue_max_seconds=street_lurker_fatigue_max_seconds,
         )
         await ryo_agent.run(payload)
     finally:
