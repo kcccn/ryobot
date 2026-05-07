@@ -87,7 +87,7 @@ def test_parse_event_normalizes_issue_comment_payload() -> None:
 
     assert event == PluginEvent(
         event_id="github:acme/widgets:issue:12:comment:99",
-        message="Need help",
+        message="[Comment on Issue #12]\n\nNeed help",
         author="octocat",
         issue_id="1001",
         issue_number=12,

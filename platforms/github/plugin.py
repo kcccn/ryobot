@@ -187,9 +187,14 @@ class GitHubPlugin(BasePlugin):
         comment_id = comment.get("id")
         if not all([issue.get("id"), issue_number, comment_id, comment.get("body"), (comment.get("user") or {}).get("login")]):
             raise ValueError("issue_comment payload is missing required fields.")
+        issue_title = str(issue.get("title") or "")
+        message = f"[Comment on Issue #{issue_number}"
+        if issue_title:
+            message += f": {issue_title}"
+        message += f"]\n\n{comment['body']}"
         return PluginEvent(
             event_id=f"github:{owner}/{repo}:issue:{issue_number}:comment:{comment_id}",
-            message=str(comment["body"]),
+            message=message,
             author=str((comment.get("user") or {})["login"]),
             author_association=str(comment.get("author_association") or "NONE"),
             issue_id=str(issue["id"]),

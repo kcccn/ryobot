@@ -154,11 +154,11 @@ class RyoAgent:
             active_event = event
             active_history = history
             target_issue_number = decision.action_decision.target_issue_number
-            if event.is_patrol and target_issue_number is not None:
+            if target_issue_number is not None and target_issue_number != event.issue_number:
                 active_event = await self.plugin.resolve_target_event(event, target_issue_number)
                 active_history = await self.plugin.fetch_history(active_event)
                 _log(
-                    f"street-lurker target resolved to "
+                    f"{'street-lurker' if event.is_patrol else 'passive'} target resolved to "
                     f"{'PR' if active_event.is_pull_request else 'Issue'} #{active_event.issue_number}"
                 )
 
@@ -200,6 +200,9 @@ class RyoAgent:
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
         self._log_available_tools("will", tools)
+        seen_tools: set[str] = set()
+        no_new_tool_count = 0
+        CONVERGENCE_LIMIT = 5
         try:
             for i in range(self.max_iterations):
                 _log(f"--- will iteration {i + 1}/{self.max_iterations} ---")
@@ -212,9 +215,13 @@ class RyoAgent:
                 if tool_calls:
                     self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
+                    new_tool_seen = False
                     for tool_call in tool_calls:
                         tool_name, args_raw = self._tool_call_details(tool_call)
                         _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
+                        if tool_name not in seen_tools:
+                            seen_tools.add(tool_name)
+                            new_tool_seen = True
                         tool_result = await self._execute_tool_call(tool_call, event=event)
                         if isinstance(tool_result, _NoReplyResult):
                             break
@@ -226,6 +233,21 @@ class RyoAgent:
                                 "content": str(tool_result),
                             }
                         )
+                    if new_tool_seen:
+                        no_new_tool_count = 0
+                    else:
+                        no_new_tool_count += 1
+                        if no_new_tool_count >= CONVERGENCE_LIMIT:
+                            _log(f"WARN: {no_new_tool_count} iterations without new tools, forcing decision")
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "You have been looping without discovering new information. "
+                                        "You MUST output your WillDecision JSON now — no more tool calls."
+                                    ),
+                                }
+                            )
                     continue
 
                 decision_text = self._extract_text_content(assistant_message).strip()
@@ -541,10 +563,20 @@ class RyoAgent:
             "\n规则："
             "\n1. 当前看到的上下文是故意片面的；如果信息不够，先使用只读工具继续了解。"
             "\n2. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
-            "\n3. 如果这是被动事件，target_issue_number 必须为 null。"
+            "\n3. 如果这是被动事件（非 patrol），target_issue_number 通常为 null。"
+            "但如果你发现了必须在其他 issue/PR 行动的真正重大发现，可以设置 target_issue_number。"
+            "此时 will_reply 通常应为 false（你不是在当前 thread 回复），系统会把你路由到目标 issue/PR。"
             "\n4. 如果这是街溜子事件，target_issue_number 可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
             "\n5. 只有当你真的准备公开发言或直接动手推进时，will_reply 才能为 true。"
             "\n6. 不要输出 Markdown，不要解释，不要包裹代码块。"
+            "\n7. motivation_score 评分锚定（0-100 整数）："
+            "\n  0-29: 无趣/无关/已经答复过，不应说话"
+            "\n  30-59: 常规跟进，有轻微价值但不必抢麦"
+            "\n  60-79: 发现了值得讨论的技术问题或可改进点"
+            "\n  80-100: 发现了重大架构漏洞/突破口/高价值行动机会，必须抢麦"
+            "\n  若 internal_emotion 表达兴奋/激动/惊喜等强烈情绪，motivation_score 必须 ≥ 80。"
+            "\n  若 internal_emotion 表达无聊/疲惫/无感，motivation_score 必须 ≤ 29。"
+            "\n  情绪与分数必须自洽，不匹配会被拒绝重新来过。"
         )
 
     def _reply_prompt(self, *, history: Any) -> str:
@@ -589,8 +621,7 @@ class RyoAgent:
         )
 
     def _validate_decision(self, *, event: PluginEvent, decision: WillDecision) -> None:
-        if not event.is_patrol and decision.action_decision.target_issue_number is not None:
-            raise ValueError("target_issue_number must be null for passive events")
+        pass
 
     def _should_reply(
         self,

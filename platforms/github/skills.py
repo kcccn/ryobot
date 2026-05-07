@@ -71,6 +71,10 @@ class AddLabelsArgs(BaseModel):
     issue_number: int = 0
 
 
+class ReadIssueBodyArgs(BaseModel):
+    issue_number: int = Field(default=0, description="Issue number to read (0 = current context issue)")
+
+
 class ReadThreadCommentsArgs(BaseModel):
     issue_number: int = 0
     include_review_comments: bool = True
@@ -363,6 +367,40 @@ class ReadIssueMemory(GitHubSkillBase):
                 f"Issue #{issue['number']}: {issue['title']}",
                 f"State: {issue['state']}",
                 f"Body: {body}",
+            ]
+        )
+
+
+class ReadIssueBody(GitHubSkillBase):
+    name = "read_issue_body"
+    description = (
+        "Read the full body of a specific GitHub issue by number. "
+        "Use this when you need to understand what an issue is about before commenting or acting. "
+        "Pass issue_number=0 to read the current context issue."
+    )
+    args_model = ReadIssueBodyArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        issue_number = args.issue_number if args.issue_number else context["issue_number"]
+        issue = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}"
+        )
+        body = truncate_text(
+            str(issue.get("body") or ""),
+            max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_ISSUE_BODY_CHARS),
+        )
+        labels = ", ".join(
+            lb.get("name", "") for lb in issue.get("labels", [])
+        ) or "none"
+        return "\n".join(
+            [
+                f"Issue #{issue['number']}: {issue['title']}",
+                f"State: {issue['state']}",
+                f"Author: {(issue.get('user') or {}).get('login', 'unknown')}",
+                f"Labels: {labels}",
+                f"Body:\n{body}",
             ]
         )
 
@@ -1059,11 +1097,17 @@ class ReadThreadComments(GitHubSkillBase):
             params={"per_page": 100, "sort": "created", "direction": "asc"},
         )
         if args.include_review_comments:
-            review_comments = await self._fetch_paginated(
-                f"/repos/{context['owner']}/{context['repo']}/pulls/{issue_number}/comments",
-                params={"per_page": 100, "sort": "created", "direction": "asc"},
-            )
-            comments = [*comments, *review_comments]
+            try:
+                review_comments = await self._fetch_paginated(
+                    f"/repos/{context['owner']}/{context['repo']}/pulls/{issue_number}/comments",
+                    params={"per_page": 100, "sort": "created", "direction": "asc"},
+                )
+                comments = [*comments, *review_comments]
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (403, 404):
+                    pass
+                else:
+                    raise
         comments = sorted(comments, key=lambda item: str(item.get("created_at") or ""))
         if not comments:
             return f"No comments found for issue/PR #{issue_number}."

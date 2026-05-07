@@ -33,6 +33,7 @@ from platforms.github import (
     MergePullRequest,
     ReadCodeDiff,
     ReadFile,
+    ReadIssueBody,
     ReadIssueMemory,
     ReadThreadComments,
     ReadWorkflowRun,
@@ -137,6 +138,7 @@ async def _run(
         )
         all_skills = [
             ReadIssueMemory(token=github_token, client=http_client),
+            ReadIssueBody(token=github_token, client=http_client),
             SearchRepoMemory(token=github_token, client=http_client),
             CommitMemory(token=github_token, client=http_client),
             RetrieveMemory(token=github_token, client=http_client),
