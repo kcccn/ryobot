@@ -302,28 +302,21 @@ class RyoAgent:
                 if tool_calls:
                     if json_repair_only:
                         _log("WARN: tool calls are no longer allowed during JSON repair")
-                        messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": "You already failed JSON validation. Output only the WillDecision JSON now. No more tool calls.",
-                            }
-                        )
+                        # Don't append the assistant message with tool_calls — the API
+                        # requires every tool_call to have a corresponding tool message.
+                        # Reject inline by turning each call into a user-nudge message.
+                        self._append_rejected_tool_calls(messages, tool_calls, reason="JSON repair mode — no more tool calls allowed")
+                        json_repair_only = True
                         continue
                     if total_tool_calls >= WILL_MAX_TOOL_CALLS:
                         _log(f"WARN: will tool-call budget exhausted at {total_tool_calls}, forcing decision")
-                        messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": "You have exhausted your tool-call budget. Output the WillDecision JSON now. No more tool calls.",
-                            }
-                        )
+                        self._append_rejected_tool_calls(messages, tool_calls, reason="tool-call budget exhausted")
                         json_repair_only = True
                         continue
                     self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     new_tool_seen = False
+                    executed_tc_ids: set[str] = set()
                     for tool_call in tool_calls:
                         if total_tool_calls >= WILL_MAX_TOOL_CALLS:
                             _log(f"WARN: reached will tool-call budget {WILL_MAX_TOOL_CALLS}, skipping remaining tool calls")
@@ -343,13 +336,27 @@ class RyoAgent:
                         if isinstance(tool_result, _NoReplyResult):
                             break
                         _log(f"  <- result: {_truncate_log(tool_result)}")
+                        tc_id = getattr(tool_call, "id", "")
+                        executed_tc_ids.add(tc_id)
                         messages.append(
                             {
                                 "role": "tool",
-                                "tool_call_id": getattr(tool_call, "id", ""),
+                                "tool_call_id": tc_id,
                                 "content": str(tool_result),
                             }
                         )
+                    # Ensure every tool_call has a tool message so the API never
+                    # sees a dangling tool_calls message without responses.
+                    for tool_call in tool_calls:
+                        tc_id = getattr(tool_call, "id", "")
+                        if tc_id and tc_id not in executed_tc_ids:
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc_id,
+                                    "content": "Tool call skipped: budget exhausted.",
+                                }
+                            )
                     if new_tool_seen:
                         no_new_tool_count = 0
                     else:
@@ -457,6 +464,13 @@ class RyoAgent:
                             except Exception:
                                 reason = "(no reason)"
                             _log(f"  <- no_reply: {reason}")
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": getattr(tool_call, "id", ""),
+                                    "content": f"no_reply executed: {reason}",
+                                }
+                            )
                             if not event.is_patrol and not executed_tool_names:
                                 messages.append(
                                     {
@@ -1039,6 +1053,30 @@ class RyoAgent:
     def _tool_call_details(tool_call: Any) -> tuple[str, str]:
         function = getattr(tool_call, "function", None)
         return getattr(function, "name", ""), getattr(function, "arguments", "{}")
+
+    @staticmethod
+    def _append_rejected_tool_calls(
+        messages: list[dict[str, Any]],
+        tool_calls: list[Any],
+        *,
+        reason: str,
+    ) -> None:
+        """Append a user message explaining that tool calls were rejected.
+
+        Does NOT append the assistant message with tool_calls because the API
+        requires every tool_call_id to have a corresponding tool message.
+        """
+        names = [RyoAgent._tool_call_details(tc)[0] for tc in tool_calls]
+        rejected = ", ".join(names)
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Your tool calls ({rejected}) were rejected: {reason}. "
+                    "Output only the WillDecision JSON now — no more tool calls."
+                ),
+            }
+        )
 
     def _is_mutating_tool(self, tool_name: str) -> bool:
         skill = self._skills_by_name.get(tool_name)

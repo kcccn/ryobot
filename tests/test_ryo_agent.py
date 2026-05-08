@@ -993,7 +993,7 @@ async def test_invalid_decision_json_enters_json_repair_mode_without_more_tools(
 
     assert len(fake_completions.calls) == 3
     assert not any(message.get("role") == "tool" for message in fake_completions.calls[2]["messages"])
-    assert "No more tool calls" in fake_completions.calls[2]["messages"][-1]["content"]
+    assert "no more tool calls" in fake_completions.calls[2]["messages"][-1]["content"].lower()
 
 
 @pytest.mark.asyncio
