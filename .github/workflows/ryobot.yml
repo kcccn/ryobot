@@ -62,7 +62,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install RyoBot
-        run: python -m pip install git+https://github.com/kcccn/ryobot.git
+        run: python -m pip install -e .
 
       - name: Run RyoBot Engine
         env:
