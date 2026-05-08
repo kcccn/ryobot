@@ -387,12 +387,14 @@ class RyoAgent:
                 except ValidationError as exc:
                     _log(f"WARN: invalid will JSON: {_truncate_log(exc)}")
                     messages.append(self._assistant_message_payload(assistant_message))
+                    detail = _hallucinated_tool_call_hint(decision_text)
                     messages.append(
                         {
                             "role": "user",
                             "content": (
-                                "Your previous response was invalid. Return only a JSON object that "
-                                f"matches the required schema. Validation error: {exc}"
+                                f"Your previous response was invalid. {detail}"
+                                "Return ONLY a bare JSON object matching the required schema "
+                                f"— no markdown, no code blocks, no tool-call syntax. Validation error: {exc}"
                             ),
                         }
                     )
@@ -1077,8 +1079,10 @@ class RyoAgent:
                 "role": "user",
                 "content": (
                     f"Your tool calls ({rejected}) were rejected: {reason}. "
-                    "Tools are no longer available. You must synthesize what you already know. "
-                    "Output only the WillDecision JSON NOW. "
+                    "ALL tools have been permanently removed — you CANNOT call any more tools, "
+                    "regardless of what the system prompt says about gathering information. "
+                    "You must synthesize what you already know. "
+                    "Output ONLY the WillDecision JSON object, with no surrounding text. "
                     "If you fail to produce valid JSON, you will fall back to stay_silent "
                     "and all your analysis will be lost."
                 ),
@@ -1195,6 +1199,28 @@ def _truncate_text(text: str, max_chars: int) -> str:
 def _truncate_log(result: Any) -> str:
     text = result if isinstance(result, str) else str(result)
     return _truncate_text(text, LOG_TRUNCATE)
+
+
+_HALLUCINATED_TOOL_PATTERNS = (
+    "tool_calls",
+    "CDATA",
+    "！！！",
+    "<function_call>",
+    "<tool_call>",
+    "</function_call>",
+    "</tool_call>",
+)
+
+
+def _hallucinated_tool_call_hint(text: str) -> str:
+    """Return a targeted hint if the text looks like hallucinated tool calls."""
+    lower = text.lower()
+    if any(p.lower() in lower for p in _HALLUCINATED_TOOL_PATTERNS):
+        return (
+            "You appear to be trying to emit tool calls as text — tools are NOT available "
+            "and raw tool-call syntax will never be accepted. "
+        )
+    return ""
 
 
 class _NoReplyArgs(BaseModel):
