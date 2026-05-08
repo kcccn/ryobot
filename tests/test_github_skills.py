@@ -20,10 +20,12 @@ from platforms.github.skills import (
     CreateIssue,
     CreatePRReview,
     CreatePullRequest,
+    DeleteBranch,
     DispatchWorkflow,
     ListFiles,
     ListOpenIssues,
     ListRepoLabels,
+    MergePullRequest,
     ReadCodeDiff,
     ReadFile,
     ReadIssueBody,
@@ -40,6 +42,7 @@ from platforms.github.skills import (
     SearchIssues,
     SearchRepoContext,
     SearchRepoMemory,
+    UpdateIssue,
     WriteFile,
 )
 
@@ -1906,3 +1909,279 @@ async def test_run_command_strips_secret_environment(monkeypatch: pytest.MonkeyP
     assert "Exit code: 0" in result
     assert "None" in result
     assert "secret-gh-token" not in result
+
+
+@pytest.mark.asyncio
+async def test_read_issue_body_returns_formatted_issue_content() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "number": 42,
+                "title": "Widget crashes on startup",
+                "state": "open",
+                "user": {"login": "dev"},
+                "labels": [{"name": "bug"}, {"name": "P1"}],
+                "body": "The widget segfaults when the --fast flag is passed.",
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = ReadIssueBody(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=42)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["url"].endswith("/repos/acme/widgets/issues/42")
+    assert "Issue #42: Widget crashes on startup" in result
+    assert "State: open" in result
+    assert "Author: dev" in result
+    assert "Labels: bug, P1" in result
+    assert "The widget segfaults when the --fast flag is passed." in result
+
+
+@pytest.mark.asyncio
+async def test_read_issue_body_uses_context_issue_when_zero() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "number": 12,
+                "title": "Context issue",
+                "state": "closed",
+                "user": {"login": "octocat"},
+                "labels": [],
+                "body": "Fixed.",
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = ReadIssueBody(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=0)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["url"].endswith("/repos/acme/widgets/issues/12")
+    assert "Issue #12: Context issue" in result
+    assert "State: closed" in result
+
+
+@pytest.mark.asyncio
+async def test_update_issue_patches_title_and_body() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["body"] = request.content.decode()
+        return httpx.Response(200, json={"number": 12, "title": "new-title", "body": "new-body"})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = UpdateIssue(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=12, title="new-title", body="new-body")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["method"] == "PATCH"
+    assert captured["url"].endswith("/repos/acme/widgets/issues/12")
+    patch = json.loads(captured["body"])
+    assert patch["title"] == "new-title"
+    assert patch["body"] == "new-body"
+    assert "Updated issue #12" in result
+    assert "title" in result
+    assert "body" in result
+
+
+@pytest.mark.asyncio
+async def test_update_issue_reports_nothing_to_update_when_both_empty() -> None:
+    client = httpx.AsyncClient(base_url="https://api.github.test")
+    skill = UpdateIssue(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=12, title="", body="")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+    assert result == "Nothing to update: both title and body are empty."
+
+
+@pytest.mark.asyncio
+async def test_delete_branch_deletes_git_ref() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        return httpx.Response(204)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = DeleteBranch(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(branch="feat/stale-feature")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["method"] == "DELETE"
+    assert captured["url"].endswith("/repos/acme/widgets/git/refs/heads/feat/stale-feature")
+    assert result == "Deleted branch 'feat/stale-feature'"
+
+
+@pytest.mark.asyncio
+async def test_delete_branch_returns_api_error_on_failure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = DeleteBranch(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(branch="nonexistent")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "GitHub API error (404)" in result
+
+
+@pytest.mark.asyncio
+async def test_merge_pull_request_merges_open_clean_pr() -> None:
+    captured: dict[str, str] = {}
+    handler_sequence: list[httpx.Response] = [
+        httpx.Response(
+            200,
+            json={
+                "number": 99,
+                "state": "open",
+                "merged": False,
+                "draft": False,
+                "mergeable": True,
+                "mergeable_state": "clean",
+            },
+        ),
+        httpx.Response(
+            200,
+            json={"sha": "abc123", "merged": True, "message": "Pull Request successfully merged"},
+        ),
+    ]
+    call_count = [0]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured[f"method_{call_count[0]}"] = request.method
+        captured[f"url_{call_count[0]}"] = str(request.url)
+        if request.method == "PUT":
+            captured["merge_body"] = request.content.decode()
+        resp = handler_sequence[call_count[0]]
+        call_count[0] += 1
+        return resp
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = MergePullRequest(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(pr_number=99)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["url_0"].endswith("/repos/acme/widgets/pulls/99")
+    assert captured["method_1"] == "PUT"
+    assert captured["url_1"].endswith("/repos/acme/widgets/pulls/99/merge")
+    merge_body = json.loads(captured["merge_body"])
+    assert merge_body["merge_method"] == "merge"
+    assert "Merged PR #99" in result
+    assert "SHA: abc123" in result
+
+
+@pytest.mark.asyncio
+async def test_merge_pull_request_rejects_non_open_pr() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "number": 99,
+                "state": "closed",
+                "merged": True,
+                "draft": False,
+                "mergeable": None,
+                "mergeable_state": "unknown",
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = MergePullRequest(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(pr_number=99)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "not open" in result
+
+
+@pytest.mark.asyncio
+async def test_merge_pull_request_rejects_draft_pr() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "number": 99,
+                "state": "open",
+                "merged": False,
+                "draft": True,
+                "mergeable": None,
+                "mergeable_state": "draft",
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = MergePullRequest(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(pr_number=99)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "draft" in result
