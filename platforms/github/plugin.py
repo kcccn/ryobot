@@ -144,8 +144,8 @@ class GitHubPlugin(BasePlugin):
         return PluginEvent(
             event_id=f"{event.event_id}:target:{issue_number}",
             message=message,
-            author=str((issue.get("user") or {}).get("login") or "unknown"),
-            author_association=str(issue.get("author_association") or "NONE"),
+            author=event.author,
+            author_association=event.author_association,
             issue_id=str(issue.get("id") or issue_number),
             issue_number=issue_number,
             comment_id=0,
