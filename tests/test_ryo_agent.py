@@ -205,6 +205,11 @@ class SearchRepoContextTestSkill(EchoSkill):
     description = "Search repo-wide issues and PRs."
 
 
+class ReadThreadMetaTestSkill(EchoSkill):
+    name = "read_thread_meta"
+    description = "Read precise issue or PR metadata."
+
+
 def build_response(message: FakeMessage) -> FakeResponse:
     return FakeResponse(choices=[FakeChoice(message=message)])
 
@@ -651,6 +656,46 @@ async def test_invalid_decision_json_retries_until_valid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalid_decision_json_enters_json_repair_mode_without_more_tools() -> None:
+    plugin = FakePlugin()
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(FakeMessage(content="not json")),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-1",
+                            function=FakeFunction(name="echo", arguments='{"text":"probe"}'),
+                        )
+                    ]
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "fixed",
+                            "internal_emotion": "steady",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    assert len(fake_completions.calls) == 3
+    assert not any(message.get("role") == "tool" for message in fake_completions.calls[2]["messages"])
+    assert "No more tool calls" in fake_completions.calls[2]["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_run_sets_runtime_context_for_skills() -> None:
     clear_skill_context()
     plugin = FakePlugin()
@@ -805,6 +850,77 @@ async def test_decision_prompt_prefers_memory_before_repo_context() -> None:
     assert "retrieve_memory" in prompt
     assert "search_repo_context" in prompt
     assert tool_names == ["retrieve_memory", "search_repo_context"]
+
+
+@pytest.mark.asyncio
+async def test_decision_prompt_mentions_read_thread_meta_and_current_human_intent() -> None:
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-56",
+            message="[Comment on Issue #56]\n\n来个人提一个 PR，先看看 #54",
+            author="octocat",
+            author_association="OWNER",
+            issue_id="1001",
+            issue_number=56,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+        )
+    )
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "checked the current ask first",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            )
+        ],
+        skills=[RetrieveMemoryTestSkill(), SearchRepoContextTestSkill(), ReadThreadMetaTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    prompt = fake_completions.calls[0]["messages"][0]["content"]
+    user_prompt = fake_completions.calls[0]["messages"][-1]["content"]
+    tool_names = [tool["function"]["name"] for tool in fake_completions.calls[0]["tools"]]
+    assert "先解决当前线程的人类意图" in prompt
+    assert "read_thread_meta" in prompt
+    assert "排除 coordination、mind issue、memory" in prompt
+    assert "当前消息显式提到了这些线程：#56, #54" in user_prompt
+    assert tool_names == ["retrieve_memory", "search_repo_context", "read_thread_meta"]
+
+
+@pytest.mark.asyncio
+async def test_will_stage_uses_independent_iteration_budget() -> None:
+    plugin = FakePlugin()
+    looping_responses = [
+        build_response(
+            FakeMessage(
+                tool_calls=[
+                    FakeToolCall(
+                        id=f"call-{i}",
+                        function=FakeFunction(name="echo", arguments='{"text":"probe"}'),
+                    )
+                ]
+            )
+        )
+        for i in range(8)
+    ]
+    agent, fake_completions = build_agent(plugin=plugin, responses=looping_responses)
+
+    await agent.run(raw_event={})
+
+    assert len(fake_completions.calls) == 8
+    assert plugin.sent_replies == []
 
 
 @pytest.mark.asyncio

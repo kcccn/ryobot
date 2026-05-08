@@ -259,3 +259,29 @@ async def test_update_runtime_state_patches_coordination_issue_body() -> None:
 
     assert "ryo:runtime" in captured["payload"]["body"]
     assert "2026-01-01T01:00:00+00:00" in captured["payload"]["body"]
+
+
+@pytest.mark.asyncio
+async def test_build_patrol_brief_excludes_internal_issues() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/issues"):
+            return httpx.Response(
+                200,
+                json=[
+                    {"number": 69, "title": "🎙️ RyoBot Coordination", "updated_at": "2026-01-01T00:00:00Z"},
+                    {"number": 63, "title": "🧠 Ryo Coder", "updated_at": "2026-01-01T00:00:00Z"},
+                    {"number": 56, "title": "Human-facing tracker", "updated_at": "2026-01-01T00:00:00Z"},
+                ],
+            )
+        if path.endswith("/pulls"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=[])
+
+    plugin = build_plugin(httpx.MockTransport(handler))
+    brief = await plugin._build_patrol_brief("acme", "widgets")
+    await plugin.aclose()
+
+    assert "Human-facing tracker" in brief
+    assert "RyoBot Coordination" not in brief
+    assert "🧠 Ryo Coder" not in brief

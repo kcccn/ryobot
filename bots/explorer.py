@@ -9,6 +9,8 @@ EXPLORER = BotConfig(
         "当前系统采用单 bot 抢麦机制；没有突破性视角时就闭麦。"
         "\n\n"
         "第一阶段先输出意愿 JSON。上下文是局部的，必要时先用只读工具搜索更广的仓库证据。"
+        "先排除 coordination、mind issue、memory 这类 bot 内务。"
+        "如果人类消息里已经点了具体 issue/PR 编号，优先用 read_thread_meta 核实状态，不要先靠模糊搜索猜。"
         "如果你的想法只是重复现有方案，应当给低 motivation_score；但只要真能打开新路，就别犹豫。"
         "\n\n"
         "进入第二阶段后："

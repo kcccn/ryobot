@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import sys
 import time
 from collections.abc import Sequence
@@ -27,6 +28,10 @@ DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS = 180
 NO_REPLY_TOOL_NAME = "no_reply"
 LOG_TRUNCATE = 500
 MEMORY_MUTATION_TOOL_NAMES = frozenset({"commit_memory", "refine_memory", "archive_memory"})
+WILL_MAX_ITERATIONS = 8
+WILL_MAX_TOOL_CALLS = 12
+WILL_CONVERGENCE_LIMIT = 3
+WILL_MAX_REPEAT_PER_RESOURCE = 2
 
 
 def _log(msg: str, *, end: str = "\n") -> None:
@@ -202,10 +207,12 @@ class RyoAgent:
         self._log_available_tools("will", tools)
         seen_tools: set[str] = set()
         no_new_tool_count = 0
-        CONVERGENCE_LIMIT = 5
+        total_tool_calls = 0
+        json_repair_only = False
+        resource_uses: dict[tuple[str, str], int] = {}
         try:
-            for i in range(self.max_iterations):
-                _log(f"--- will iteration {i + 1}/{self.max_iterations} ---")
+            for i in range(WILL_MAX_ITERATIONS):
+                _log(f"--- will iteration {i + 1}/{WILL_MAX_ITERATIONS} ---")
                 t_start = time.monotonic()
                 response = await self._create_completion_with_retry(messages=messages, tools=tools)
                 t_elapsed = time.monotonic() - t_start
@@ -213,16 +220,46 @@ class RyoAgent:
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
                 self._log_stage_response("will", assistant_message, elapsed_seconds=t_elapsed)
                 if tool_calls:
+                    if json_repair_only:
+                        _log("WARN: tool calls are no longer allowed during JSON repair")
+                        messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "You already failed JSON validation. Output only the WillDecision JSON now. No more tool calls.",
+                            }
+                        )
+                        continue
+                    if total_tool_calls >= WILL_MAX_TOOL_CALLS:
+                        _log(f"WARN: will tool-call budget exhausted at {total_tool_calls}, forcing decision")
+                        messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "You have exhausted your tool-call budget. Output the WillDecision JSON now. No more tool calls.",
+                            }
+                        )
+                        json_repair_only = True
+                        continue
                     self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     new_tool_seen = False
                     for tool_call in tool_calls:
+                        if total_tool_calls >= WILL_MAX_TOOL_CALLS:
+                            _log(f"WARN: reached will tool-call budget {WILL_MAX_TOOL_CALLS}, skipping remaining tool calls")
+                            json_repair_only = True
+                            break
                         tool_name, args_raw = self._tool_call_details(tool_call)
                         _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
                         if tool_name not in seen_tools:
                             seen_tools.add(tool_name)
                             new_tool_seen = True
-                        tool_result = await self._execute_tool_call(tool_call, event=event)
+                        total_tool_calls += 1
+                        tool_result = await self._execute_will_tool_call(
+                            tool_call,
+                            event=event,
+                            resource_uses=resource_uses,
+                        )
                         if isinstance(tool_result, _NoReplyResult):
                             break
                         _log(f"  <- result: {_truncate_log(tool_result)}")
@@ -237,7 +274,7 @@ class RyoAgent:
                         no_new_tool_count = 0
                     else:
                         no_new_tool_count += 1
-                        if no_new_tool_count >= CONVERGENCE_LIMIT:
+                        if no_new_tool_count >= WILL_CONVERGENCE_LIMIT:
                             _log(f"WARN: {no_new_tool_count} iterations without new tools, forcing decision")
                             messages.append(
                                 {
@@ -248,6 +285,7 @@ class RyoAgent:
                                     ),
                                 }
                             )
+                            json_repair_only = True
                     continue
 
                 decision_text = self._extract_text_content(assistant_message).strip()
@@ -267,6 +305,7 @@ class RyoAgent:
                             ),
                         }
                     )
+                    json_repair_only = True
                     continue
                 try:
                     self._validate_decision(event=event, decision=decision)
@@ -524,6 +563,25 @@ class RyoAgent:
 
         return await self._execute_validated_skill(skill, tool_call)
 
+    async def _execute_will_tool_call(
+        self,
+        tool_call: Any,
+        *,
+        event: PluginEvent,
+        resource_uses: dict[tuple[str, str], int],
+    ) -> str | _NoReplyResult:
+        tool_name, args_raw = self._tool_call_details(tool_call)
+        resource_key = self._will_resource_key(tool_name, args_raw)
+        if resource_key is not None:
+            uses = resource_uses.get(resource_key, 0)
+            if uses >= WILL_MAX_REPEAT_PER_RESOURCE:
+                return (
+                    f"Tool skipped: resource probe limit reached for {resource_key[0]} "
+                    f"'{resource_key[1]}'. Output the WillDecision JSON instead of repeating this check."
+                )
+            resource_uses[resource_key] = uses + 1
+        return await self._execute_tool_call(tool_call, event=event)
+
     async def _execute_validated_skill(self, skill: BaseSkill, tool_call: Any) -> str | _NoReplyResult:
         tool_name = skill.name
         try:
@@ -562,14 +620,17 @@ class RyoAgent:
             '"motivation_score":0,"action_decision":{"will_reply":false,"target_issue_number":null}}'
             "\n规则："
             "\n1. 当前看到的上下文是故意片面的；如果信息不够，先使用只读工具继续了解。"
-            "\n2. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
-            "\n3. 如果这是被动事件（非 patrol），target_issue_number 通常为 null。"
+            "\n2. 先排除 coordination、mind issue、memory 这类 bot 内务；默认不要把它们当候选工作。"
+            "\n3. 对普通 Issue/PR 事件，先解决当前线程的人类意图，不要一上来升级成全仓库审计。"
+            "\n4. 若当前消息或线程里出现明确编号（如 #54），先用 read_thread_meta/read_issue_body 精确核实，再决定是否扩展到 search_repo_context 或代码搜索。"
+            "\n5. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
+            "\n6. 如果这是被动事件（非 patrol），target_issue_number 通常为 null。"
             "但如果你发现了必须在其他 issue/PR 行动的真正重大发现，可以设置 target_issue_number。"
             "此时 will_reply 通常应为 false（你不是在当前 thread 回复），系统会把你路由到目标 issue/PR。"
-            "\n4. 如果这是街溜子事件，target_issue_number 可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
-            "\n5. 只有当你真的准备公开发言或直接动手推进时，will_reply 才能为 true。"
-            "\n6. 不要输出 Markdown，不要解释，不要包裹代码块。"
-            "\n7. motivation_score 评分锚定（0-100 整数）："
+            "\n7. 如果这是街溜子事件，target_issue_number 可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
+            "\n8. 只有当你真的准备公开发言或直接动手推进时，will_reply 才能为 true。"
+            "\n9. 不要输出 Markdown，不要解释，不要包裹代码块。"
+            "\n10. motivation_score 评分锚定（0-100 整数）："
             "\n  0-29: 无趣/无关/已经答复过，不应说话"
             "\n  30-59: 常规跟进，有轻微价值但不必抢麦"
             "\n  60-79: 发现了值得讨论的技术问题或可改进点"
@@ -580,10 +641,26 @@ class RyoAgent:
         )
 
     def _reply_prompt(self, *, history: Any) -> str:
-        return self.persona["system_prompt"] + self._mind_context(history)
+        return (
+            self.persona["system_prompt"]
+            + self._mind_context(history)
+            + "\n\n第二阶段规则："
+            "\n1. 对被动事件，优先解决当前线程的人类请求。"
+            "\n2. 如果证据表明人类要求的 PR/修复其实早已完成，且当前 tracker 明显 stale，先简短解释现状，再 close_issue 当前 stale tracker。"
+            "\n3. 不要为了已经完成的工作再制造重复 PR。"
+            "\n4. 判断 PR 是否 merged，优先 read_thread_meta，不要先靠模糊搜索猜。"
+        )
 
     def _decision_user_prompt(self, *, event: PluginEvent, history: Any) -> str:
         prompt = event.message
+        mentioned_issue_refs = _mentioned_issue_refs(event.message)
+        if not event.is_patrol and mentioned_issue_refs:
+            refs = ", ".join(f"#{issue_number}" for issue_number in mentioned_issue_refs)
+            prompt += (
+                f"\n\n当前消息显式提到了这些线程：{refs}。"
+                "请先用 read_thread_meta 或 read_issue_body 精确核实这些编号的真实状态，"
+                "再决定是否需要扩展到 repo-wide search。"
+            )
         if event.is_patrol and history.patrol_brief:
             prompt += f"\n\n街溜子模式仓库近 24 小时动态早报：\n{history.patrol_brief}"
         return prompt
@@ -754,6 +831,19 @@ class RyoAgent:
         skill = self._skills_by_name.get(tool_name)
         return bool(skill and skill.mutates_state)
 
+    def _will_resource_key(self, tool_name: str, args_raw: str) -> tuple[str, str] | None:
+        try:
+            args = self._parse_tool_arguments(args_raw)
+        except JSONDecodeError:
+            return None
+        if tool_name in {"read_issue_body", "read_thread_comments", "read_thread_meta"}:
+            return (tool_name, str(args.get("issue_number", 0) or 0))
+        if tool_name in {"read_file", "list_files"}:
+            return (tool_name, str(args.get("path", "")).strip())
+        if tool_name in {"search_issues", "search_repo_context", "retrieve_memory", "search_code"}:
+            return (tool_name, _normalize_query_key(str(args.get("query", "")).strip()))
+        return None
+
 
 def _is_trusted_mutation_author(author_association: str) -> bool:
     return author_association.upper() in TRUSTED_MUTATION_AUTHOR_ASSOCIATIONS
@@ -771,6 +861,19 @@ def _reason_from_tools(tool_names: set[str], *, default: str) -> str:
     if tool_names:
         return default
     return "no_action"
+
+
+def _normalize_query_key(query: str) -> str:
+    return " ".join(query.lower().split())
+
+
+def _mentioned_issue_refs(text: str) -> list[int]:
+    seen: list[int] = []
+    for match in re.finditer(r"#(\d+)", text):
+        issue_number = int(match.group(1))
+        if issue_number not in seen:
+            seen.append(issue_number)
+    return seen
 
 
 def _patrol_due(runtime_state: RepoRuntimeState) -> bool:

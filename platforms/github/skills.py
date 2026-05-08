@@ -14,7 +14,13 @@ from pydantic import BaseModel, Field
 from core.skills import BaseSkill, get_skill_context
 
 from .client import GitHubApiClient
-from .utils import csv_env, max_chars_from_env, sanitize_mentions, truncate_text
+from .utils import (
+    csv_env,
+    is_internal_issue_artifact,
+    max_chars_from_env,
+    sanitize_mentions,
+    truncate_text,
+)
 
 
 class EmptyArgs(BaseModel):
@@ -54,6 +60,7 @@ class SearchRepoContextArgs(BaseModel):
     query: str = Field(description="Keywords or GitHub issue search syntax for repo context lookup")
     limit: int = Field(default=10, ge=1, le=20)
     kind: str = Field(default="all", description="One of: all, issues, prs")
+    include_internal: bool = False
 
 
 class ReadCodeDiffArgs(BaseModel):
@@ -73,6 +80,10 @@ class AddLabelsArgs(BaseModel):
 
 class ReadIssueBodyArgs(BaseModel):
     issue_number: int = Field(default=0, description="Issue number to read (0 = current context issue)")
+
+
+class ReadThreadMetaArgs(BaseModel):
+    issue_number: int = Field(default=0, description="Issue or pull request number to inspect (0 = current context thread)")
 
 
 class ReadThreadCommentsArgs(BaseModel):
@@ -134,6 +145,7 @@ class ListOpenIssuesArgs(BaseModel):
     sort: str = Field(default="updated")
     direction: str = Field(default="desc")
     limit: int = Field(default=10, ge=1, le=30)
+    include_internal: bool = False
 
 
 class ListFilesArgs(BaseModel):
@@ -405,6 +417,53 @@ class ReadIssueBody(GitHubSkillBase):
         )
 
 
+class ReadThreadMeta(GitHubSkillBase):
+    name = "read_thread_meta"
+    description = (
+        "Read concise metadata for a specific issue or pull request by number. "
+        "For pull requests, this includes merged status, merged_at, base/head branches, and draft status. "
+        "Use this before broader searches when you need a low-ambiguity status check."
+    )
+    args_model = ReadThreadMetaArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        issue_number = args.issue_number if args.issue_number else context["issue_number"]
+        issue = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}"
+        )
+        labels = ", ".join(lb.get("name", "") for lb in issue.get("labels", [])) or "none"
+        is_pull_request = "pull_request" in issue
+        lines = [
+            f"Thread #{issue['number']}: {issue['title']}",
+            f"Type: {'PR' if is_pull_request else 'Issue'}",
+            f"State: {issue.get('state', '')}",
+            f"Author: {(issue.get('user') or {}).get('login', 'unknown')}",
+            f"Labels: {labels}",
+            f"Created: {issue.get('created_at', '')}",
+            f"Updated: {issue.get('updated_at', '')}",
+            f"Closed: {issue.get('closed_at', '') or 'N/A'}",
+            f"URL: {issue.get('html_url', '')}",
+        ]
+        if not is_pull_request:
+            return "\n".join(lines)
+
+        pr = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/pulls/{issue_number}"
+        )
+        lines.extend(
+            [
+                f"Draft: {bool(pr.get('draft'))}",
+                f"Merged: {bool(pr.get('merged'))}",
+                f"Merged at: {pr.get('merged_at') or 'N/A'}",
+                f"Base: {(pr.get('base') or {}).get('ref', '?')}",
+                f"Head: {(pr.get('head') or {}).get('ref', '?')}",
+            ]
+        )
+        return "\n".join(lines)
+
+
 class SearchRepoMemory(GitHubSkillBase):
     name = "search_repo_memory"
     description = "Search similar issues in the current GitHub repository."
@@ -630,7 +689,8 @@ class SearchRepoContext(GitHubSkillBase):
     name = "search_repo_context"
     description = (
         "Search non-memory issues and pull requests across the repository. "
-        "This excludes archived memory records and is useful when the memory database is empty or weak."
+        "By default this excludes archived memory records and internal bot-maintenance artifacts. "
+        "Use include_internal=true only when you intentionally need those internal artifacts."
     )
     args_model = SearchRepoContextArgs
 
@@ -651,6 +711,8 @@ class SearchRepoContext(GitHubSkillBase):
             params={"q": q, "per_page": args.limit, "sort": "updated", "order": "desc"},
         )
         items = result.get("items", []) if isinstance(result, dict) else []
+        if not args.include_internal:
+            items = [item for item in items if not is_internal_issue_artifact(item)]
         if not items:
             return f"No repo context results for: {args.query}"
         lines = [f"Repo context results for '{args.query}' ({result.get('total_count', len(items))} total):"]
@@ -929,6 +991,7 @@ class ListOpenIssues(GitHubSkillBase):
     description = (
         "List issues in the current repository. "
         "Use state='open' (default) for active issues, 'closed' for completed ones, or 'all' for both. "
+        "By default this hides internal bot-maintenance artifacts such as coordination and mind issues. "
         "Filter by labels (comma-separated). "
         "Sort by 'created', 'updated', or 'comments'. "
         "Returns issue number, title, state, labels, author, created/updated timestamps, and URL."
@@ -957,6 +1020,8 @@ class ListOpenIssues(GitHubSkillBase):
         lines: list[str] = []
         for issue in issues:
             if "pull_request" in issue:
+                continue
+            if not args.include_internal and is_internal_issue_artifact(issue):
                 continue
             labels_list = [lb.get("name", "") for lb in issue.get("labels", [])]
             labels_str = ", ".join(labels_list) if labels_list else "none"

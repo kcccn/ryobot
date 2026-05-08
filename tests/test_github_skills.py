@@ -26,6 +26,7 @@ from platforms.github.skills import (
     ReadFile,
     ReadIssueMemory,
     ReadThreadComments,
+    ReadThreadMeta,
     ReadWorkflowRun,
     RefineMemory,
     RetrieveMemory,
@@ -435,6 +436,7 @@ def test_github_skills_expose_complete_tool_definitions() -> None:
         dispatch_tool = DispatchWorkflow(token="secret-token", client=client).get_tool_definition()
         run_tool = ReadWorkflowRun(token="secret-token", client=client).get_tool_definition()
         labels_catalog_tool = ListRepoLabels(token="secret-token", client=client).get_tool_definition()
+        thread_meta_tool = ReadThreadMeta(token="secret-token", client=client).get_tool_definition()
         thread_tool = ReadThreadComments(token="secret-token", client=client).get_tool_definition()
     finally:
         import asyncio
@@ -460,6 +462,8 @@ def test_github_skills_expose_complete_tool_definitions() -> None:
     assert run_tool["function"]["name"] == "read_workflow_run"
     assert run_tool["function"]["parameters"]["properties"]["run_id"]["type"] == "integer"
     assert labels_catalog_tool["function"]["name"] == "list_repo_labels"
+    assert thread_meta_tool["function"]["name"] == "read_thread_meta"
+    assert thread_meta_tool["function"]["parameters"]["properties"]["issue_number"]["type"] == "integer"
     assert thread_tool["function"]["name"] == "read_thread_comments"
 
 
@@ -938,6 +942,54 @@ async def test_list_open_issues_skips_pull_requests() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_open_issues_hides_internal_artifacts_by_default() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [], "user": {"login": "github-actions[bot]"}, "updated_at": "", "html_url": ""},
+                {"number": 63, "title": "🧠 Ryo Coder", "state": "open", "labels": [], "user": {"login": "github-actions[bot]"}, "updated_at": "", "html_url": ""},
+                {"number": 56, "title": "Human-facing tracker", "state": "open", "labels": [{"name": "enhancement"}], "user": {"login": "github-actions[bot]"}, "updated_at": "", "html_url": ""},
+            ],
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ListOpenIssues(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute()
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "#56: Human-facing tracker" in result
+    assert "RyoBot Coordination" not in result
+    assert "🧠 Ryo Coder" not in result
+
+
+@pytest.mark.asyncio
+async def test_list_open_issues_can_include_internal_artifacts() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [], "user": {"login": "github-actions[bot]"}, "updated_at": "", "html_url": ""},
+            ],
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ListOpenIssues(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(include_internal=True)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "RyoBot Coordination" in result
+
+
+@pytest.mark.asyncio
 async def test_list_repo_labels_returns_available_labels() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert str(request.url).endswith("/repos/acme/widgets/labels?per_page=100&page=1")
@@ -1126,6 +1178,119 @@ async def test_search_code_returns_results() -> None:
     assert "hello" in captured["url"]
     assert "widgets" in captured["url"]
     assert "src/main.py" in result
+
+
+@pytest.mark.asyncio
+async def test_search_repo_context_hides_internal_artifacts_by_default() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "total_count": 3,
+                "items": [
+                    {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [], "updated_at": "", "html_url": ""},
+                    {"number": 63, "title": "🧠 Ryo Coder", "state": "open", "labels": [], "updated_at": "", "html_url": ""},
+                    {"number": 56, "title": "Human-facing tracker", "state": "open", "labels": [{"name": "enhancement"}], "updated_at": "", "html_url": ""},
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = SearchRepoContext(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(query="phase 1")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Human-facing tracker" in result
+    assert "RyoBot Coordination" not in result
+    assert "🧠 Ryo Coder" not in result
+
+
+@pytest.mark.asyncio
+async def test_read_thread_meta_returns_pr_metadata() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/issues/54"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": 54,
+                    "title": "Phase 1 integration",
+                    "state": "closed",
+                    "user": {"login": "octocat"},
+                    "labels": [{"name": "enhancement"}],
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-02T00:00:00Z",
+                    "closed_at": "2026-01-03T00:00:00Z",
+                    "html_url": "https://github.test/acme/widgets/pull/54",
+                    "pull_request": {},
+                },
+            )
+        if request.url.path.endswith("/pulls/54"):
+            return httpx.Response(
+                200,
+                json={
+                    "draft": False,
+                    "merged": True,
+                    "merged_at": "2026-01-03T00:00:00Z",
+                    "base": {"ref": "main"},
+                    "head": {"ref": "feat/phase1"},
+                },
+            )
+        return httpx.Response(404, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReadThreadMeta(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=54)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert any("/issues/54" in call for call in calls)
+    assert any("/pulls/54" in call for call in calls)
+    assert "Type: PR" in result
+    assert "Merged: True" in result
+    assert "Base: main" in result
+    assert "Head: feat/phase1" in result
+
+
+@pytest.mark.asyncio
+async def test_read_thread_meta_returns_issue_metadata_without_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "number": 56,
+                "title": "Tracker",
+                "state": "open",
+                "user": {"login": "octocat"},
+                "labels": [{"name": "enhancement"}],
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-02T00:00:00Z",
+                "closed_at": None,
+                "html_url": "https://github.test/acme/widgets/issues/56",
+                "body": "Should not be shown",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReadThreadMeta(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=56)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Type: Issue" in result
+    assert "Should not be shown" not in result
 
 
 @pytest.mark.asyncio

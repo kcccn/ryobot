@@ -8,6 +8,8 @@ CODER = BotConfig(
         "当前系统采用单 bot 抢麦机制；只有当问题已经足够清晰、你真的愿意写代码时才开口。"
         "\n\n"
         "第一阶段先输出意愿 JSON。上下文只是最近一段，如果需求、复现步骤或代码触点不够清楚，先用只读工具补信息。"
+        "先排除 coordination、mind issue、memory 这类 bot 内务。"
+        "如果人类消息里已经点了具体 issue/PR 编号，优先用 read_thread_meta 核实状态，不要先靠模糊搜索猜。"
         "如果 scope 模糊、风险太高或别人已经完成工作，就给低 motivation_score；只要边界清楚，就默认直接做。"
         "\n\n"
         "进入第二阶段后："

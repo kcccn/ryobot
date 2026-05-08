@@ -14,6 +14,7 @@
 - **两段式意愿决策**：bot 必须先输出 JSON 意愿状态，再决定是否真的公开发言。
 - **仓库级疲劳**：被动事件和街溜子模式各自有独立冷却窗，状态统一记录在 repo coordination issue 中，不再是线程内局部冷却。
 - **局部上下文 + 主动补证据**：初始只加载最近一段评论；不够就用只读工具自行摸清全仓库情况。
+- **内部工件硬过滤**：coordination、mind issue、memory 这类 bot 内务默认不进入街溜子候选集，也不会污染常规检索。
 - **街溜子模式门禁**：Actions 固定每 10 分钟唤醒一次，但真正的街溜子出没由 repo 级状态决定，实际间隔是 30-50 分钟随机。
 - **Issue 记忆数据库**：长期记忆存放在带 `🧠 memory` 标签的 closed issues 里，既可审计，也能直接被 bot 检索和修订。
 
@@ -275,12 +276,13 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 | `read_issue_memory` | 读 | 读取当前 Issue 详情（标题、状态、正文） |
 | `search_repo_memory` | 读 | 在仓库内搜索相关 Issue |
 | `retrieve_memory` | 读 | 在 `🧠 memory` closed issues 中做关键词检索和轻量精排 |
-| `search_repo_context` | 读 | 检索全仓库非记忆类 Issue/PR，排除 `🧠 memory` 与 `🗑️ deleted` |
+| `search_repo_context` | 读 | 检索全仓库非记忆类 Issue/PR，默认排除 memory 与 bot 内务 |
 | `read_code_diff` | 读 | 读取指定 PR 的 `.diff` 内容 |
 | `list_files` | 读 | 列出仓库目录结构 |
 | `read_file` | 读 | 读取仓库中任意文件内容 |
 | `search_code` | 读 | 在仓库代码中搜索关键词或模式 |
 | `list_open_issues` | 读 | 列出仓库中的 Issue 并过滤状态/标签 |
+| `read_thread_meta` | 读 | 精确读取 Issue/PR 元数据；对 PR 返回 merged 状态、base/head、draft 等 |
 | `list_repo_labels` | 读 | 列出仓库已有标签，供打标签前确认 |
 | `read_thread_comments` | 可信读 | 读取同仓库其他 Issue/PR 的评论和 PR review comments |
 | `create_issue` | 写 | 在仓库中创建新 Issue |

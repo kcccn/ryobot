@@ -17,7 +17,13 @@ from core.plugins import (
 )
 
 from .client import GitHubApiClient
-from .utils import max_chars_from_env, sanitize_mentions, truncate_text
+from .utils import (
+    COORDINATION_ISSUE_TITLE,
+    is_internal_issue_artifact,
+    max_chars_from_env,
+    sanitize_mentions,
+    truncate_text,
+)
 
 _RYO_ANY_MARKER_PATTERN = re.compile(r"<!--\s*ryo:\w+:.*?-->", re.DOTALL)
 DEFAULT_MARKER_AUTHOR_LOGINS = frozenset({"github-actions[bot]"})
@@ -25,7 +31,6 @@ DEFAULT_MAX_HISTORY_COMMENT_CHARS = 12000
 DEFAULT_MAX_HISTORY_TOTAL_CHARS = 18000
 DEFAULT_INITIAL_HISTORY_COMMENT_LIMIT = 12
 DEFAULT_INITIAL_HISTORY_TOTAL_CHARS = 16000
-_COORDINATION_ISSUE_TITLE = "🎙️ RyoBot Coordination"
 _COORDINATION_MARKER_PATTERN = re.compile(
     r"<!--\s*ryo:runtime:\s*(?P<payload>\{.*?\})\s*-->",
     re.DOTALL,
@@ -352,7 +357,7 @@ class GitHubPlugin(BasePlugin):
     async def _find_or_create_coordination_issue(self, owner: str, repo: str) -> tuple[int, str]:
         search_result = await self._api.get_json(
             "/search/issues",
-            params={"q": f'repo:{owner}/{repo} is:issue is:open "{_COORDINATION_ISSUE_TITLE}" in:title', "per_page": 1},
+            params={"q": f'repo:{owner}/{repo} is:issue is:open "{COORDINATION_ISSUE_TITLE}" in:title', "per_page": 1},
         )
         items = (search_result.get("items") or []) if isinstance(search_result, dict) else []
         if items:
@@ -365,7 +370,7 @@ class GitHubPlugin(BasePlugin):
         body = _coordination_issue_template(state)
         result = await self._api.post_json(
             f"/repos/{owner}/{repo}/issues",
-            json_body={"title": _COORDINATION_ISSUE_TITLE, "body": body},
+            json_body={"title": COORDINATION_ISSUE_TITLE, "body": body},
         )
         if isinstance(result, dict):
             return int(result.get("number", 0)), str(result.get("body") or body)
@@ -393,6 +398,8 @@ class GitHubPlugin(BasePlugin):
         issue_count = 0
         for item in issues:
             if "pull_request" in item:
+                continue
+            if is_internal_issue_artifact(item):
                 continue
             issue_count += 1
             if issue_count > 5:
