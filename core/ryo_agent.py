@@ -312,6 +312,7 @@ class RyoAgent:
                     if total_tool_calls >= WILL_MAX_TOOL_CALLS:
                         _log(f"WARN: will tool-call budget exhausted at {total_tool_calls}, forcing decision")
                         self._append_rejected_tool_calls(messages, tool_calls, reason="tool-call budget exhausted")
+                        self._append_will_budget_exhausted_nudge(messages)
                         json_repair_only = True
                         continue
                     self._log_tool_calls(tool_calls)
@@ -358,6 +359,8 @@ class RyoAgent:
                                     "content": "Tool call skipped: budget exhausted.",
                                 }
                             )
+                    if json_repair_only:
+                        self._append_will_budget_exhausted_nudge(messages)
                     if new_tool_seen:
                         no_new_tool_count = 0
                     else:
@@ -509,6 +512,20 @@ class RyoAgent:
                                 "content": str(tool_result),
                             }
                         )
+                        if (
+                            tool_name == "create_pr_review"
+                            and decision.action_decision.comment_kind not in {"discussion", "handoff"}
+                            and not decision.action_decision.continue_session
+                        ):
+                            _log("PR review submitted; treating review as the terminal visible artifact for this session")
+                            return ExecutionOutcome(
+                                kind="final_posted",
+                                reason="create_pr_review",
+                                mutated_tool_names=set(executed_tool_names),
+                                continue_session=False,
+                                done=True,
+                                visible_comment_posted=True,
+                            )
                     continue
 
                 reply_text = self._extract_text_content(assistant_message).strip()
@@ -676,11 +693,26 @@ class RyoAgent:
         for skill in self.skills:
             if readonly_only and skill.mutates_state:
                 continue
+            if event.issue_number == 0 and skill.name == "read_issue_memory":
+                continue
             if not _is_trusted_mutation_author(event.author_association):
                 if skill.mutates_state or skill.requires_trusted_author:
                     continue
             skills.append(skill)
         return skills
+
+    @staticmethod
+    def _append_will_budget_exhausted_nudge(messages: list[ChatMessage]) -> None:
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Your will-stage tool-call budget is exhausted. "
+                    "You MUST output the raw WillDecision JSON on the next turn. "
+                    "Do not call any more tools. Do not wrap the JSON in markdown or explanation."
+                ),
+            }
+        )
 
     async def _execute_tool_call(self, tool_call: Any, *, event: PluginEvent) -> str | _NoReplyResult:
         tool_name = getattr(getattr(tool_call, "function", None), "name", "")
@@ -1062,7 +1094,7 @@ class RyoAgent:
 
     @staticmethod
     def _append_rejected_tool_calls(
-        messages: list[dict[str, Any]],
+        messages: list[ChatMessage],
         tool_calls: list[Any],
         *,
         reason: str,

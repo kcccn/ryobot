@@ -114,6 +114,7 @@ class FakePlugin(BasePlugin):
             repo=event.repo,
             is_pull_request=(issue_number == 77),
             is_patrol=True,
+            head_ref="feat/test-pr" if issue_number == 77 else "",
         )
 
     async def send_reply(
@@ -172,6 +173,10 @@ class DispatchWorkflowTestSkill(MutatingSkill):
     name = "dispatch_workflow"
 
 
+class CreatePRReviewTestSkill(MutatingSkill):
+    name = "create_pr_review"
+
+
 class TrustedReadSkill(EchoSkill):
     name = "trusted_read"
     description = "Read broader trusted-only context."
@@ -212,6 +217,11 @@ class SearchRepoContextTestSkill(EchoSkill):
 class ReadThreadMetaTestSkill(EchoSkill):
     name = "read_thread_meta"
     description = "Read precise issue or PR metadata."
+
+
+class ReadIssueMemoryTestSkill(EchoSkill):
+    name = "read_issue_memory"
+    description = "Read the current issue memory."
 
 
 def build_response(message: FakeMessage) -> FakeResponse:
@@ -571,7 +581,74 @@ async def test_discussion_limit_forces_conclusion_in_same_session() -> None:
     await agent.run(raw_event={})
 
     assert plugin.updated_runtime_states[-1].last_routing.discussion_count == 3
-    assert plugin.sent_replies[-1][1] == "讨论到此为止，当前结论已经足够了。"
+
+
+@pytest.mark.asyncio
+async def test_pr_review_submission_ends_session_without_extra_signoff() -> None:
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="street lurker",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=patrol_event,
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "review the active PR",
+                            "internal_emotion": "focused",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 88,
+                            "action_decision": {
+                                "mode": "act_directly",
+                                "will_reply": True,
+                                "will_act": True,
+                                "execution_identity": "self",
+                                "comment_kind": "response",
+                                "handoff_to": None,
+                                "handoff_reason": "",
+                                "continue_session": False,
+                                "done": True,
+                                "target_issue_number": 77,
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-review",
+                            function=FakeFunction(name="create_pr_review", arguments='{"text":"review"}'),
+                        )
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+        ],
+        skills=[CreatePRReviewTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    assert plugin.sent_replies == []
+    assert plugin.resolved_targets == [77]
+    assert len(fake_completions.calls) == 2
+    assert plugin.updated_runtime_states[-1].last_routing.reason == "create_pr_review"
 
 
 @pytest.mark.asyncio
@@ -1197,6 +1274,49 @@ async def test_decision_prompt_prefers_memory_before_repo_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_repo_scan_hides_read_issue_memory_from_will_tools() -> None:
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-patrol",
+            message="street lurker",
+            author="system",
+            author_association="OWNER",
+            issue_id="",
+            issue_number=0,
+            comment_id=0,
+            owner="acme",
+            repo="widgets",
+            is_patrol=True,
+        ),
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "nothing to do",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            )
+        ],
+        skills=[ReadIssueMemoryTestSkill(), RetrieveMemoryTestSkill(), SearchRepoContextTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    tool_names = [tool["function"]["name"] for tool in fake_completions.calls[0]["tools"]]
+    assert tool_names == ["retrieve_memory", "search_repo_context"]
+
+
+@pytest.mark.asyncio
 async def test_decision_prompt_mentions_read_thread_meta_and_current_human_intent() -> None:
     plugin = FakePlugin(
         event=PluginEvent(
@@ -1266,6 +1386,65 @@ async def test_will_stage_uses_independent_iteration_budget() -> None:
 
     assert len(fake_completions.calls) == 8
     assert plugin.sent_replies == []
+
+
+@pytest.mark.asyncio
+async def test_will_tool_budget_exhaustion_immediately_forces_json_repair() -> None:
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="street lurker",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=patrol_event,
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
+    tool_calls = [
+        FakeToolCall(
+            id=f"call-{i}",
+            function=FakeFunction(name="echo", arguments=json.dumps({"text": f"probe-{i}"})),
+        )
+        for i in range(13)
+    ]
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(FakeMessage(tool_calls=tool_calls)),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "budget exhausted",
+                            "internal_emotion": "firm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    assert len(fake_completions.calls) == 2
+    second_call_messages = fake_completions.calls[1]["messages"]
+    assert any(
+        msg.get("role") == "user" and "tool-call budget is exhausted" in str(msg.get("content", ""))
+        for msg in second_call_messages
+    )
+    assert any(
+        msg.get("role") == "tool" and msg.get("content") == "Tool call skipped: budget exhausted."
+        for msg in second_call_messages
+    )
 
 
 @pytest.mark.asyncio

@@ -131,6 +131,12 @@ class GitHubPlugin(BasePlugin):
             f"/repos/{event.owner}/{event.repo}/issues/{issue_number}"
         )
         is_pull_request = "pull_request" in issue
+        head_ref = ""
+        if is_pull_request:
+            pr = await self._api.get_json(
+                f"/repos/{event.owner}/{event.repo}/pulls/{issue_number}"
+            )
+            head_ref = str(((pr.get("head") or {}).get("ref")) or "")
         title = str(issue.get("title") or "")
         body = str(issue.get("body") or "")
         kind = "PR" if is_pull_request else "Issue"
@@ -153,6 +159,7 @@ class GitHubPlugin(BasePlugin):
             repo=event.repo,
             is_pull_request=is_pull_request,
             is_patrol=True,
+            head_ref=head_ref,
         )
 
     async def send_reply(
@@ -263,6 +270,7 @@ class GitHubPlugin(BasePlugin):
             owner=str(owner),
             repo=str(repo),
             is_pull_request=True,
+            head_ref=str(((pr_.get("head") or {}).get("ref")) or ""),
         )
 
     def _parse_review_comment(self, raw: dict[str, Any], owner: str, repo: str, action: str) -> PluginEvent:
@@ -283,6 +291,7 @@ class GitHubPlugin(BasePlugin):
             owner=str(owner),
             repo=str(repo),
             is_pull_request=True,
+            head_ref=str(((pr_.get("head") or {}).get("ref")) or ""),
         )
 
     def _parse_patrol(self, raw: dict[str, Any], owner: str, repo: str) -> PluginEvent:

@@ -17,6 +17,7 @@ from platforms.github.skills import (
     CommitMemory,
     CreateBranch,
     CreateIssue,
+    CreatePRReview,
     CreatePullRequest,
     DispatchWorkflow,
     ListFiles,
@@ -63,6 +64,23 @@ def with_pr_context() -> Any:
         owner="acme",
         repo="widgets",
         is_pull_request=True,
+        head_ref="feat/example-pr",
+    )
+    return set_skill_context(event=event, subconscious={"mode": "focus"})
+
+
+def with_patrol_context() -> Any:
+    event = PluginEvent(
+        event_id="evt-patrol",
+        message="patrol",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
     )
     return set_skill_context(event=event, subconscious={"mode": "focus"})
 
@@ -98,6 +116,26 @@ async def test_read_issue_memory_uses_current_issue_context() -> None:
     assert captured["url"].endswith("/repos/acme/widgets/issues/12")
     assert "Bug in widget flow" in result
     assert "Steps to reproduce" in result
+
+
+@pytest.mark.asyncio
+async def test_read_issue_memory_returns_repo_scan_sentinel() -> None:
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: pytest.fail(f"unexpected request: {request.url}")),
+        base_url="https://api.github.test",
+    )
+    skill = ReadIssueMemory(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_patrol_context()
+    try:
+        result = await skill.execute()
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert result == (
+        "No current thread in repo-scan. read_issue_memory is unavailable here; "
+        "use retrieve_memory or search_repo_context instead."
+    )
 
 
 @pytest.mark.asyncio
@@ -364,6 +402,85 @@ async def test_search_repo_context_excludes_memory_and_deleted_labels() -> None:
     assert '-label:"🗑️ deleted"' in query
     assert "[Issue]" in result
     assert "[PR]" in result
+
+
+@pytest.mark.asyncio
+async def test_read_file_defaults_to_pr_head_ref() -> None:
+    captured: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append((request.url.path, request.url.params.get("ref", "")))
+        return httpx.Response(
+            200,
+            json={
+                "type": "file",
+                "size": 11,
+                "content": "aGVsbG8gd29ybGQ=",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReadFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_pr_context()
+    try:
+        result = await skill.execute(path="backend/app/core/engine.py")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured == [("/repos/acme/widgets/contents/backend/app/core/engine.py", "feat/example-pr")]
+    assert "ref feat/example-pr" in result
+
+
+@pytest.mark.asyncio
+async def test_list_files_defaults_to_pr_head_ref() -> None:
+    captured: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append((request.url.path, request.url.params.get("ref", "")))
+        return httpx.Response(200, json=[{"name": "engine.py", "type": "file", "size": 123}])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ListFiles(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_pr_context()
+    try:
+        result = await skill.execute(path="backend/app/core")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured == [("/repos/acme/widgets/contents/backend/app/core", "feat/example-pr")]
+    assert "ref: feat/example-pr" in result
+
+
+@pytest.mark.asyncio
+async def test_create_pr_review_downgrades_request_changes_for_self_pr() -> None:
+    requests: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        requests.append((request.method, request.url.path, body))
+        if request.method == "GET" and request.url.path.endswith("/pulls/77"):
+            return httpx.Response(200, json={"number": 77, "user": {"login": "github-actions[bot]"}})
+        if request.method == "GET" and request.url.path == "/user":
+            return httpx.Response(200, json={"login": "github-actions[bot]"})
+        if request.method == "POST" and request.url.path.endswith("/pulls/77/reviews"):
+            return httpx.Response(200, json={"state": "COMMENTED", "id": 1234})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = CreatePRReview(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_pr_context()
+    try:
+        result = await skill.execute(pr_number=77, event="REQUEST_CHANGES", body="Need fixes")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    review_request = next(body for method, path, body in requests if method == "POST" and path.endswith("/pulls/77/reviews"))
+    assert review_request is not None
+    assert review_request["event"] == "COMMENT"
+    assert result.startswith("GitHub disallows REQUEST_CHANGES on self-authored PRs; submitted COMMENT instead.")
 
 
 @pytest.mark.asyncio

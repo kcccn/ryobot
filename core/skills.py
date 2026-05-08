@@ -30,6 +30,7 @@ def set_skill_context(
         "repo": event.repo,
         "is_pull_request": event.is_pull_request,
         "is_patrol": event.is_patrol,
+        "head_ref": event.head_ref,
         "subconscious": dict(subconscious or {}),
     }
     return _SKILL_CONTEXT.set(context)

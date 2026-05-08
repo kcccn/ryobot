@@ -236,6 +236,23 @@ class GitHubSkillBase(BaseSkill):
             raise RuntimeError("GitHub skill context is not available.")
         return context
 
+    @staticmethod
+    def _default_ref_for_context(context: dict[str, Any]) -> str:
+        if context.get("is_pull_request") and context.get("head_ref"):
+            return str(context["head_ref"])
+        return ""
+
+    @classmethod
+    def _effective_ref(cls, context: dict[str, Any], requested_ref: str) -> str:
+        requested = str(requested_ref or "").strip()
+        if requested:
+            return requested
+        return cls._default_ref_for_context(context)
+
+    async def _current_authenticated_login(self) -> str:
+        profile = await self._api.get_json("/user")
+        return str(profile.get("login") or "")
+
     async def _fetch_paginated(self, path: str, *, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         page = 1
         results: list[dict[str, Any]] = []
@@ -367,6 +384,11 @@ class ReadIssueMemory(GitHubSkillBase):
 
     async def execute(self, **kwargs: Any) -> str:
         context = self._require_context()
+        if int(context.get("issue_number") or 0) <= 0:
+            return (
+                "No current thread in repo-scan. read_issue_memory is unavailable here; "
+                "use retrieve_memory or search_repo_context instead."
+            )
         issue = await self._api.get_json(
             f"/repos/{context['owner']}/{context['repo']}/issues/{context['issue_number']}"
         )
@@ -871,9 +893,18 @@ class CreatePRReview(GitHubSkillBase):
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
+        effective_event = args.event
+        if args.event == "REQUEST_CHANGES":
+            pr = await self._api.get_json(
+                f"/repos/{context['owner']}/{context['repo']}/pulls/{args.pr_number}",
+            )
+            pr_author = str((pr.get("user") or {}).get("login") or "")
+            viewer_login = await self._current_authenticated_login()
+            if pr_author and viewer_login and pr_author == viewer_login:
+                effective_event = "COMMENT"
 
         review_body: dict[str, Any] = {
-            "event": args.event,
+            "event": effective_event,
         }
         if args.body:
             review_body["body"] = self._bot_prefix() + sanitize_mentions(args.body)
@@ -898,8 +929,14 @@ class CreatePRReview(GitHubSkillBase):
                 f"GitHub API error ({exc.response.status_code}): "
                 f"{exc.response.text[:1000]}"
             )
+        if effective_event != args.event:
+            return (
+                f"GitHub disallows REQUEST_CHANGES on self-authored PRs; submitted {effective_event} instead.\n"
+                f"State: {result.get('state', '?')}\n"
+                f"ID: {result.get('id', '?')}"
+            )
         return (
-            f"Submitted {args.event} review on PR #{args.pr_number}\n"
+            f"Submitted {effective_event} review on PR #{args.pr_number}\n"
             f"State: {result.get('state', '?')}\n"
             f"ID: {result.get('id', '?')}"
         )
@@ -1193,6 +1230,7 @@ class ListFiles(GitHubSkillBase):
         "List files and directories at a given path in the repository. "
         "Use this to explore the project structure. Pass an empty string for the root directory. "
         "Optionally provide a ref (branch, tag, or commit SHA) to list files on a non-default branch. "
+        "When the current thread is a pull request and ref is omitted, this defaults to the PR head branch. "
         "Returns file/directory names, types, and sizes."
     )
     args_model = ListFilesArgs
@@ -1201,8 +1239,9 @@ class ListFiles(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
         params: dict[str, Any] = {}
-        if args.ref:
-            params["ref"] = args.ref
+        effective_ref = self._effective_ref(context, args.ref)
+        if effective_ref:
+            params["ref"] = effective_ref
         contents = await self._api.get_json(
             f"/repos/{context['owner']}/{context['repo']}/contents/{args.path}",
             params=params if params else None,
@@ -1212,7 +1251,7 @@ class ListFiles(GitHubSkillBase):
         if not contents:
             return f"Directory is empty: {args.path or '/'}"
 
-        ref_note = f" (ref: {args.ref})" if args.ref else ""
+        ref_note = f" (ref: {effective_ref})" if effective_ref else ""
         lines: list[str] = [f"Contents of {args.path or '/'}{ref_note}:"]
         for item in contents[: args.limit]:
             item_type = item.get("type", "?")
@@ -1229,7 +1268,8 @@ class ReadFile(GitHubSkillBase):
         "Read the content of a file in the repository. "
         "Provide the full path relative to the repository root. "
         "Optionally provide a ref (branch, tag, or commit SHA) to read from a "
-        "non-default branch. Returns the decoded file content."
+        "non-default branch. When the current thread is a pull request and ref is omitted, "
+        "this defaults to the PR head branch. Returns the decoded file content."
     )
     args_model = ReadFileArgs
 
@@ -1239,8 +1279,9 @@ class ReadFile(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
         params: dict[str, Any] = {}
-        if args.ref:
-            params["ref"] = args.ref
+        effective_ref = self._effective_ref(context, args.ref)
+        if effective_ref:
+            params["ref"] = effective_ref
         item = await self._api.get_json(
             f"/repos/{context['owner']}/{context['repo']}/contents/{args.path}",
             params=params if params else None,
@@ -1263,10 +1304,14 @@ class ReadFile(GitHubSkillBase):
         max_chars = max_chars_from_env("RYOBOT_MAX_FILE_CHARS", 30000)
         lines = decoded.split("\n")
         truncated = truncate_text(decoded, max_chars)
+        ref_note = f", ref {effective_ref}" if effective_ref else ""
         if len(decoded) > max_chars:
-            header = f"File: {args.path} ({len(lines)} lines, {size} bytes, truncated to {max_chars} chars)\n\n"
+            header = (
+                f"File: {args.path} ({len(lines)} lines, {size} bytes{ref_note}, "
+                f"truncated to {max_chars} chars)\n\n"
+            )
         else:
-            header = f"File: {args.path} ({len(lines)} lines, {size} bytes)\n\n"
+            header = f"File: {args.path} ({len(lines)} lines, {size} bytes{ref_note})\n\n"
         return header + truncated
 
 

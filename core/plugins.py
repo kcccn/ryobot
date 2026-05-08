@@ -20,6 +20,7 @@ class PluginEvent(BaseModel):
     repo: str
     is_pull_request: bool = False
     is_patrol: bool = False
+    head_ref: str = ""
 
 
 class HistorySnapshot(BaseModel):
