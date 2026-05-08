@@ -67,6 +67,8 @@ class ActionDecision(BaseModel):
     comment_kind: str = "response"
     handoff_to: str | None = None
     handoff_reason: str = ""
+    focus_summary: str = ""
+    context_issue_numbers: list[int] = Field(default_factory=list)
     continue_session: bool = False
     done: bool = False
     target_issue_number: int | None = None

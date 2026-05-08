@@ -28,6 +28,9 @@ DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS = 180
 NO_REPLY_TOOL_NAME = "no_reply"
 LOG_TRUNCATE = 500
 MEMORY_MUTATION_TOOL_NAMES = frozenset({"commit_memory", "refine_memory", "archive_memory"})
+MEMORY_REFLECTION_TOOL_NAMES = frozenset(
+    {"retrieve_memory", "search_repo_memory", *MEMORY_MUTATION_TOOL_NAMES}
+)
 PASSIVE_EXECUTION_MODES = frozenset({"reply_brief", "reply_with_plan", "ask_clarifying_question", "act_directly"})
 ALL_EXECUTION_MODES = PASSIVE_EXECUTION_MODES | {"stay_silent"}
 VISIBLE_COMMENT_KINDS = frozenset({"response", "discussion", "handoff", "final"})
@@ -641,16 +644,29 @@ class RyoAgent:
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
         self._log_available_tools("reflection", tools)
+        json_repair_only = False
+        repair_attempts = 0
         try:
             for i in range(self.max_iterations):
                 _log(f"--- reflection iteration {i + 1}/{self.max_iterations} ---")
                 t_start = time.monotonic()
-                response = await self._create_completion_with_retry(messages=messages, tools=tools)
+                active_tools: list[dict[str, Any]] = [] if json_repair_only else tools
+                response = await self._create_completion_with_retry(messages=messages, tools=active_tools)
                 t_elapsed = time.monotonic() - t_start
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
                 self._log_stage_response("reflection", assistant_message, elapsed_seconds=t_elapsed)
                 if tool_calls:
+                    if json_repair_only:
+                        _log("WARN: tool calls are no longer allowed during reflection JSON repair")
+                        self._append_rejected_tool_calls(
+                            messages,
+                            tool_calls,
+                            reason="Reflection JSON repair mode — no more tool calls allowed",
+                            output_name="ReflectionDecision",
+                            fallback_name="noop",
+                        )
+                        continue
                     self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     for tool_call in tool_calls:
@@ -676,7 +692,26 @@ class RyoAgent:
                     decision = ReflectionDecision.model_validate_json(reflection_text)
                 except ValidationError as exc:
                     _log(f"WARN: invalid reflection JSON: {_truncate_log(exc)}")
-                    return
+                    repair_attempts += 1
+                    if repair_attempts >= 2:
+                        decision = ReflectionDecision(
+                            action="noop",
+                            summary="reflection JSON repair exhausted",
+                        )
+                        _log(f"reflection result: {decision.action} {decision.summary[:LOG_TRUNCATE]}")
+                        return
+                    json_repair_only = True
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your previous reflection output was invalid JSON. "
+                                "On the next turn, output ONLY the raw ReflectionDecision JSON object. "
+                                "Do not call tools. Do not wrap the JSON in markdown or explanation."
+                            ),
+                        }
+                    )
+                    continue
                 _log(f"reflection result: {decision.action} {decision.summary[:LOG_TRUNCATE]}")
                 return
         finally:
@@ -823,7 +858,7 @@ class RyoAgent:
             + "\n\n你现在处于第一阶段：只能做意愿判断，不能生成公开回复。"
             "\n你必须最终只输出一个 JSON 对象，严格匹配以下结构："
             '\n{"context_analysis":"...","internal_emotion":"...","biological_clock_impact":"...",'
-            '"motivation_score":0,"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","handoff_to":null,"handoff_reason":"","continue_session":false,"done":false,"target_issue_number":null}}'
+            '"motivation_score":0,"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","handoff_to":null,"handoff_reason":"","focus_summary":"","context_issue_numbers":[],"continue_session":false,"done":false,"target_issue_number":null}}'
             "\n规则："
             "\n1. 当前看到的上下文是故意片面的；如果信息不够，先使用只读工具继续了解。"
             "\n2. 先排除 coordination、mind issue、memory 这类 bot 内务；默认不要把它们当候选工作。"
@@ -842,9 +877,12 @@ class RyoAgent:
             "\n11. execution_identity='self' 表示当前 bot 自己执行这一轮；如果你要交给别人，填写 handoff_to，并把 comment_kind 设成 handoff 或 discussion。"
             "\n12. 公开技术讨论最多 2-3 轮；如果已经讨论过几轮，下一步要么收敛成 final，要么 handoff，要么提出唯一关键阻塞问题。"
             "\n13. 只有当你真的准备公开发言时，will_reply 才能为 true；只有当你真的准备直接执行动作时，will_act 才能为 true。"
-            "\n14. continue_session=true 表示这一轮之后 session 还要继续；done=true 表示当前事项已经收口。二者不能同时为 true。"
-            "\n15. 不要输出 Markdown，不要解释，不要包裹代码块。"
-            "\n16. motivation_score 评分锚定（0-100 整数）："
+            "\n14. 非 stay_silent 决策必须提供非空 focus_summary，用一句话说明这一轮唯一要完成的目标。"
+            "\n15. context_issue_numbers 用来列出 reply 阶段必须先核实的 companion threads；它只提供上下文约束，不会自动改变 target。"
+            "\n16. continue_session=true 表示这一轮之后 session 还要继续；done=true 表示当前事项已经收口。二者不能同时为 true。"
+            "\n17. 如果雷达里出现 Potential overlapping threads，先核实这些线程之间的关系，再决定是保留、关闭、交叉引用，还是忽略。"
+            "\n18. 不要输出 Markdown，不要解释，不要包裹代码块。"
+            "\n19. motivation_score 评分锚定（0-100 整数）："
             "\n  0-29: 无趣/无关/已经答复过，不应说话"
             "\n  30-59: 常规跟进，有轻微价值但不必抢麦"
             "\n  60-79: 发现了值得讨论的技术问题或可改进点"
@@ -866,24 +904,30 @@ class RyoAgent:
             "\n3. 不要为了已经完成的工作再制造重复 PR。"
             "\n4. 判断 PR 是否 merged，优先 read_thread_meta，不要先靠模糊搜索猜。"
         )
+        if decision.action_decision.focus_summary:
+            prompt += f"\n5. 本轮唯一焦点：{decision.action_decision.focus_summary}"
+        if decision.action_decision.context_issue_numbers:
+            refs = ", ".join(f"#{issue_number}" for issue_number in decision.action_decision.context_issue_numbers)
+            prompt += f"\n6. 在执行前，先核实这些 companion threads：{refs}。不要跳过。"
         if mode == "reply_brief":
-            prompt += "\n5. 当前 mode=reply_brief：直接回答当前问题，控制在 1-3 句，不要复述长篇调查过程。"
+            prompt += "\n7. 当前 mode=reply_brief：直接回答当前问题，控制在 1-3 句，不要复述长篇调查过程。"
         elif mode == "reply_with_plan":
-            prompt += "\n5. 当前 mode=reply_with_plan：简洁说明现状，再给出最小必要的下一步建议。"
+            prompt += "\n7. 当前 mode=reply_with_plan：简洁说明现状，再给出最小必要的下一步建议。"
         elif mode == "ask_clarifying_question":
-            prompt += "\n5. 当前 mode=ask_clarifying_question：只问一个最关键的阻塞问题，不要顺手长篇分析。"
+            prompt += "\n7. 当前 mode=ask_clarifying_question：只问一个最关键的阻塞问题，不要顺手长篇分析。"
         elif mode == "act_directly":
-            prompt += "\n5. 当前 mode=act_directly：以完成动作和收尾为优先；若需要公开说明，保持简短。"
+            prompt += "\n7. 当前 mode=act_directly：以完成动作和收尾为优先；若需要公开说明，保持简短。"
         elif event.is_patrol:
-            prompt += "\n5. 当前 mode=stay_silent：只有在你已经确认没有值得推进的机会时才允许结束。"
+            prompt += "\n7. 当前 mode=stay_silent：只有在你已经确认没有值得推进的机会时才允许结束。"
         if comment_kind == "discussion":
-            prompt += "\n6. 当前 comment_kind=discussion：给出一条短、聚焦、工程化的公开技术评论。必须回应前一个 bot 的观点，并推动收敛，不要复述现状。"
+            prompt += "\n8. 当前 comment_kind=discussion：给出一条短、聚焦、工程化的公开技术评论。必须回应前一个 bot 的观点，并推动收敛，不要复述现状。"
         elif comment_kind == "handoff":
-            prompt += "\n6. 当前 comment_kind=handoff：写一条显式交接评论，说明已完成到哪里、为什么要交给下一个 bot、下一步该做什么。"
+            prompt += "\n8. 当前 comment_kind=handoff：写一条显式交接评论，说明已完成到哪里、为什么要交给下一个 bot、下一步该做什么。"
         elif comment_kind == "final":
-            prompt += "\n6. 当前 comment_kind=final：这是一条收口评论，必须清楚说明最终结论、最终动作或当前唯一阻塞点。"
+            prompt += "\n8. 当前 comment_kind=final：这是一条收口评论，必须清楚说明最终结论、最终动作或当前唯一阻塞点。"
         else:
-            prompt += "\n6. 当前 comment_kind=response：这是对当前线程的直接公开回应。"
+            prompt += "\n8. 当前 comment_kind=response：这是对当前线程的直接公开回应。"
+        prompt += "\n9. 不允许偏离本轮唯一焦点去做无关评论；如果发现新话题，只有在它直接影响当前焦点时才能提及。"
         return prompt
 
     def _decision_user_prompt(self, *, event: PluginEvent, history: Any, session: SessionState | None = None) -> str:
@@ -912,13 +956,14 @@ class RyoAgent:
             + self._mind_context(history)
             + "\n\n你现在处于任务结束后的反思阶段。"
             "\n你的目标是判断这次互动是否值得写入、修订或归档长期记忆。"
-            "\n可用工具只包含长期记忆 CRUD 和只读检索。"
+            "\n可用工具只包含长期记忆 CRUD 和长期记忆检索。"
             "\n规则："
             "\n1. 只有长期有效、未来大概率还会有价值的信息才值得记忆。"
-            "\n2. 如果要改记忆，优先先读取或检索已有记忆，再决定 commit_memory / refine_memory / archive_memory。"
+            "\n2. 当前任务上下文只来自你已经看到的 history.messages；不要再把当前 thread 当 memory 去读。"
+            "\n3. 如果要改记忆，优先先读取或检索已有记忆，再决定 commit_memory / refine_memory / archive_memory。"
             "\n  live mind issue 不是长期记忆库；带 `🧠 memory` 标签的 closed issues 才是长期记忆库。"
-            "\n3. 如果没有值得沉淀的长期知识，输出 {\"action\":\"noop\",\"summary\":\"...\"}。"
-            "\n4. 如果你调用了记忆工具，最后仍然只输出一个 JSON 对象，action 只能是 noop、commit_memory、refine_memory 或 archive_memory。"
+            "\n4. 如果没有值得沉淀的长期知识，输出 {\"action\":\"noop\",\"summary\":\"...\"}。"
+            "\n5. 如果你调用了记忆工具，最后仍然只输出一个 JSON 对象，action 只能是 noop、commit_memory、refine_memory 或 archive_memory。"
         )
 
     def _reflection_user_prompt(self, *, event: PluginEvent, history: Any) -> str:
@@ -961,6 +1006,10 @@ class RyoAgent:
             return
         if not (decision.action_decision.will_reply or decision.action_decision.will_act):
             raise ValueError("Non-silent decisions must set will_reply or will_act.")
+        if not decision.action_decision.focus_summary.strip():
+            raise ValueError("Non-silent decisions must provide a non-empty focus_summary.")
+        if any(issue_number <= 0 for issue_number in decision.action_decision.context_issue_numbers):
+            raise ValueError("context_issue_numbers may only contain positive issue numbers.")
         if decision.action_decision.done and decision.action_decision.continue_session:
             raise ValueError("done and continue_session cannot both be true.")
         if decision.action_decision.comment_kind == "discussion":
@@ -1096,7 +1145,7 @@ class RyoAgent:
     def _available_reflection_skills(self, event: PluginEvent) -> Sequence[BaseSkill]:
         skills: list[BaseSkill] = []
         for skill in self.skills:
-            if skill.mutates_state and skill.name not in MEMORY_MUTATION_TOOL_NAMES:
+            if skill.name not in MEMORY_REFLECTION_TOOL_NAMES:
                 continue
             if skill.requires_trusted_author and not _is_trusted_mutation_author(event.author_association):
                 continue
@@ -1204,6 +1253,8 @@ class RyoAgent:
         tool_calls: list[Any],
         *,
         reason: str,
+        output_name: str = "WillDecision",
+        fallback_name: str = "stay_silent",
     ) -> None:
         """Append a user message explaining that tool calls were rejected.
 
@@ -1220,8 +1271,8 @@ class RyoAgent:
                     "ALL tools have been permanently removed — you CANNOT call any more tools, "
                     "regardless of what the system prompt says about gathering information. "
                     "You must synthesize what you already know. "
-                    "Output ONLY the WillDecision JSON object, with no surrounding text. "
-                    "If you fail to produce valid JSON, you will fall back to stay_silent "
+                    f"Output ONLY the {output_name} JSON object, with no surrounding text. "
+                    f"If you fail to produce valid JSON, you will fall back to {fallback_name} "
                     "and all your analysis will be lost."
                 ),
             }

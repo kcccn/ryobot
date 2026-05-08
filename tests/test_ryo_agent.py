@@ -214,6 +214,11 @@ class SearchRepoContextTestSkill(EchoSkill):
     description = "Search repo-wide issues and PRs."
 
 
+class SearchRepoMemoryTestSkill(EchoSkill):
+    name = "search_repo_memory"
+    description = "Search repository memory."
+
+
 class ReadThreadMetaTestSkill(EchoSkill):
     name = "read_thread_meta"
     description = "Read precise issue or PR metadata."
@@ -335,7 +340,7 @@ async def test_run_replies_after_passing_will_decision() -> None:
                             "internal_emotion": "awake",
                             "biological_clock_impact": "daytime",
                             "motivation_score": 90,
-                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                            "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Post the final answer on the current thread."},
                         }
                     )
                 )
@@ -369,7 +374,7 @@ async def test_passive_event_replies_even_when_motivation_is_below_threshold() -
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 15,
-                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None},
+                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None, "focus_summary": "Answer the factual question briefly."},
                         }
                     )
                 )
@@ -405,6 +410,8 @@ async def test_passive_final_comment_stops_session_without_second_bot() -> None:
                                 "comment_kind": "final",
                                 "handoff_to": None,
                                 "handoff_reason": "",
+                                "focus_summary": "Post the final cleanup summary and end the session.",
+                                "context_issue_numbers": [],
                                 "continue_session": False,
                                 "done": True,
                                 "target_issue_number": None,
@@ -417,6 +424,7 @@ async def test_passive_final_comment_stops_session_without_second_bot() -> None:
             build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
             build_response(FakeMessage(content="this extra response should never be consumed")),
         ],
+        skills=[EchoSkill(), RetrieveMemoryTestSkill()],
     )
 
     await agent.run(raw_event={})
@@ -460,6 +468,8 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
                                 "comment_kind": "discussion",
                                 "handoff_to": None,
                                 "handoff_reason": "",
+                                "focus_summary": "State the architecture constraint before implementation starts.",
+                                "context_issue_numbers": [],
                                 "continue_session": True,
                                 "done": False,
                                 "target_issue_number": None,
@@ -485,6 +495,8 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
                                 "comment_kind": "handoff",
                                 "handoff_to": "coder",
                                 "handoff_reason": "明确实现任务，下一步该直接写代码并提 PR。",
+                                "focus_summary": "Hand off the clarified implementation task to coder.",
+                                "context_issue_numbers": [],
                                 "continue_session": True,
                                 "done": False,
                                 "target_issue_number": None,
@@ -510,6 +522,8 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
                                 "comment_kind": "final",
                                 "handoff_to": None,
                                 "handoff_reason": "",
+                                "focus_summary": "Finish the implementation and close the session.",
+                                "context_issue_numbers": [],
                                 "continue_session": False,
                                 "done": True,
                                 "target_issue_number": None,
@@ -571,17 +585,19 @@ async def test_discussion_limit_forces_conclusion_in_same_session() -> None:
                     "internal_emotion": "engaged",
                     "biological_clock_impact": "neutral",
                     "motivation_score": 90,
-                    "action_decision": {
-                        "mode": "reply_with_plan",
-                        "will_reply": True,
-                        "will_act": False,
-                        "execution_identity": "self",
-                        "comment_kind": "discussion",
-                        "handoff_to": None,
-                        "handoff_reason": "",
-                        "continue_session": True,
-                        "done": False,
-                        "target_issue_number": 12,
+                        "action_decision": {
+                            "mode": "reply_with_plan",
+                            "will_reply": True,
+                            "will_act": False,
+                            "execution_identity": "self",
+                            "comment_kind": "discussion",
+                            "handoff_to": None,
+                            "handoff_reason": "",
+                            "focus_summary": "Advance the public technical discussion by one focused point.",
+                            "context_issue_numbers": [],
+                            "continue_session": True,
+                            "done": False,
+                            "target_issue_number": 12,
                     },
                 }
             )
@@ -604,17 +620,19 @@ async def test_discussion_limit_forces_conclusion_in_same_session() -> None:
                             "internal_emotion": "settled",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 85,
-                            "action_decision": {
-                                "mode": "reply_with_plan",
-                                "will_reply": True,
-                                "will_act": False,
-                                "execution_identity": "self",
-                                "comment_kind": "final",
-                                "handoff_to": None,
-                                "handoff_reason": "",
-                                "continue_session": False,
-                                "done": True,
-                                "target_issue_number": 12,
+                        "action_decision": {
+                            "mode": "reply_with_plan",
+                            "will_reply": True,
+                            "will_act": False,
+                            "execution_identity": "self",
+                            "comment_kind": "final",
+                            "handoff_to": None,
+                            "handoff_reason": "",
+                            "focus_summary": "Conclude the discussion with a final position.",
+                            "context_issue_numbers": [],
+                            "continue_session": False,
+                            "done": True,
+                            "target_issue_number": 12,
                             },
                         }
                     )
@@ -659,17 +677,19 @@ async def test_pr_review_submission_ends_session_without_extra_signoff() -> None
                             "internal_emotion": "focused",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 88,
-                            "action_decision": {
-                                "mode": "act_directly",
-                                "will_reply": True,
-                                "will_act": True,
-                                "execution_identity": "self",
-                                "comment_kind": "response",
-                                "handoff_to": None,
-                                "handoff_reason": "",
-                                "continue_session": False,
-                                "done": True,
-                                "target_issue_number": 77,
+                        "action_decision": {
+                            "mode": "act_directly",
+                            "will_reply": True,
+                            "will_act": True,
+                            "execution_identity": "self",
+                            "comment_kind": "response",
+                            "handoff_to": None,
+                            "handoff_reason": "",
+                            "focus_summary": "Submit the PR review on the active target thread.",
+                            "context_issue_numbers": [],
+                            "continue_session": False,
+                            "done": True,
+                            "target_issue_number": 77,
                             },
                         }
                     )
@@ -730,7 +750,7 @@ async def test_run_patrol_resolves_target_before_replying() -> None:
                             "internal_emotion": "curious",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 88,
-                            "action_decision": {"will_reply": True, "target_issue_number": 77},
+                            "action_decision": {"will_reply": True, "target_issue_number": 77, "focus_summary": "Reply on the resolved patrol target."},
                         }
                     )
                 )
@@ -777,7 +797,7 @@ async def test_street_lurker_repo_scan_can_act_without_thread_reply() -> None:
                             "internal_emotion": "itchy",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 91,
-                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                            "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Act directly from repo-scan without a thread reply."},
                         }
                     )
                 )
@@ -840,7 +860,7 @@ async def test_street_lurker_actions_use_street_lurker_fatigue_window() -> None:
                             "internal_emotion": "itchy",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 91,
-                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                            "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Complete the street-lurker action on the chosen opportunity."},
                         }
                     )
                 )
@@ -900,7 +920,7 @@ async def test_street_lurker_reply_stage_exposes_full_mutation_tools_for_trusted
                             "internal_emotion": "ready",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 95,
-                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                            "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Continue the current follow-up despite fatigue."},
                         }
                     )
                 )
@@ -961,7 +981,7 @@ async def test_passive_events_ignore_fatigue_and_still_reply() -> None:
                                 "internal_emotion": "ready",
                                 "biological_clock_impact": "neutral",
                                 "motivation_score": 95,
-                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None},
+                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None, "focus_summary": "Acknowledge the runtime context result briefly."},
                             }
                         )
                     )
@@ -1145,7 +1165,7 @@ async def test_run_sets_runtime_context_for_skills() -> None:
                                 "internal_emotion": "done",
                                 "biological_clock_impact": "neutral",
                                 "motivation_score": 0,
-                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None},
+                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "Test the context.", "context_issue_numbers": [], "target_issue_number": None},
                             }
                         )
                     )
@@ -1389,7 +1409,7 @@ async def test_decision_prompt_mentions_read_thread_meta_and_current_human_inten
                                 "internal_emotion": "calm",
                                 "biological_clock_impact": "neutral",
                                 "motivation_score": 0,
-                                "action_decision": {"mode": "reply_with_plan", "will_reply": True, "will_act": False, "target_issue_number": None},
+                            "action_decision": {"mode": "reply_with_plan", "will_reply": True, "will_act": False, "target_issue_number": None, "focus_summary": "Explain the current status on the existing thread references."},
                             }
                         )
                     )
@@ -1521,7 +1541,7 @@ async def test_reflection_pass_can_commit_memory_after_reply() -> None:
                             "internal_emotion": "alert",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 95,
-                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                            "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Post the public reply before reflecting on memory."},
                         }
                     )
                 )
@@ -1580,7 +1600,7 @@ async def test_reflection_stage_logs_reasoning_and_tool_details(capsys: pytest.C
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 90,
-                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                            "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Post the public reply before checking durable memory."},
                         }
                     )
                 )
@@ -1608,7 +1628,7 @@ async def test_reflection_stage_logs_reasoning_and_tool_details(capsys: pytest.C
     await agent.run(raw_event={})
 
     stderr = capsys.readouterr().err
-    assert "reflection available tools: echo, retrieve_memory" in stderr
+    assert "reflection available tools: retrieve_memory" in stderr
     assert "reflection reasoning" in stderr
     assert "tool calls: ['retrieve_memory']" in stderr
     assert '-> retrieve_memory({"text": "durable fact"})' in stderr
@@ -1629,7 +1649,7 @@ async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 90,
-                            "action_decision": {"will_reply": True, "target_issue_number": None},
+                            "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Post the public reply and finish without memory mutation."},
                         }
                     )
                 )
@@ -1637,7 +1657,7 @@ async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
             build_response(FakeMessage(content="Public reply")),
             build_response(FakeMessage(content='{"action":"noop","summary":"nothing durable"}')),
         ],
-        skills=[EchoSkill(), RetrieveMemoryTestSkill(), SearchRepoContextTestSkill()],
+        skills=[EchoSkill(), RetrieveMemoryTestSkill(), SearchRepoMemoryTestSkill()],
     )
 
     await agent.run(raw_event={})
@@ -1645,4 +1665,4 @@ async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
     assert plugin.sent_replies[0][1] == "Public reply"
     assert len(fake_completions.calls) == 3
     reflection_tool_names = [tool["function"]["name"] for tool in fake_completions.calls[2]["tools"]]
-    assert reflection_tool_names == ["echo", "retrieve_memory", "search_repo_context"]
+    assert reflection_tool_names == ["retrieve_memory", "search_repo_memory"]
