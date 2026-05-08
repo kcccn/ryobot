@@ -100,11 +100,11 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(main, "AsyncOpenAI", FakeAsyncOpenAI)
     monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
     for name in (
-        "ReadIssueMemory", "SearchRepoMemory", "ListOpenIssues", "ListOpenPullRequests",
+        "ReadThreadContext", "ReadIssueMemory", "SearchRepoMemory", "ListOpenIssues", "ListOpenPullRequests",
         "ListRepoLabels", "MergePullRequest", "ReadThreadComments", "ListFiles", "ReadFile",
         "SearchCode", "ReadCodeDiff", "ReadThreadMeta", "CreateIssue", "WriteFile", "CreateBranch",
-        "DeleteBranch", "CreatePullRequest", "CreatePRReview", "AddLabels", "CloseIssue",
-        "CommentOnPR", "ReadWorkflowRun", "RunCommand", "SearchIssues", "UpdateIssue",
+        "DeleteBranch", "CreatePullRequest", "CreatePRReview", "AddLabels", "CloseIssue", "ReopenIssue",
+        "CommentOnThread", "CommentOnPR", "ReadWorkflowRun", "RunCommand", "SearchIssues", "UpdateIssue",
     ):
         monkeypatch.setattr(main, name, FakeSkill)
     monkeypatch.setattr(main, "RyoAgent", FakeRyoAgent)
@@ -120,7 +120,7 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     assert captured["ryo_agent_kwargs"]["fatigue_max_seconds"] == 800
     assert captured["ryo_agent_kwargs"]["street_lurker_fatigue_min_seconds"] == 90
     assert captured["ryo_agent_kwargs"]["street_lurker_fatigue_max_seconds"] == 210
-    assert captured["skill_count"] == 25
+    assert captured["skill_count"] == 28
     assert captured["http_client_closed"] is True
 
 

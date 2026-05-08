@@ -95,6 +95,8 @@ class SessionState:
     handoff_count: int = 0
     responded_once: bool = False
     rounds: int = 0
+    created_issue_titles: set[str] = field(default_factory=set)
+    closed_issue_numbers: set[int] = field(default_factory=set)
 
 
 class RyoAgent:
@@ -203,7 +205,7 @@ class RyoAgent:
                         f"{'PR' if active_event.is_pull_request else 'Issue'} #{active_event.issue_number}"
                     )
 
-                outcome = await self._reply(event=active_event, history=active_history, decision=decision)
+                outcome = await self._reply(event=active_event, history=active_history, decision=decision, session=session)
                 final_outcome = outcome
                 final_event = active_event
                 final_target_issue_number = target_issue_number
@@ -223,6 +225,15 @@ class RyoAgent:
                     session.handoff_count += 1
                 if outcome.visible_comment_posted:
                     session.responded_once = True
+
+                if (
+                    not active_event.is_patrol
+                    and outcome.visible_comment_posted
+                    and decision.action_decision.comment_kind == "final"
+                    and decision.action_decision.comment_kind not in {"discussion", "handoff"}
+                ):
+                    outcome.continue_session = False
+                    outcome.done = True
 
                 if outcome.kind == "handoff_posted" and outcome.next_identity:
                     if session.handoff_count >= MAX_HANDOFFS:
@@ -434,7 +445,14 @@ class RyoAgent:
             ),
         )
 
-    async def _reply(self, *, event: PluginEvent, history: Any, decision: WillDecision) -> ExecutionOutcome:
+    async def _reply(
+        self,
+        *,
+        event: PluginEvent,
+        history: Any,
+        decision: WillDecision,
+        session: SessionState,
+    ) -> ExecutionOutcome:
         system_prompt = self._reply_prompt(history=history, event=event, decision=decision)
         messages: list[ChatMessage] = [
             {"role": "system", "content": system_prompt},
@@ -466,7 +484,14 @@ class RyoAgent:
                     for tool_call in tool_calls:
                         tool_name, args_raw = self._tool_call_details(tool_call)
                         _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
-                        tool_result = await self._execute_tool_call(tool_call, event=event)
+                        tool_result: str | _NoReplyResult = self._session_mutation_preflight(
+                            session=session,
+                            event=event,
+                            tool_name=tool_name,
+                            args_raw=args_raw,
+                        )
+                        if tool_result is None:
+                            tool_result = await self._execute_tool_call(tool_call, event=event)
                         if tool_name == NO_REPLY_TOOL_NAME:
                             try:
                                 reason = json.loads(args_raw).get("reason", "(no reason)")
@@ -504,6 +529,12 @@ class RyoAgent:
                             return ExecutionOutcome(kind="no_action", reason="no_reply")
                         if self._is_mutating_tool(tool_name):
                             executed_tool_names.add(tool_name)
+                            self._record_session_mutation(
+                                session=session,
+                                event=event,
+                                tool_name=tool_name,
+                                args_raw=args_raw,
+                            )
                         _log(f"  <- result: {_truncate_log(tool_result)}")
                         messages.append(
                             {
@@ -512,15 +543,15 @@ class RyoAgent:
                                 "content": str(tool_result),
                             }
                         )
-                        if (
-                            tool_name == "create_pr_review"
-                            and decision.action_decision.comment_kind not in {"discussion", "handoff"}
-                            and not decision.action_decision.continue_session
+                        if self._is_terminal_visible_mutation(
+                            event=event,
+                            tool_name=tool_name,
+                            decision=decision,
                         ):
-                            _log("PR review submitted; treating review as the terminal visible artifact for this session")
+                            _log("Terminal visible mutation completed; ending this passive session now")
                             return ExecutionOutcome(
                                 kind="final_posted",
-                                reason="create_pr_review",
+                                reason=tool_name,
                                 mutated_tool_names=set(executed_tool_names),
                                 continue_session=False,
                                 done=True,
@@ -557,8 +588,12 @@ class RyoAgent:
                         kind=outcome_kind,
                         reason=self._comment_reason(decision=decision, executed_tool_names=executed_tool_names),
                         mutated_tool_names=set(executed_tool_names),
-                        continue_session=decision.action_decision.continue_session,
-                        done=decision.action_decision.done or not decision.action_decision.continue_session,
+                        continue_session=False
+                        if (not event.is_patrol and decision.action_decision.comment_kind == "final")
+                        else decision.action_decision.continue_session,
+                        done=True
+                        if (not event.is_patrol and decision.action_decision.comment_kind == "final")
+                        else (decision.action_decision.done or not decision.action_decision.continue_session),
                         next_identity=decision.action_decision.handoff_to,
                         visible_comment_posted=True,
                     )
@@ -693,7 +728,7 @@ class RyoAgent:
         for skill in self.skills:
             if readonly_only and skill.mutates_state:
                 continue
-            if event.issue_number == 0 and skill.name == "read_issue_memory":
+            if event.issue_number == 0 and skill.name in {"read_issue_memory", "read_thread_context"}:
                 continue
             if not _is_trusted_mutation_author(event.author_association):
                 if skill.mutates_state or skill.requires_trusted_author:
@@ -792,6 +827,8 @@ class RyoAgent:
             "\n规则："
             "\n1. 当前看到的上下文是故意片面的；如果信息不够，先使用只读工具继续了解。"
             "\n2. 先排除 coordination、mind issue、memory 这类 bot 内务；默认不要把它们当候选工作。"
+            "\n  其中：read_thread_context 只读当前线程；live mind issue 是你自己的 open working-memory thread；"
+            "带 `🧠 memory` 标签的 closed issues 是长期记忆库。不要把它们混为一谈。"
             "\n3. 对普通 Issue/PR 事件，先解决当前线程的人类意图，不要一上来升级成全仓库审计。"
             "\n4. 若当前消息或线程里出现明确编号（如 #54），先用 read_thread_meta/read_issue_body 精确核实，再决定是否扩展到 search_repo_context 或代码搜索。"
             "\n5. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
@@ -879,6 +916,7 @@ class RyoAgent:
             "\n规则："
             "\n1. 只有长期有效、未来大概率还会有价值的信息才值得记忆。"
             "\n2. 如果要改记忆，优先先读取或检索已有记忆，再决定 commit_memory / refine_memory / archive_memory。"
+            "\n  live mind issue 不是长期记忆库；带 `🧠 memory` 标签的 closed issues 才是长期记忆库。"
             "\n3. 如果没有值得沉淀的长期知识，输出 {\"action\":\"noop\",\"summary\":\"...\"}。"
             "\n4. 如果你调用了记忆工具，最后仍然只输出一个 JSON 对象，action 只能是 noop、commit_memory、refine_memory 或 archive_memory。"
         )
@@ -895,10 +933,10 @@ class RyoAgent:
             return ""
         return (
             f"\n\n---\n"
-            f"## Your Persistent Mind Issue (#{history.mind_issue_number})\n"
-            f"This is your persistent memory issue. Read it before acting.\n"
+            f"## Your Live Working-Memory Thread (#{history.mind_issue_number})\n"
+            f"This is your current bot working-memory thread, not the `🧠 memory` long-term memory DB. Read it before acting.\n"
             f"Use update_issue with issue_number={history.mind_issue_number} when you need to "
-            f"update long-term memory.\n\n{history.mind_body}\n---\n"
+            f"update your live state. Use memory CRUD tools for long-term memory.\n\n{history.mind_body}\n---\n"
         )
 
     def _validate_decision(self, *, event: PluginEvent, decision: WillDecision, session: SessionState) -> None:
@@ -930,6 +968,8 @@ class RyoAgent:
                 raise ValueError("discussion comment limit reached; you must conclude or hand off.")
             if decision.action_decision.done:
                 raise ValueError("discussion comments must continue the session instead of finishing it immediately.")
+        if decision.action_decision.comment_kind == "final" and decision.action_decision.continue_session:
+            raise ValueError("final comments must conclude the current session.")
         if decision.action_decision.comment_kind == "handoff":
             if not decision.action_decision.handoff_to:
                 raise ValueError("handoff comments must specify handoff_to.")
@@ -986,6 +1026,72 @@ class RyoAgent:
         if decision.action_decision.comment_kind == "final":
             return "finalized"
         return "replied"
+
+    def _session_mutation_preflight(
+        self,
+        *,
+        session: SessionState,
+        event: PluginEvent,
+        tool_name: str,
+        args_raw: str,
+    ) -> str | None:
+        if tool_name == "create_issue":
+            try:
+                parsed = self._parse_tool_arguments(args_raw)
+            except JSONDecodeError:
+                return None
+            title = str(parsed.get("title") or "").strip()
+            if title and title in session.created_issue_titles:
+                return f"Tool blocked: this session already created an issue titled '{title}'."
+        if tool_name == "close_issue":
+            try:
+                parsed = self._parse_tool_arguments(args_raw)
+            except JSONDecodeError:
+                return None
+            issue_number = int(parsed.get("issue_number") or event.issue_number or 0)
+            if issue_number > 0 and issue_number in session.closed_issue_numbers:
+                return f"Tool blocked: issue #{issue_number} was already closed earlier in this session."
+        return None
+
+    def _record_session_mutation(
+        self,
+        *,
+        session: SessionState,
+        event: PluginEvent,
+        tool_name: str,
+        args_raw: str,
+    ) -> None:
+        try:
+            parsed = self._parse_tool_arguments(args_raw)
+        except JSONDecodeError:
+            return
+        if tool_name == "create_issue":
+            title = str(parsed.get("title") or "").strip()
+            if title:
+                session.created_issue_titles.add(title)
+        elif tool_name == "close_issue":
+            issue_number = int(parsed.get("issue_number") or event.issue_number or 0)
+            if issue_number > 0:
+                session.closed_issue_numbers.add(issue_number)
+
+    @staticmethod
+    def _is_terminal_visible_mutation(
+        *,
+        event: PluginEvent,
+        tool_name: str,
+        decision: WillDecision,
+    ) -> bool:
+        if event.is_patrol:
+            return (
+                tool_name == "create_pr_review"
+                and decision.action_decision.comment_kind not in {"discussion", "handoff"}
+                and not decision.action_decision.continue_session
+            )
+        if decision.action_decision.comment_kind in {"discussion", "handoff"}:
+            return False
+        if decision.action_decision.continue_session:
+            return False
+        return tool_name in {"close_issue", "merge_pull_request", "create_pr_review", "reopen_issue"}
 
     def _available_reflection_skills(self, event: PluginEvent) -> Sequence[BaseSkill]:
         skills: list[BaseSkill] = []

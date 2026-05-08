@@ -14,6 +14,7 @@ from platforms.github.skills import (
     ArchiveMemory,
     CloseIssue,
     CommentOnPR,
+    CommentOnThread,
     CommitMemory,
     CreateBranch,
     CreateIssue,
@@ -25,14 +26,18 @@ from platforms.github.skills import (
     ListRepoLabels,
     ReadCodeDiff,
     ReadFile,
+    ReadIssueBody,
     ReadIssueMemory,
     ReadThreadComments,
+    ReadThreadContext,
     ReadThreadMeta,
     ReadWorkflowRun,
     RefineMemory,
+    ReopenIssue,
     RetrieveMemory,
     RunCommand,
     SearchCode,
+    SearchIssues,
     SearchRepoContext,
     SearchRepoMemory,
     WriteFile,
@@ -114,8 +119,10 @@ async def test_read_issue_memory_uses_current_issue_context() -> None:
         await client.aclose()
 
     assert captured["url"].endswith("/repos/acme/widgets/issues/12")
+    assert "Deprecated alias notice" in result
     assert "Bug in widget flow" in result
     assert "Steps to reproduce" in result
+    assert "not the bot's live mind issue" in result
 
 
 @pytest.mark.asyncio
@@ -134,6 +141,57 @@ async def test_read_issue_memory_returns_repo_scan_sentinel() -> None:
 
     assert result == (
         "No current thread in repo-scan. read_issue_memory is unavailable here; "
+        "use retrieve_memory or search_repo_context instead."
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_thread_context_reads_current_thread_only() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "number": 12,
+                "title": "Bug in widget flow",
+                "state": "open",
+                "body": "Steps to reproduce",
+                "labels": [{"name": "bug"}],
+                "user": {"login": "octocat"},
+            },
+        )
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = ReadThreadContext(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute()
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Thread context (current issue/PR, not bot memory):" in result
+    assert "Bug in widget flow" in result
+
+
+@pytest.mark.asyncio
+async def test_read_thread_context_returns_repo_scan_sentinel() -> None:
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: pytest.fail(f"unexpected request: {request.url}")),
+        base_url="https://api.github.test",
+    )
+    skill = ReadThreadContext(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_patrol_context()
+    try:
+        result = await skill.execute()
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert result == (
+        "No current thread in repo-scan. Thread-context tools are unavailable here; "
         "use retrieve_memory or search_repo_context instead."
     )
 
@@ -752,6 +810,32 @@ async def test_close_issue_uses_explicit_issue_number() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reopen_issue_uses_explicit_issue_number() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = request.content.decode()
+        return httpx.Response(200, json={"state": "open"})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = ReopenIssue(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=77)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["url"].endswith("/repos/acme/widgets/issues/77")
+    assert json.loads(captured["body"]) == {"state": "open"}
+    assert result == "Reopened issue #77"
+
+
+@pytest.mark.asyncio
 async def test_comment_on_pr_uses_context_when_pr_number_is_zero() -> None:
     captured: dict[str, str] = {}
 
@@ -777,7 +861,7 @@ async def test_comment_on_pr_uses_context_when_pr_number_is_zero() -> None:
     assert captured["url"].endswith("/repos/acme/widgets/issues/12/comments")
     body = json.loads(captured["body"])
     assert body["body"] == "**bot**\n\nLGTM!"
-    assert "Commented on PR #12" == result
+    assert "Commented on thread #12" == result
 
 
 @pytest.mark.asyncio
@@ -801,7 +885,31 @@ async def test_comment_on_pr_uses_explicit_pr_number() -> None:
         await client.aclose()
 
     assert captured["url"].endswith("/repos/acme/widgets/issues/200/comments")
-    assert "Commented on PR #200" == result
+    assert "Commented on thread #200" == result
+
+
+@pytest.mark.asyncio
+async def test_comment_on_thread_uses_explicit_thread_number() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(201, json={"id": 502})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://api.github.test",
+    )
+    skill = CommentOnThread(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(body="Ship it!", thread_number=200)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert captured["url"].endswith("/repos/acme/widgets/issues/200/comments")
+    assert "Commented on thread #200" == result
 
 
 @pytest.mark.asyncio
@@ -1138,6 +1246,19 @@ async def test_read_thread_comments_reads_issue_comments_and_review_comments() -
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         calls.append(url)
+        if request.url.path.endswith("/issues/77"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": 77,
+                    "title": "Phase 3 PR thread",
+                    "state": "open",
+                    "user": {"login": "octocat"},
+                    "labels": [{"name": "enhancement"}],
+                    "html_url": "https://github.test/acme/widgets/issues/77",
+                    "pull_request": {},
+                },
+            )
         if "/issues/77/comments" in url:
             return httpx.Response(
                 200,
@@ -1327,6 +1448,35 @@ async def test_search_repo_context_hides_internal_artifacts_by_default() -> None
 
 
 @pytest.mark.asyncio
+async def test_search_issues_hides_internal_artifacts_by_default() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "total_count": 3,
+                "items": [
+                    {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [], "html_url": "", "user": {"login": "bot"}},
+                    {"number": 59, "title": "🧠 Ryo Architect", "state": "closed", "labels": [{"name": "🧠 memory"}], "html_url": "", "user": {"login": "bot"}},
+                    {"number": 56, "title": "Human-facing tracker", "state": "open", "labels": [{"name": "enhancement"}], "html_url": "", "user": {"login": "bot"}},
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = SearchIssues(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(query="is:open")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Human-facing tracker" in result
+    assert "RyoBot Coordination" not in result
+    assert "Ryo Architect" not in result
+
+
+@pytest.mark.asyncio
 async def test_read_thread_meta_returns_pr_metadata() -> None:
     calls: list[str] = []
 
@@ -1408,6 +1558,93 @@ async def test_read_thread_meta_returns_issue_metadata_without_body() -> None:
 
     assert "Type: Issue" in result
     assert "Should not be shown" not in result
+
+
+@pytest.mark.asyncio
+async def test_read_issue_body_hides_other_internal_artifacts_by_default() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "number": 59,
+                "title": "🧠 Ryo Architect",
+                "state": "closed",
+                "user": {"login": "bot"},
+                "labels": [{"name": "🧠 memory"}],
+                "body": "secret memory",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReadIssueBody(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=59)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert result.startswith("Internal artifact: hidden by default.")
+
+
+@pytest.mark.asyncio
+async def test_read_thread_meta_hides_other_internal_artifacts_by_default() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "number": 59,
+                "title": "🧠 Ryo Architect",
+                "state": "closed",
+                "user": {"login": "bot"},
+                "labels": [{"name": "🧠 memory"}],
+                "html_url": "https://github.test/acme/widgets/issues/59",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReadThreadMeta(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=59)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert result.startswith("Internal artifact: hidden by default.")
+
+
+@pytest.mark.asyncio
+async def test_read_thread_comments_hides_other_internal_artifacts_by_default() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/issues/59"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": 59,
+                    "title": "🧠 Ryo Architect",
+                    "state": "closed",
+                    "user": {"login": "bot"},
+                    "labels": [{"name": "🧠 memory"}],
+                    "html_url": "https://github.test/acme/widgets/issues/59",
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReadThreadComments(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(issue_number=59)
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert result.startswith("Internal artifact: hidden by default.")
+    assert not any("/comments" in call for call in calls)
 
 
 @pytest.mark.asyncio

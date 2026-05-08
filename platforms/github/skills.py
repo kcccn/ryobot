@@ -27,6 +27,10 @@ class EmptyArgs(BaseModel):
     pass
 
 
+class ReadThreadContextArgs(BaseModel):
+    pass
+
+
 class SearchRepoMemoryArgs(BaseModel):
     query: str
     limit: int = Field(default=5, ge=1, le=10)
@@ -80,15 +84,18 @@ class AddLabelsArgs(BaseModel):
 
 class ReadIssueBodyArgs(BaseModel):
     issue_number: int = Field(default=0, description="Issue number to read (0 = current context issue)")
+    include_internal: bool = False
 
 
 class ReadThreadMetaArgs(BaseModel):
     issue_number: int = Field(default=0, description="Issue or pull request number to inspect (0 = current context thread)")
+    include_internal: bool = False
 
 
 class ReadThreadCommentsArgs(BaseModel):
     issue_number: int = 0
     include_review_comments: bool = True
+    include_internal: bool = False
 
 
 class CloseIssueArgs(BaseModel):
@@ -98,12 +105,22 @@ class CloseIssueArgs(BaseModel):
 class SearchIssuesArgs(BaseModel):
     query: str = Field(description="Search query (same syntax as GitHub issue search)")
     limit: int = Field(default=10, ge=1, le=30)
+    include_internal: bool = False
 
 
 class UpdateIssueArgs(BaseModel):
     issue_number: int = Field(description="Issue number to update")
     title: str = Field(default="", description="New title (empty to keep unchanged)")
     body: str = Field(default="", description="New body (empty to keep unchanged)")
+
+
+class ReopenIssueArgs(BaseModel):
+    issue_number: int = 0
+
+
+class CommentOnThreadArgs(BaseModel):
+    thread_number: int = 0
+    body: str
 
 
 class CommentOnPRArgs(BaseModel):
@@ -269,6 +286,40 @@ class GitHubSkillBase(BaseSkill):
             page += 1
 
     @staticmethod
+    def _thread_context_unavailable_message() -> str:
+        return (
+            "No current thread in repo-scan. Thread-context tools are unavailable here; "
+            "use retrieve_memory or search_repo_context instead."
+        )
+
+    @staticmethod
+    def _internal_artifact_hidden_message() -> str:
+        return (
+            "Internal artifact: hidden by default. This thread is bot-maintenance or long-term memory, "
+            "not normal project context. Re-run with include_internal=true only when you intentionally need it."
+        )
+
+    @staticmethod
+    def _is_current_thread(context: dict[str, Any], issue_number: int) -> bool:
+        return int(context.get("issue_number") or 0) > 0 and issue_number == int(context.get("issue_number") or 0)
+
+    async def _fetch_visible_issue_thread(
+        self,
+        *,
+        issue_number: int,
+        include_internal: bool,
+    ) -> dict[str, Any] | str:
+        context = self._require_context()
+        if issue_number <= 0:
+            return self._thread_context_unavailable_message()
+        issue = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}"
+        )
+        if not include_internal and not self._is_current_thread(context, issue_number) and is_internal_issue_artifact(issue):
+            return self._internal_artifact_hidden_message()
+        return issue
+
+    @staticmethod
     def _normalize_tags(tags: list[str]) -> list[str]:
         seen: set[str] = set()
         normalized: list[str] = []
@@ -377,31 +428,74 @@ class GitHubSkillBase(BaseSkill):
         )
 
 
-class ReadIssueMemory(GitHubSkillBase):
-    name = "read_issue_memory"
-    description = "Read the current GitHub issue details for working memory."
-    args_model = EmptyArgs
+class ReadThreadContext(GitHubSkillBase):
+    name = "read_thread_context"
+    description = (
+        "Read the current issue or pull-request thread context. "
+        "This only reads the current thread; it is not the bot's live mind issue and not the long-term memory database."
+    )
+    args_model = ReadThreadContextArgs
 
     async def execute(self, **kwargs: Any) -> str:
         context = self._require_context()
-        if int(context.get("issue_number") or 0) <= 0:
-            return (
-                "No current thread in repo-scan. read_issue_memory is unavailable here; "
-                "use retrieve_memory or search_repo_context instead."
-            )
-        issue = await self._api.get_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues/{context['issue_number']}"
-        )
+        issue_number = int(context.get("issue_number") or 0)
+        issue = await self._fetch_visible_issue_thread(issue_number=issue_number, include_internal=True)
+        if isinstance(issue, str):
+            return issue
         body = truncate_text(
             str(issue.get("body") or ""),
             max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_ISSUE_BODY_CHARS),
         )
+        labels = ", ".join(lb.get("name", "") for lb in issue.get("labels", [])) or "none"
         return "\n".join(
             [
+                "Thread context (current issue/PR, not bot memory):",
                 f"Issue #{issue['number']}: {issue['title']}",
                 f"State: {issue['state']}",
+                f"Author: {(issue.get('user') or {}).get('login', 'unknown')}",
+                f"Labels: {labels}",
                 f"Body: {body}",
             ]
+        )
+
+
+class ReadIssueMemory(GitHubSkillBase):
+    name = "read_issue_memory"
+    description = (
+        "Deprecated alias for current thread context. "
+        "This reads the current issue or PR thread; it does NOT read the bot's live mind issue "
+        "and it does NOT read the long-term `🧠 memory` database."
+    )
+    args_model = ReadThreadContextArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        context = self._require_context()
+        issue_number = int(context.get("issue_number") or 0)
+        issue = await self._fetch_visible_issue_thread(issue_number=issue_number, include_internal=True)
+        if isinstance(issue, str):
+            return (
+                "No current thread in repo-scan. read_issue_memory is unavailable here; "
+                "use retrieve_memory or search_repo_context instead."
+            )
+        body = truncate_text(
+            str(issue.get("body") or ""),
+            max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_ISSUE_BODY_CHARS),
+        )
+        labels = ", ".join(lb.get("name", "") for lb in issue.get("labels", [])) or "none"
+        context_result = "\n".join(
+            [
+                "Thread context (current issue/PR, not bot memory):",
+                f"Issue #{issue['number']}: {issue['title']}",
+                f"State: {issue['state']}",
+                f"Author: {(issue.get('user') or {}).get('login', 'unknown')}",
+                f"Labels: {labels}",
+                f"Body: {body}",
+            ]
+        )
+        return (
+            "Deprecated alias notice: read_issue_memory reads the current thread context only. "
+            "It is not the bot's live mind issue and not the `🧠 memory` long-term memory DB.\n"
+            f"{context_result}"
         )
 
 
@@ -418,9 +512,9 @@ class ReadIssueBody(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
         issue_number = args.issue_number if args.issue_number else context["issue_number"]
-        issue = await self._api.get_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}"
-        )
+        issue = await self._fetch_visible_issue_thread(issue_number=issue_number, include_internal=args.include_internal)
+        if isinstance(issue, str):
+            return issue
         body = truncate_text(
             str(issue.get("body") or ""),
             max_chars_from_env("RYOBOT_MAX_HISTORY_COMMENT_CHARS", DEFAULT_MAX_ISSUE_BODY_CHARS),
@@ -452,9 +546,9 @@ class ReadThreadMeta(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
         issue_number = args.issue_number if args.issue_number else context["issue_number"]
-        issue = await self._api.get_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}"
-        )
+        issue = await self._fetch_visible_issue_thread(issue_number=issue_number, include_internal=args.include_internal)
+        if isinstance(issue, str):
+            return issue
         labels = ", ".join(lb.get("name", "") for lb in issue.get("labels", [])) or "none"
         is_pull_request = "pull_request" in issue
         lines = [
@@ -825,6 +919,23 @@ class CloseIssue(GitHubSkillBase):
         return f"Closed issue #{issue_number}"
 
 
+class ReopenIssue(GitHubSkillBase):
+    name = "reopen_issue"
+    description = "Reopen a previously closed GitHub issue."
+    args_model = ReopenIssueArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        issue_number = args.issue_number if args.issue_number else context["issue_number"]
+        await self._api.patch_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}",
+            json_body={"state": "open"},
+        )
+        return f"Reopened issue #{issue_number}"
+
+
 class UpdateIssue(GitHubSkillBase):
     name = "update_issue"
     description = (
@@ -858,9 +969,26 @@ class UpdateIssue(GitHubSkillBase):
         return ": ".join([parts[0], ", ".join(parts[1:])])
 
 
+class CommentOnThread(GitHubSkillBase):
+    name = "comment_on_thread"
+    description = "Post a comment on a GitHub issue or pull-request thread."
+    args_model = CommentOnThreadArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+        thread_number = args.thread_number if args.thread_number else context["issue_number"]
+        await self._api.post_json(
+            f"/repos/{context['owner']}/{context['repo']}/issues/{thread_number}/comments",
+            json_body={"body": self._bot_prefix() + sanitize_mentions(args.body)},
+        )
+        return f"Commented on thread #{thread_number}"
+
+
 class CommentOnPR(GitHubSkillBase):
     name = "comment_on_pr"
-    description = "Post a comment on a GitHub pull request."
+    description = "Backward-compatible alias for thread comments. Posts on an issue or pull-request thread."
     args_model = CommentOnPRArgs
     mutates_state = True
 
@@ -872,7 +1000,7 @@ class CommentOnPR(GitHubSkillBase):
             f"/repos/{context['owner']}/{context['repo']}/issues/{pr_number}/comments",
             json_body={"body": self._bot_prefix() + sanitize_mentions(args.body)},
         )
-        return f"Commented on PR #{pr_number}"
+        return f"Commented on thread #{pr_number}"
 
 
 class CreatePRReview(GitHubSkillBase):
@@ -1142,10 +1270,17 @@ class SearchIssues(GitHubSkillBase):
             params={"q": q, "per_page": min(args.limit, 30), "sort": "updated", "order": "desc"},
         )
         items = result.get("items", []) if isinstance(result, dict) else []
+        if not args.include_internal:
+            items = [
+                issue
+                for issue in items
+                if not is_internal_issue_artifact(issue)
+                or self._is_current_thread(context, int(issue.get("number") or 0))
+            ]
         if not items:
             return f"No results for: {args.query}"
 
-        lines: list[str] = [f"Search results for '{args.query}' ({result.get('total_count', 0)} total):"]
+        lines: list[str] = [f"Search results for '{args.query}' ({len(items)} visible):"]
         for issue in items:
             labels_str = ", ".join(lb.get("name", "") for lb in issue.get("labels", [])) or "none"
             issue_type = "PR" if "pull_request" in issue else "Issue"
@@ -1194,6 +1329,9 @@ class ReadThreadComments(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
         issue_number = args.issue_number if args.issue_number else context["issue_number"]
+        issue = await self._fetch_visible_issue_thread(issue_number=issue_number, include_internal=args.include_internal)
+        if isinstance(issue, str):
+            return issue
         comments = await self._fetch_paginated(
             f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}/comments",
             params={"per_page": 100, "sort": "created", "direction": "asc"},

@@ -224,6 +224,11 @@ class ReadIssueMemoryTestSkill(EchoSkill):
     description = "Read the current issue memory."
 
 
+class ReadThreadContextTestSkill(EchoSkill):
+    name = "read_thread_context"
+    description = "Read the current thread context."
+
+
 def build_response(message: FakeMessage) -> FakeResponse:
     return FakeResponse(choices=[FakeChoice(message=message)])
 
@@ -376,6 +381,48 @@ async def test_passive_event_replies_even_when_motivation_is_below_threshold() -
     await agent.run(raw_event={})
 
     assert plugin.sent_replies[0][1] == "Short answer anyway"
+
+
+@pytest.mark.asyncio
+async def test_passive_final_comment_stops_session_without_second_bot() -> None:
+    plugin = FakePlugin()
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "cleanup complete",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 72,
+                            "action_decision": {
+                                "mode": "reply_with_plan",
+                                "will_reply": True,
+                                "will_act": False,
+                                "execution_identity": "self",
+                                "comment_kind": "final",
+                                "handoff_to": None,
+                                "handoff_reason": "",
+                                "continue_session": False,
+                                "done": True,
+                                "target_issue_number": None,
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="整理完毕，当前请求已收口。")),
+            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+            build_response(FakeMessage(content="this extra response should never be consumed")),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    assert plugin.sent_replies == [(plugin.parse_event(None), "整理完毕，当前请求已收口。", {})]
+    assert len(fake_completions.calls) == 3
 
 
 @pytest.mark.asyncio
@@ -1307,7 +1354,7 @@ async def test_repo_scan_hides_read_issue_memory_from_will_tools() -> None:
                 )
             )
         ],
-        skills=[ReadIssueMemoryTestSkill(), RetrieveMemoryTestSkill(), SearchRepoContextTestSkill()],
+        skills=[ReadIssueMemoryTestSkill(), ReadThreadContextTestSkill(), RetrieveMemoryTestSkill(), SearchRepoContextTestSkill()],
     )
 
     await agent.run(raw_event={})
