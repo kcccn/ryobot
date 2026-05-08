@@ -3,3 +3,7 @@
 __pycache__/
 .claude/
 .vscode/
+.coverage
+.mypy_cache/
+dist/
+build/
