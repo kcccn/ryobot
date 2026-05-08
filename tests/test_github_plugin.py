@@ -282,6 +282,8 @@ async def test_build_patrol_brief_excludes_internal_issues() -> None:
     brief = await plugin._build_patrol_brief("acme", "widgets")
     await plugin.aclose()
 
+    assert "Street-lurker opportunity radar" in brief
     assert "Human-facing tracker" in brief
     assert "RyoBot Coordination" not in brief
     assert "🧠 Ryo Coder" not in brief
+    assert "not sufficient by itself to stay silent" in brief

@@ -241,22 +241,39 @@ def build_agent(
 
 @pytest.mark.asyncio
 async def test_run_skips_when_decision_says_no_reply() -> None:
-    plugin = FakePlugin()
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="street lurker",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=patrol_event,
+        history_by_issue={
+            0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")
+        },
+    )
     agent, _ = build_agent(
         plugin=plugin,
         responses=[
             build_response(
                 FakeMessage(
                     content=json.dumps(
-                        {
-                            "context_analysis": "nothing new",
-                            "internal_emotion": "lazy",
-                            "biological_clock_impact": "neutral",
-                            "motivation_score": 20,
-                            "action_decision": {"will_reply": False, "target_issue_number": None},
-                        }
+                            {
+                                "context_analysis": "nothing new",
+                                "internal_emotion": "lazy",
+                                "biological_clock_impact": "neutral",
+                                "motivation_score": 20,
+                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            }
+                        )
                     )
-                )
             )
         ],
     )
@@ -306,6 +323,35 @@ async def test_run_replies_after_passing_will_decision() -> None:
     assert fake_completions.calls[1]["messages"][-1]["content"] == "hello"
     fatigue = plugin.updated_runtime_states[-1].bot_fatigue["architect"]
     assert fatigue.last_spoke_at is not None
+
+
+@pytest.mark.asyncio
+async def test_passive_event_replies_even_when_motivation_is_below_threshold() -> None:
+    plugin = FakePlugin()
+    agent, _ = build_agent(
+        plugin=plugin,
+        threshold=90,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "simple factual answer",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 15,
+                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="Short answer anyway")),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    assert plugin.sent_replies[0][1] == "Short answer anyway"
 
 
 @pytest.mark.asyncio
@@ -547,7 +593,7 @@ async def test_street_lurker_reply_stage_exposes_full_mutation_tools_for_trusted
 
 
 @pytest.mark.asyncio
-async def test_run_skips_when_bot_is_fatigued() -> None:
+async def test_passive_events_ignore_fatigue_and_still_reply() -> None:
     future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
     plugin = FakePlugin(
         history_by_issue={
@@ -563,26 +609,26 @@ async def test_run_skips_when_bot_is_fatigued() -> None:
     agent, _ = build_agent(
         plugin=plugin,
         responses=[
-            build_response(
-                FakeMessage(
-                    content=json.dumps(
-                        {
-                            "context_analysis": "would reply",
-                            "internal_emotion": "ready",
-                            "biological_clock_impact": "neutral",
-                            "motivation_score": 95,
-                            "action_decision": {"will_reply": True, "target_issue_number": None},
-                        }
+                build_response(
+                    FakeMessage(
+                        content=json.dumps(
+                            {
+                                "context_analysis": "would reply",
+                                "internal_emotion": "ready",
+                                "biological_clock_impact": "neutral",
+                                "motivation_score": 95,
+                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None},
+                            }
+                        )
                     )
-                )
-            )
-        ],
-    )
+                ),
+                build_response(FakeMessage(content="Still replying despite fatigue")),
+            ],
+        )
 
     await agent.run(raw_event={})
 
-    assert plugin.sent_replies == []
-    assert "fatigue cooldown active" in plugin.updated_runtime_states[-1].last_routing.reason
+    assert plugin.sent_replies[0][1] == "Still replying despite fatigue"
 
 
 @pytest.mark.asyncio
@@ -598,6 +644,7 @@ async def test_stage_one_hides_mutating_tools_from_untrusted_authors() -> None:
             owner="acme",
             repo="widgets",
             author_association="CONTRIBUTOR",
+            is_patrol=True,
         )
     )
     agent, fake_completions = build_agent(
@@ -611,7 +658,7 @@ async def test_stage_one_hides_mutating_tools_from_untrusted_authors() -> None:
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 0,
-                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                         }
                     )
                 )
@@ -628,7 +675,24 @@ async def test_stage_one_hides_mutating_tools_from_untrusted_authors() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_decision_json_retries_until_valid() -> None:
-    plugin = FakePlugin()
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="street lurker",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=patrol_event,
+        history_by_issue={
+            0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")
+        },
+    )
     agent, fake_completions = build_agent(
         plugin=plugin,
         responses=[
@@ -636,15 +700,15 @@ async def test_invalid_decision_json_retries_until_valid() -> None:
             build_response(
                 FakeMessage(
                     content=json.dumps(
-                        {
-                            "context_analysis": "valid now",
-                            "internal_emotion": "settled",
-                            "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
-                            "action_decision": {"will_reply": False, "target_issue_number": None},
-                        }
+                            {
+                                "context_analysis": "valid now",
+                                "internal_emotion": "settled",
+                                "biological_clock_impact": "neutral",
+                                "motivation_score": 0,
+                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            }
+                        )
                     )
-                )
             ),
         ],
     )
@@ -657,7 +721,24 @@ async def test_invalid_decision_json_retries_until_valid() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_decision_json_enters_json_repair_mode_without_more_tools() -> None:
-    plugin = FakePlugin()
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="street lurker",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=patrol_event,
+        history_by_issue={
+            0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")
+        },
+    )
     agent, fake_completions = build_agent(
         plugin=plugin,
         responses=[
@@ -675,15 +756,15 @@ async def test_invalid_decision_json_enters_json_repair_mode_without_more_tools(
             build_response(
                 FakeMessage(
                     content=json.dumps(
-                        {
-                            "context_analysis": "fixed",
-                            "internal_emotion": "steady",
-                            "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
-                            "action_decision": {"will_reply": False, "target_issue_number": None},
-                        }
+                            {
+                                "context_analysis": "fixed",
+                                "internal_emotion": "steady",
+                                "biological_clock_impact": "neutral",
+                                "motivation_score": 0,
+                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            }
+                        )
                     )
-                )
             ),
         ],
     )
@@ -712,22 +793,23 @@ async def test_run_sets_runtime_context_for_skills() -> None:
                     ]
                 )
             ),
-            build_response(
-                FakeMessage(
-                    content=json.dumps(
-                        {
-                            "context_analysis": "done",
-                            "internal_emotion": "done",
-                            "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
-                            "action_decision": {"will_reply": False, "target_issue_number": None},
-                        }
+                build_response(
+                    FakeMessage(
+                        content=json.dumps(
+                            {
+                                "context_analysis": "done",
+                                "internal_emotion": "done",
+                                "biological_clock_impact": "neutral",
+                                "motivation_score": 0,
+                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None},
+                            }
+                        )
                     )
-                )
-            ),
-        ],
-        skills=[ContextAwareSkill()],
-    )
+                ),
+                build_response(FakeMessage(content="Context acknowledged")),
+            ],
+            skills=[ContextAwareSkill()],
+        )
 
     await agent.run(raw_event={})
 
@@ -738,7 +820,21 @@ async def test_run_sets_runtime_context_for_skills() -> None:
 
 @pytest.mark.asyncio
 async def test_decide_replays_reasoning_content_after_tool_calls() -> None:
-    plugin = FakePlugin()
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-patrol",
+            message="street lurker",
+            author="system",
+            author_association="OWNER",
+            issue_id="",
+            issue_number=0,
+            comment_id=0,
+            owner="acme",
+            repo="widgets",
+            is_patrol=True,
+        ),
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
     agent, fake_completions = build_agent(
         plugin=plugin,
         responses=[
@@ -753,7 +849,7 @@ async def test_decide_replays_reasoning_content_after_tool_calls() -> None:
                     reasoning_content="I should inspect one clue first.",
                 )
             ),
-            build_response(
+                build_response(
                 FakeMessage(
                     content=json.dumps(
                         {
@@ -761,7 +857,7 @@ async def test_decide_replays_reasoning_content_after_tool_calls() -> None:
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
                             "motivation_score": 0,
-                            "action_decision": {"will_reply": False, "target_issue_number": None},
+                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                         }
                     )
                 )
@@ -779,9 +875,23 @@ async def test_decide_replays_reasoning_content_after_tool_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_will_stage_logs_reasoning_and_tool_details(capsys: pytest.CaptureFixture[str]) -> None:
-    plugin = FakePlugin()
+    patrol_plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-patrol",
+            message="street lurker",
+            author="system",
+            author_association="OWNER",
+            issue_id="",
+            issue_number=0,
+            comment_id=0,
+            owner="acme",
+            repo="widgets",
+            is_patrol=True,
+        ),
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
     agent, _ = build_agent(
-        plugin=plugin,
+        plugin=patrol_plugin,
         responses=[
             build_response(
                 FakeMessage(
@@ -797,15 +907,15 @@ async def test_will_stage_logs_reasoning_and_tool_details(capsys: pytest.Capture
             build_response(
                 FakeMessage(
                     content=json.dumps(
-                        {
-                            "context_analysis": "done",
-                            "internal_emotion": "steady",
-                            "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
-                            "action_decision": {"will_reply": False, "target_issue_number": None},
-                        }
+                            {
+                                "context_analysis": "done",
+                                "internal_emotion": "steady",
+                                "biological_clock_impact": "neutral",
+                                "motivation_score": 0,
+                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            }
+                        )
                     )
-                )
             ),
         ],
     )
@@ -822,22 +932,36 @@ async def test_will_stage_logs_reasoning_and_tool_details(capsys: pytest.Capture
 
 @pytest.mark.asyncio
 async def test_decision_prompt_prefers_memory_before_repo_context() -> None:
-    plugin = FakePlugin()
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-patrol",
+            message="street lurker",
+            author="system",
+            author_association="OWNER",
+            issue_id="",
+            issue_number=0,
+            comment_id=0,
+            owner="acme",
+            repo="widgets",
+            is_patrol=True,
+        ),
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
     agent, fake_completions = build_agent(
         plugin=plugin,
         responses=[
             build_response(
                 FakeMessage(
                     content=json.dumps(
-                        {
-                            "context_analysis": "checked memory first",
-                            "internal_emotion": "calm",
-                            "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
-                            "action_decision": {"will_reply": False, "target_issue_number": None},
-                        }
+                            {
+                                "context_analysis": "checked memory first",
+                                "internal_emotion": "calm",
+                                "biological_clock_impact": "neutral",
+                                "motivation_score": 0,
+                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            }
+                        )
                     )
-                )
             )
         ],
         skills=[RetrieveMemoryTestSkill(), SearchRepoContextTestSkill()],
@@ -870,22 +994,23 @@ async def test_decision_prompt_mentions_read_thread_meta_and_current_human_inten
     agent, fake_completions = build_agent(
         plugin=plugin,
         responses=[
-            build_response(
-                FakeMessage(
-                    content=json.dumps(
-                        {
-                            "context_analysis": "checked the current ask first",
-                            "internal_emotion": "calm",
-                            "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
-                            "action_decision": {"will_reply": False, "target_issue_number": None},
-                        }
+                build_response(
+                    FakeMessage(
+                        content=json.dumps(
+                            {
+                                "context_analysis": "checked the current ask first",
+                                "internal_emotion": "calm",
+                                "biological_clock_impact": "neutral",
+                                "motivation_score": 0,
+                                "action_decision": {"mode": "reply_with_plan", "will_reply": True, "will_act": False, "target_issue_number": None},
+                            }
+                        )
                     )
-                )
-            )
-        ],
-        skills=[RetrieveMemoryTestSkill(), SearchRepoContextTestSkill(), ReadThreadMetaTestSkill()],
-    )
+                ),
+                build_response(FakeMessage(content="已经看过 #54 了，当前线程先解释现状。")),
+            ],
+            skills=[RetrieveMemoryTestSkill(), SearchRepoContextTestSkill(), ReadThreadMetaTestSkill()],
+        )
 
     await agent.run(raw_event={})
 

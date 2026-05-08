@@ -380,7 +380,7 @@ class GitHubPlugin(BasePlugin):
         since = datetime.now(timezone.utc) - timedelta(hours=24)
         issues = await self._api.get_json(
             f"/repos/{owner}/{repo}/issues",
-            params={"state": "open", "sort": "updated", "direction": "asc", "per_page": 10},
+            params={"state": "open", "sort": "updated", "direction": "asc", "per_page": 20},
         )
         pulls = await self._api.get_json(
             f"/repos/{owner}/{repo}/pulls",
@@ -394,37 +394,70 @@ class GitHubPlugin(BasePlugin):
             pr for pr in recent_closed
             if pr.get("merged_at") and _iso_at_or_after(str(pr.get("merged_at")), since)
         ]
-        lines: list[str] = ["1. Open issues nobody touched recently:"]
-        issue_count = 0
-        for item in issues:
-            if "pull_request" in item:
-                continue
-            if is_internal_issue_artifact(item):
-                continue
-            issue_count += 1
-            if issue_count > 5:
-                break
-            lines.append(
-                f"- Issue #{item['number']}: {item['title']} updated={item.get('updated_at', '')}"
-            )
-        if issue_count == 0:
-            lines.append("- None")
-        lines.append("2. Long-stalled open PRs:")
-        if pulls:
-            for pr in pulls[:5]:
+        external_issues = [
+            item for item in issues
+            if "pull_request" not in item and not is_internal_issue_artifact(item)
+        ]
+        fresh_issues = [
+            item for item in external_issues
+            if _iso_at_or_after(str(item.get("updated_at") or ""), since)
+        ]
+        stale_issues = [
+            item for item in external_issues
+            if not _iso_at_or_after(str(item.get("updated_at") or ""), since)
+        ]
+        stale_prs = [
+            pr for pr in pulls
+            if not _iso_at_or_after(str(pr.get("updated_at") or ""), since)
+        ]
+        opportunity_issues = []
+        for item in external_issues:
+            labels = {str(lb.get("name") or "").lower() for lb in item.get("labels", [])}
+            title = str(item.get("title") or "").lower()
+            if (
+                labels & {"enhancement", "documentation", "rfc", "phase-2"}
+                or "tracker" in title
+                or "roadmap" in title
+            ):
+                opportunity_issues.append(item)
+
+        lines: list[str] = ["Street-lurker opportunity radar:"]
+        lines.append("1. Recent activity in the last 24 hours:")
+        lines.append(f"- Fresh open issues: {len(fresh_issues)}")
+        lines.append(f"- Open PRs: {len(pulls)}")
+        lines.append(f"- Recently merged PRs: {len(merged_recent)}")
+        if merged_recent:
+            for pr in merged_recent[:3]:
+                lines.append(
+                    f"  - PR #{pr['number']}: {pr['title']} merged_at={pr.get('merged_at', '')}"
+                )
+        lines.append("2. Stale threads worth reconsidering:")
+        if stale_issues:
+            for item in stale_issues[:5]:
+                lines.append(
+                    f"- Issue #{item['number']}: {item['title']} labels={_issue_labels(item)} updated={item.get('updated_at', '')}"
+                )
+        else:
+            lines.append("- No stale non-internal open issues.")
+        if stale_prs:
+            for pr in stale_prs[:5]:
                 lines.append(
                     f"- PR #{pr['number']}: {pr['title']} updated={pr.get('updated_at', '')}"
                 )
         else:
-            lines.append("- None")
-        lines.append("3. PRs merged in the last 24 hours:")
-        if merged_recent:
-            for pr in merged_recent[:5]:
+            lines.append("- No stale open PRs.")
+        lines.append("3. Small actionable opportunities:")
+        if opportunity_issues:
+            for item in opportunity_issues[:5]:
                 lines.append(
-                    f"- PR #{pr['number']}: {pr['title']} merged_at={pr.get('merged_at', '')}"
+                    f"- Issue #{item['number']}: {item['title']} labels={_issue_labels(item)}"
                 )
         else:
-            lines.append("- None")
+            lines.append("- No obvious tracker/RFC/doc opportunities from open issues.")
+        lines.append("4. Heuristic follow-ups when recent activity is quiet:")
+        lines.append("- Check whether old trackers/RFCs should be closed, clarified, split, or advanced.")
+        lines.append("- Look for doc/test drift, obvious TODO/stub follow-ups, or prerequisites that seem complete but unconnected.")
+        lines.append("- 'No new issues/PRs in 24h' is not sufficient by itself to stay silent.")
         return "\n".join(lines)
 
     async def _fetch_thread_comments(
@@ -585,6 +618,12 @@ def _comment_sort_key(comment: dict[str, Any]) -> tuple[str, int]:
     except (TypeError, ValueError):
         comment_id = 0
     return (created_at, comment_id)
+
+
+def _issue_labels(issue: dict[str, Any]) -> str:
+    names = [str(label.get("name") or "") for label in issue.get("labels", [])]
+    names = [name for name in names if name]
+    return ", ".join(names) if names else "none"
 
 
 def _mind_issue_template(display_name: str, identity: str) -> str:

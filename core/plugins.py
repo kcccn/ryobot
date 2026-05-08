@@ -54,7 +54,9 @@ class RepoRuntimeState(BaseModel):
 
 
 class ActionDecision(BaseModel):
+    mode: str = "stay_silent"
     will_reply: bool
+    will_act: bool = False
     target_issue_number: int | None = None
 
 

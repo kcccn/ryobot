@@ -28,6 +28,8 @@ DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS = 180
 NO_REPLY_TOOL_NAME = "no_reply"
 LOG_TRUNCATE = 500
 MEMORY_MUTATION_TOOL_NAMES = frozenset({"commit_memory", "refine_memory", "archive_memory"})
+PASSIVE_EXECUTION_MODES = frozenset({"reply_brief", "reply_with_plan", "ask_clarifying_question", "act_directly"})
+ALL_EXECUTION_MODES = PASSIVE_EXECUTION_MODES | {"stay_silent"}
 WILL_MAX_ITERATIONS = 8
 WILL_MAX_TOOL_CALLS = 12
 WILL_CONVERGENCE_LIMIT = 3
@@ -167,7 +169,7 @@ class RyoAgent:
                     f"{'PR' if active_event.is_pull_request else 'Issue'} #{active_event.issue_number}"
                 )
 
-            outcome = await self._reply(event=active_event, history=active_history)
+            outcome = await self._reply(event=active_event, history=active_history, decision=decision)
             if outcome.acted:
                 try:
                     await self._reflect(event=active_event, history=active_history)
@@ -328,11 +330,11 @@ class RyoAgent:
             internal_emotion="Disengaged",
             biological_clock_impact="Prefer silence over malformed output.",
             motivation_score=0,
-            action_decision=ActionDecision(will_reply=False, target_issue_number=None),
+            action_decision=ActionDecision(mode="stay_silent", will_reply=False, will_act=False, target_issue_number=None),
         )
 
-    async def _reply(self, *, event: PluginEvent, history: Any) -> ExecutionOutcome:
-        system_prompt = self._reply_prompt(history=history)
+    async def _reply(self, *, event: PluginEvent, history: Any, decision: WillDecision) -> ExecutionOutcome:
+        system_prompt = self._reply_prompt(history=history, event=event, decision=decision)
         messages: list[ChatMessage] = [
             {"role": "system", "content": system_prompt},
             *history.messages,
@@ -370,6 +372,18 @@ class RyoAgent:
                             except Exception:
                                 reason = "(no reason)"
                             _log(f"  <- no_reply: {reason}")
+                            if not event.is_patrol and not executed_tool_names:
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "This is a passive human-triggered event. You must respond or do real work here. "
+                                            "no_reply is not allowed unless you already completed a mutating action. "
+                                            "Continue and produce a visible response or action."
+                                        ),
+                                    }
+                                )
+                                continue
                             if executed_tool_names:
                                 return ExecutionOutcome(
                                     kind="acted_without_thread_reply",
@@ -617,20 +631,22 @@ class RyoAgent:
             + "\n\n你现在处于第一阶段：只能做意愿判断，不能生成公开回复。"
             "\n你必须最终只输出一个 JSON 对象，严格匹配以下结构："
             '\n{"context_analysis":"...","internal_emotion":"...","biological_clock_impact":"...",'
-            '"motivation_score":0,"action_decision":{"will_reply":false,"target_issue_number":null}}'
+            '"motivation_score":0,"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"target_issue_number":null}}'
             "\n规则："
             "\n1. 当前看到的上下文是故意片面的；如果信息不够，先使用只读工具继续了解。"
             "\n2. 先排除 coordination、mind issue、memory 这类 bot 内务；默认不要把它们当候选工作。"
             "\n3. 对普通 Issue/PR 事件，先解决当前线程的人类意图，不要一上来升级成全仓库审计。"
             "\n4. 若当前消息或线程里出现明确编号（如 #54），先用 read_thread_meta/read_issue_body 精确核实，再决定是否扩展到 search_repo_context 或代码搜索。"
             "\n5. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
-            "\n6. 如果这是被动事件（非 patrol），target_issue_number 通常为 null。"
-            "但如果你发现了必须在其他 issue/PR 行动的真正重大发现，可以设置 target_issue_number。"
-            "此时 will_reply 通常应为 false（你不是在当前 thread 回复），系统会把你路由到目标 issue/PR。"
-            "\n7. 如果这是街溜子事件，target_issue_number 可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
-            "\n8. 只有当你真的准备公开发言或直接动手推进时，will_reply 才能为 true。"
-            "\n9. 不要输出 Markdown，不要解释，不要包裹代码块。"
-            "\n10. motivation_score 评分锚定（0-100 整数）："
+            "\n6. action_decision.mode 只能是：reply_brief、reply_with_plan、ask_clarifying_question、act_directly、stay_silent。"
+            "\n7. 如果这是被动事件（非 patrol），你必须回应或做事，不能选择 stay_silent。"
+            "\n  被动事件里，reply_brief 适合直接事实回答；reply_with_plan 适合解释现状和下一步；ask_clarifying_question 只问一个关键问题；act_directly 适合直接动手。"
+            "\n8. 如果这是街溜子事件，stay_silent 合法，但只有在你确认没有新鲜动态、没有 stale thread、没有小型代码/测试/文档机会、也没有可收尾事项时才能用。"
+            "\n  不要因为“最近 24h 没有新增 issue/PR”就直接开摆；你要把 patrol_brief 当作机会雷达，主动寻找可推进的小机会。"
+            "\n9. target_issue_number 在街溜子事件里可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
+            "\n10. 只有当你真的准备公开发言时，will_reply 才能为 true；只有当你真的准备直接执行动作时，will_act 才能为 true。"
+            "\n11. 不要输出 Markdown，不要解释，不要包裹代码块。"
+            "\n12. motivation_score 评分锚定（0-100 整数）："
             "\n  0-29: 无趣/无关/已经答复过，不应说话"
             "\n  30-59: 常规跟进，有轻微价值但不必抢麦"
             "\n  60-79: 发现了值得讨论的技术问题或可改进点"
@@ -640,16 +656,28 @@ class RyoAgent:
             "\n  情绪与分数必须自洽，不匹配会被拒绝重新来过。"
         )
 
-    def _reply_prompt(self, *, history: Any) -> str:
-        return (
+    def _reply_prompt(self, *, history: Any, event: PluginEvent, decision: WillDecision) -> str:
+        mode = decision.action_decision.mode
+        prompt = (
             self.persona["system_prompt"]
             + self._mind_context(history)
             + "\n\n第二阶段规则："
-            "\n1. 对被动事件，优先解决当前线程的人类请求。"
+            "\n1. 对被动事件，优先解决当前线程的人类请求；有人类触发时，你必须给出反馈或完成真实动作，不能装死。"
             "\n2. 如果证据表明人类要求的 PR/修复其实早已完成，且当前 tracker 明显 stale，先简短解释现状，再 close_issue 当前 stale tracker。"
             "\n3. 不要为了已经完成的工作再制造重复 PR。"
             "\n4. 判断 PR 是否 merged，优先 read_thread_meta，不要先靠模糊搜索猜。"
         )
+        if mode == "reply_brief":
+            prompt += "\n5. 当前 mode=reply_brief：直接回答当前问题，控制在 1-3 句，不要复述长篇调查过程。"
+        elif mode == "reply_with_plan":
+            prompt += "\n5. 当前 mode=reply_with_plan：简洁说明现状，再给出最小必要的下一步建议。"
+        elif mode == "ask_clarifying_question":
+            prompt += "\n5. 当前 mode=ask_clarifying_question：只问一个最关键的阻塞问题，不要顺手长篇分析。"
+        elif mode == "act_directly":
+            prompt += "\n5. 当前 mode=act_directly：以完成动作和收尾为优先；若需要公开说明，保持简短。"
+        elif event.is_patrol:
+            prompt += "\n5. 当前 mode=stay_silent：只有在你已经确认没有值得推进的机会时才允许结束。"
+        return prompt
 
     def _decision_user_prompt(self, *, event: PluginEvent, history: Any) -> str:
         prompt = event.message
@@ -662,7 +690,7 @@ class RyoAgent:
                 "再决定是否需要扩展到 repo-wide search。"
             )
         if event.is_patrol and history.patrol_brief:
-            prompt += f"\n\n街溜子模式仓库近 24 小时动态早报：\n{history.patrol_brief}"
+            prompt += f"\n\n街溜子模式机会雷达：\n{history.patrol_brief}"
         return prompt
 
     def _reflection_prompt(self, *, history: Any) -> str:
@@ -698,7 +726,23 @@ class RyoAgent:
         )
 
     def _validate_decision(self, *, event: PluginEvent, decision: WillDecision) -> None:
-        pass
+        mode = decision.action_decision.mode
+        if mode == "stay_silent" and (decision.action_decision.will_reply or decision.action_decision.will_act):
+            inferred_mode = "act_directly" if decision.action_decision.will_act and not decision.action_decision.will_reply else "reply_with_plan"
+            decision.action_decision.mode = inferred_mode
+            mode = inferred_mode
+        if mode not in ALL_EXECUTION_MODES:
+            raise ValueError(
+                f"action_decision.mode must be one of {sorted(ALL_EXECUTION_MODES)}, got {mode!r}"
+            )
+        if mode == "stay_silent":
+            if decision.action_decision.will_reply or decision.action_decision.will_act:
+                raise ValueError("stay_silent decisions cannot also set will_reply or will_act true.")
+            if not event.is_patrol:
+                raise ValueError("Passive human-triggered events may not choose stay_silent.")
+            return
+        if not (decision.action_decision.will_reply or decision.action_decision.will_act):
+            raise ValueError("Non-silent decisions must set will_reply or will_act.")
 
     def _should_reply(
         self,
@@ -707,10 +751,14 @@ class RyoAgent:
         decision: WillDecision,
         runtime_state: RepoRuntimeState,
     ) -> tuple[bool, str]:
-        if not decision.action_decision.will_reply:
+        if decision.action_decision.mode == "stay_silent":
             return False, "bot chose silence"
+        if not event.is_patrol:
+            return True, "passive event requires response"
+        if not (decision.action_decision.will_reply or decision.action_decision.will_act):
+            return False, "street-lurker found no concrete action"
         if decision.motivation_score < self.motivation_threshold:
-            return False, f"motivation {decision.motivation_score} below threshold {self.motivation_threshold}"
+            return False, f"street-lurker motivation {decision.motivation_score} below threshold {self.motivation_threshold}"
 
         fatigue_state = runtime_state.bot_fatigue.get(str(self.persona["identity"]))
         if fatigue_state and fatigue_state.next_available_at:
