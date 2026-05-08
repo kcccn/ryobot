@@ -27,4 +27,4 @@ jobs:
         run: python -m mypy main.py bots core platforms
 
       - name: Pytest
-        run: python -m pytest
+        run: python -m pytest --cov --cov-report=term-missing
