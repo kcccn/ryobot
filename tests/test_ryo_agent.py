@@ -9,14 +9,16 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from core import prompts
 from core.plugins import (
     BasePlugin,
     BotFatigueState,
     HistorySnapshot,
     PluginEvent,
     RepoRuntimeState,
+    WillDecision,
 )
-from core.ryo_agent import RyoAgent, _extract_safe_json
+from core.ryo_agent import ReflectionDecision, RyoAgent, _extract_safe_json, _looks_like_truncated_json
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
 
@@ -246,6 +248,7 @@ def build_agent(
     threshold: int = 70,
     street_lurker_fatigue_min_seconds: int = 60,
     street_lurker_fatigue_max_seconds: int = 180,
+    max_tokens: int = 4096,
 ) -> tuple[RyoAgent, FakeCompletions]:
     fake_completions = FakeCompletions(responses)
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
@@ -264,6 +267,7 @@ def build_agent(
         skills=skills or [EchoSkill()],
         llm_client=llm_client,
         plugin=plugin,
+        max_tokens=max_tokens,
         motivation_threshold=threshold,
         fatigue_min_seconds=480,
         fatigue_max_seconds=480,
@@ -1666,6 +1670,164 @@ async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
     assert len(fake_completions.calls) == 3
     reflection_tool_names = [tool["function"]["name"] for tool in fake_completions.calls[2]["tools"]]
     assert reflection_tool_names == ["retrieve_memory", "search_repo_memory"]
+
+
+@pytest.mark.asyncio
+async def test_stage_specific_max_tokens_floor_for_will_and_reflection() -> None:
+    plugin = FakePlugin()
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        max_tokens=256,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "reply once",
+                            "internal_emotion": "steady",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 90,
+                            "action_decision": {
+                                "mode": "reply_brief",
+                                "will_reply": True,
+                                "will_act": False,
+                                "target_issue_number": None,
+                                "focus_summary": "Reply once and finish.",
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="Public reply")),
+            build_response(FakeMessage(content='{"action":"noop","summary":"nothing durable"}')),
+        ],
+        skills=[EchoSkill(), RetrieveMemoryTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    assert fake_completions.calls[0]["max_tokens"] == 4096
+    assert fake_completions.calls[1]["max_tokens"] == 256
+    assert fake_completions.calls[2]["max_tokens"] == 4096
+
+
+def test_decision_and_reflection_schema_enforce_short_fields() -> None:
+    will_fields = WillDecision.model_fields
+    assert will_fields["context_analysis"].description == "环境分析：极简总结，不超过 50 个字。"
+    assert will_fields["context_analysis"].metadata[0].max_length == 50
+    assert will_fields["internal_emotion"].description == "内心OS：一句话，不超过 20 个字。"
+    assert will_fields["internal_emotion"].metadata[0].max_length == 20
+    assert will_fields["biological_clock_impact"].description == "生理时钟影响：极简描述，不超过 20 个字。"
+    assert will_fields["biological_clock_impact"].metadata[0].max_length == 20
+
+    reflection_field = ReflectionDecision.model_fields["summary"]
+    assert reflection_field.description == "反思摘要：极简一句话，不超过 40 个字。"
+    assert reflection_field.metadata[0].max_length == 40
+
+
+def test_prompts_require_short_json_fields() -> None:
+    decision_prompt = prompts.build_decision_prompt(system_prompt="sys", mind_context="")
+    reflection_prompt = prompts.build_reflection_prompt(system_prompt="sys", mind_context="")
+
+    assert "context_analysis 必须极短，不超过 50 个字" in decision_prompt
+    assert "internal_emotion 必须一句话，不超过 20 个字" in decision_prompt
+    assert "biological_clock_impact 不超过 20 个字" in decision_prompt
+    assert "summary 必须极短，不超过 40 个字" in reflection_prompt
+
+
+@pytest.mark.asyncio
+async def test_will_stage_logs_critical_when_json_looks_truncated(capsys: pytest.CaptureFixture[str]) -> None:
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-patrol",
+            message="street lurker",
+            author="system",
+            author_association="OWNER",
+            issue_id="",
+            issue_number=0,
+            comment_id=0,
+            owner="acme",
+            repo="widgets",
+            is_patrol=True,
+        ),
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(FakeMessage(content='{"context_analysis":"ok","internal_emotion":"x","biologica')),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "done",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {
+                                "mode": "stay_silent",
+                                "will_reply": False,
+                                "will_act": False,
+                                "target_issue_number": None,
+                            },
+                        }
+                    )
+                )
+            ),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    stderr = capsys.readouterr().err
+    assert "[CRITICAL] JSON 解析失败！疑似命中 max_tokens 截断" in stderr
+    assert "stage=will" in stderr
+
+
+@pytest.mark.asyncio
+async def test_reflection_stage_logs_critical_when_json_looks_truncated(capsys: pytest.CaptureFixture[str]) -> None:
+    plugin = FakePlugin()
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "reply once",
+                            "internal_emotion": "steady",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 90,
+                            "action_decision": {
+                                "mode": "reply_brief",
+                                "will_reply": True,
+                                "will_act": False,
+                                "target_issue_number": None,
+                                "focus_summary": "Reply once and finish.",
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="Public reply")),
+            build_response(FakeMessage(content='{"action":"noop","summary":"unterminated')),
+            build_response(FakeMessage(content='{"action":"noop","summary":"ok"}')),
+        ],
+        skills=[EchoSkill(), RetrieveMemoryTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    stderr = capsys.readouterr().err
+    assert "[CRITICAL] JSON 解析失败！疑似命中 max_tokens 截断" in stderr
+    assert "stage=reflection" in stderr
+
+
+def test_truncation_heuristic_detects_unclosed_json_shapes() -> None:
+    assert _looks_like_truncated_json('{"context_analysis":"ok","internal_emotion":"x","biologica')
+    assert _looks_like_truncated_json('{"key":"value"')
+    assert _looks_like_truncated_json('{"key":123')
+    assert not _looks_like_truncated_json('{"key":"value"}')
 
 
 class TestExtractSafeJson:

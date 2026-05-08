@@ -55,8 +55,9 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n15. context_issue_numbers 用来列出 reply 阶段必须先核实的 companion threads；它只提供上下文约束，不会自动改变 target。"
         "\n16. continue_session=true 表示这一轮之后 session 还要继续；done=true 表示当前事项已经收口。二者不能同时为 true。"
         "\n17. 如果雷达里出现 Potential overlapping threads，先核实这些线程之间的关系，再决定是保留、关闭、交叉引用，还是忽略。"
-        "\n18. 不要输出 Markdown，不要解释，不要包裹代码块。"
-        "\n19. motivation_score 评分锚定（0-100 整数）："
+        "\n18. context_analysis 必须极短，不超过 50 个字；internal_emotion 必须一句话，不超过 20 个字；biological_clock_impact 不超过 20 个字。"
+        "\n19. 不要输出 Markdown，不要解释，不要包裹代码块。"
+        "\n20. motivation_score 评分锚定（0-100 整数）："
         "\n  0-29: 无趣/无关/已经答复过，不应说话"
         "\n  30-59: 常规跟进，有轻微价值但不必抢麦"
         "\n  60-79: 发现了值得讨论的技术问题或可改进点"
@@ -162,8 +163,9 @@ def build_reflection_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n2. 当前任务上下文只来自你已经看到的 history.messages；不要再把当前 thread 当 memory 去读。"
         "\n3. 如果要改记忆，优先先读取或检索已有记忆，再决定 commit_memory / refine_memory / archive_memory。"
         "\n  live mind issue 不是长期记忆库；带 `🧠 memory` 标签的 closed issues 才是长期记忆库。"
-        "\n4. 如果没有值得沉淀的长期知识，输出 {\"action\":\"noop\",\"summary\":\"...\"}。"
-        "\n5. 如果你调用了记忆工具，最后仍然只输出一个 JSON 对象，action 只能是 noop、commit_memory、refine_memory 或 archive_memory。"
+        "\n4. summary 必须极短，不超过 40 个字。"
+        "\n5. 如果没有值得沉淀的长期知识，输出 {\"action\":\"noop\",\"summary\":\"...\"}。"
+        "\n6. 如果你调用了记忆工具，最后仍然只输出一个 JSON 对象，action 只能是 noop、commit_memory、refine_memory 或 archive_memory。"
     )
 
 

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from typing import Any, TypedDict
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from . import prompts
 from .plugins import ActionDecision, BasePlugin, PluginEvent, RepoRuntimeState, WillDecision
@@ -67,7 +67,11 @@ class ChatMessage(TypedDict, total=False):
 
 class ReflectionDecision(BaseModel):
     action: str
-    summary: str = ""
+    summary: str = Field(
+        default="",
+        description="反思摘要：极简一句话，不超过 40 个字。",
+        max_length=40,
+    )
 
 
 @dataclass
@@ -310,7 +314,11 @@ class RyoAgent:
                 _log(f"--- will iteration {i + 1}/{WILL_MAX_ITERATIONS} ---")
                 t_start = time.monotonic()
                 active_tools: list[dict[str, Any]] = [] if json_repair_only else tools
-                response = await self._create_completion_with_retry(messages=messages, tools=active_tools)
+                response = await self._create_completion_with_retry(
+                    messages=messages,
+                    tools=active_tools,
+                    stage="will",
+                )
                 t_elapsed = time.monotonic() - t_start
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
@@ -405,6 +413,11 @@ class RyoAgent:
                     decision = WillDecision.model_validate(cleaned)
                 except (ValidationError, JSONDecodeError) as exc:
                     _log(f"WARN: invalid will JSON: {_truncate_log(exc)}")
+                    truncated = self._log_possible_json_truncation(
+                        stage="will",
+                        raw_text=decision_text,
+                        exc=exc,
+                    )
                     messages.append(self._assistant_message_payload(assistant_message))
                     detail = _hallucinated_tool_call_hint(decision_text)
                     messages.append(
@@ -413,7 +426,9 @@ class RyoAgent:
                             "content": (
                                 f"Your previous response was invalid. {detail}"
                                 "Return ONLY a bare JSON object matching the required schema "
-                                f"— no markdown, no code blocks, no tool-call syntax. Validation error: {exc}"
+                                "— no markdown, no code blocks, no tool-call syntax. "
+                                f"{'Keep it shorter and prioritize a complete JSON object. ' if truncated else ''}"
+                                f"Validation error: {exc}"
                             ),
                         }
                     )
@@ -436,9 +451,9 @@ class RyoAgent:
             clear_skill_context(context_token)
 
         return WillDecision(
-            context_analysis="No valid JSON decision was produced.",
-            internal_emotion="Disengaged",
-            biological_clock_impact="Prefer silence over malformed output.",
+            context_analysis="No valid JSON.",
+            internal_emotion="Quiet",
+            biological_clock_impact="Prefer silence.",
             motivation_score=0,
             action_decision=ActionDecision(
                 mode="stay_silent",
@@ -476,7 +491,11 @@ class RyoAgent:
             for i in range(self.max_iterations):
                 _log(f"--- reply iteration {i + 1}/{self.max_iterations} ---")
                 t_start = time.monotonic()
-                response = await self._create_completion_with_retry(messages=messages, tools=tools)
+                response = await self._create_completion_with_retry(
+                    messages=messages,
+                    tools=tools,
+                    stage="reply",
+                )
                 t_elapsed = time.monotonic() - t_start
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
@@ -653,7 +672,11 @@ class RyoAgent:
                 _log(f"--- reflection iteration {i + 1}/{self.max_iterations} ---")
                 t_start = time.monotonic()
                 active_tools: list[dict[str, Any]] = [] if json_repair_only else tools
-                response = await self._create_completion_with_retry(messages=messages, tools=active_tools)
+                response = await self._create_completion_with_retry(
+                    messages=messages,
+                    tools=active_tools,
+                    stage="reflection",
+                )
                 t_elapsed = time.monotonic() - t_start
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
@@ -695,6 +718,11 @@ class RyoAgent:
                     decision = ReflectionDecision.model_validate(cleaned)
                 except (ValidationError, JSONDecodeError) as exc:
                     _log(f"WARN: invalid reflection JSON: {_truncate_log(exc)}")
+                    truncated = self._log_possible_json_truncation(
+                        stage="reflection",
+                        raw_text=reflection_text,
+                        exc=exc,
+                    )
                     repair_attempts += 1
                     if repair_attempts >= 2:
                         decision = ReflectionDecision(
@@ -710,7 +738,8 @@ class RyoAgent:
                             "content": (
                                 "Your previous reflection output was invalid JSON. "
                                 "On the next turn, output ONLY the raw ReflectionDecision JSON object. "
-                                "Do not call tools. Do not wrap the JSON in markdown or explanation."
+                                "Do not call tools. Do not wrap the JSON in markdown or explanation. "
+                                f"{'Keep it shorter and prioritize a complete JSON object.' if truncated else ''}"
                             ),
                         }
                     )
@@ -725,11 +754,15 @@ class RyoAgent:
         *,
         messages: list[ChatMessage],
         tools: list[dict[str, Any]],
+        stage: str,
     ) -> Any:
+        max_tokens = self.max_tokens
+        if stage in {"will", "reflection"}:
+            max_tokens = max(max_tokens, 4096)
         request: dict[str, Any] = {
             "model": self.persona["model"],
             "messages": messages,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens,
         }
         if tools:
             request["tools"] = tools
@@ -741,12 +774,13 @@ class RyoAgent:
         *,
         messages: list[ChatMessage],
         tools: list[dict[str, Any]],
+        stage: str,
         max_retries: int = 3,
     ) -> Any:
         attempt = 0
         while True:
             try:
-                return await self._create_completion(messages=messages, tools=tools)
+                return await self._create_completion(messages=messages, tools=tools, stage=stage)
             except Exception:
                 attempt += 1
                 if attempt > max_retries:
@@ -1061,6 +1095,17 @@ class RyoAgent:
         return skills
 
     @staticmethod
+    def _log_possible_json_truncation(*, stage: str, raw_text: str, exc: Exception) -> bool:
+        if not _looks_like_truncated_json(raw_text):
+            return False
+        tail = _truncate_log(raw_text[-160:]) if raw_text else ""
+        _log(
+            "[CRITICAL] JSON 解析失败！疑似命中 max_tokens 截断，请检查 LLM 的 token 上限配置或要求模型更精简！ "
+            f"stage={stage} tail={tail}"
+        )
+        return True
+
+    @staticmethod
     def _parse_tool_arguments(arguments: Any) -> dict[str, Any]:
         if isinstance(arguments, dict):
             return arguments
@@ -1302,6 +1347,27 @@ def _extract_safe_json(raw_text: str) -> Any:
     if m:
         return json.loads(m.group(1))
     return json.loads(raw_text)
+
+
+def _looks_like_truncated_json(raw_text: str) -> bool:
+    text = raw_text.rstrip()
+    if not text:
+        return False
+    if text.count("{") != text.count("}"):
+        return True
+    if len(re.findall(r'(?<!\\)"', text)) % 2 == 1:
+        return True
+    if text.endswith(("}", "]")):
+        return False
+    if re.search(r'"[^"]*$', text):
+        return True
+    if re.search(r':\s*"[^"]*$', text):
+        return True
+    if re.search(r',\s*"[^"]*$', text):
+        return True
+    if re.search(r':\s*[^,\]\}\s]+$', text) and not text.endswith(("}", "]")):
+        return True
+    return False
 
 
 _HALLUCINATED_TOOL_PATTERNS = (

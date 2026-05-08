@@ -75,9 +75,18 @@ class ActionDecision(BaseModel):
 
 
 class WillDecision(BaseModel):
-    context_analysis: str
-    internal_emotion: str
-    biological_clock_impact: str
+    context_analysis: str = Field(
+        description="环境分析：极简总结，不超过 50 个字。",
+        max_length=50,
+    )
+    internal_emotion: str = Field(
+        description="内心OS：一句话，不超过 20 个字。",
+        max_length=20,
+    )
+    biological_clock_impact: str = Field(
+        description="生理时钟影响：极简描述，不超过 20 个字。",
+        max_length=20,
+    )
     motivation_score: int = Field(
         ge=0,
         le=100,
