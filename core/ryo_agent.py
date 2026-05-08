@@ -400,8 +400,9 @@ class RyoAgent:
                 if not decision_text:
                     break
                 try:
-                    decision = WillDecision.model_validate_json(decision_text)
-                except ValidationError as exc:
+                    cleaned = _extract_safe_json(decision_text)
+                    decision = WillDecision.model_validate(cleaned)
+                except (ValidationError, JSONDecodeError) as exc:
                     _log(f"WARN: invalid will JSON: {_truncate_log(exc)}")
                     messages.append(self._assistant_message_payload(assistant_message))
                     detail = _hallucinated_tool_call_hint(decision_text)
@@ -689,8 +690,9 @@ class RyoAgent:
                 if not reflection_text:
                     return
                 try:
-                    decision = ReflectionDecision.model_validate_json(reflection_text)
-                except ValidationError as exc:
+                    cleaned = _extract_safe_json(reflection_text)
+                    decision = ReflectionDecision.model_validate(cleaned)
+                except (ValidationError, JSONDecodeError) as exc:
                     _log(f"WARN: invalid reflection JSON: {_truncate_log(exc)}")
                     repair_attempts += 1
                     if repair_attempts >= 2:
@@ -864,7 +866,7 @@ class RyoAgent:
             "\n2. 先排除 coordination、mind issue、memory 这类 bot 内务；默认不要把它们当候选工作。"
             "\n  其中：read_thread_context 只读当前线程；live mind issue 是你自己的 open working-memory thread；"
             "带 `🧠 memory` 标签的 closed issues 是长期记忆库。不要把它们混为一谈。"
-            "\n3. 对普通 Issue/PR 事件，先解决当前线程的人类意图，不要一上来升级成全仓库审计。"
+            "\n3. 对普通 Issue/PR 事件，优先解决当前线程的人类意图；如果用户指令明确指向其他 Issue/PR，跨 Issue 操作完全合法，不要犹豫。"
             "\n4. 若当前消息或线程里出现明确编号（如 #54），先用 read_thread_meta/read_issue_body 精确核实，再决定是否扩展到 search_repo_context 或代码搜索。"
             "\n5. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
             "\n6. action_decision.mode 只能是：reply_brief、reply_with_plan、ask_clarifying_question、act_directly、stay_silent。"
@@ -889,6 +891,8 @@ class RyoAgent:
             "\n  80-100: 发现了重大架构漏洞/突破口/高价值行动机会，必须抢麦"
             "\n  若 internal_emotion 表达兴奋/激动/惊喜等强烈情绪，motivation_score 必须 ≥ 80。"
             "\n  若 internal_emotion 表达无聊/疲惫/无感，motivation_score 必须 ≤ 29。"
+            "\n  如果当前事件是人类直接明确的指令或回复，且意图清晰，motivation_score 必须强制 ≥ 80。"
+            "\n  严禁以'不符合人设喜好'为由给人类指令打低分怠工。"
             "\n  情绪与分数必须自洽，不匹配会被拒绝重新来过。"
         )
 
@@ -928,6 +932,16 @@ class RyoAgent:
         else:
             prompt += "\n8. 当前 comment_kind=response：这是对当前线程的直接公开回应。"
         prompt += "\n9. 不允许偏离本轮唯一焦点去做无关评论；如果发现新话题，只有在它直接影响当前焦点时才能提及。"
+        prompt += (
+            "\n\n【绝对最高优先级任务 (MISSION OVERRIDE)】\n"
+            f"前序决策摘要：{decision.context_analysis}\n"
+            f"本轮唯一目标：{decision.action_decision.focus_summary}\n"
+            f"执行模式：{decision.action_decision.mode}\n"
+            "你在前序思考中做出的行动决断是本次行动的唯一目的。\n"
+            "严禁沉迷于你的角色设定！\n"
+            "你必须优先调用具体工具彻底完成该决断。\n"
+            "在工具物理执行完毕前，绝不允许结束思考循环！"
+        )
         return prompt
 
     def _decision_user_prompt(self, *, event: PluginEvent, history: Any, session: SessionState | None = None) -> str:
@@ -1390,6 +1404,21 @@ def _truncate_log(result: Any) -> str:
     return _truncate_text(text, LOG_TRUNCATE)
 
 
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_OUTER_BRACES_RE = re.compile(r"(\{.*\})", re.DOTALL)
+
+
+def _extract_safe_json(raw_text: str) -> Any:
+    """Extract a JSON object from raw LLM text that may contain markdown fences or explanation."""
+    m = _JSON_FENCE_RE.search(raw_text)
+    if m:
+        return json.loads(m.group(1))
+    m = _OUTER_BRACES_RE.search(raw_text)
+    if m:
+        return json.loads(m.group(1))
+    return json.loads(raw_text)
+
+
 _HALLUCINATED_TOOL_PATTERNS = (
     "tool_calls",
     "CDATA",
@@ -1403,6 +1432,11 @@ _HALLUCINATED_TOOL_PATTERNS = (
 
 def _hallucinated_tool_call_hint(text: str) -> str:
     """Return a targeted hint if the text looks like hallucinated tool calls."""
+    try:
+        _extract_safe_json(text)
+        return ""
+    except (JSONDecodeError, ValueError):
+        pass
     lower = text.lower()
     if any(p.lower() in lower for p in _HALLUCINATED_TOOL_PATTERNS):
         return (

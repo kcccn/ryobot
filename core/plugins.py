@@ -78,7 +78,14 @@ class WillDecision(BaseModel):
     context_analysis: str
     internal_emotion: str
     biological_clock_impact: str
-    motivation_score: int = Field(ge=0, le=100)
+    motivation_score: int = Field(
+        ge=0,
+        le=100,
+        description=(
+            "人类直接明确的指令或回复，只要意图清晰，基础分必须 >= 80。"
+            "严禁以'不符合人设喜好'为由给人类指令打低分怠工。"
+        ),
+    )
     action_decision: ActionDecision
 
 

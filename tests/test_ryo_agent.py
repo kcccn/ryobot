@@ -16,7 +16,7 @@ from core.plugins import (
     PluginEvent,
     RepoRuntimeState,
 )
-from core.ryo_agent import RyoAgent
+from core.ryo_agent import RyoAgent, _extract_safe_json
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
 
@@ -1666,3 +1666,48 @@ async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
     assert len(fake_completions.calls) == 3
     reflection_tool_names = [tool["function"]["name"] for tool in fake_completions.calls[2]["tools"]]
     assert reflection_tool_names == ["retrieve_memory", "search_repo_memory"]
+
+
+class TestExtractSafeJson:
+    def test_pure_json_passes_through(self) -> None:
+        result = _extract_safe_json('{"mode":"stay_silent","will_reply":false}')
+        assert result == {"mode": "stay_silent", "will_reply": False}
+
+    def test_json_inside_json_code_block(self) -> None:
+        result = _extract_safe_json('```json\n{"mode":"stay_silent","will_reply":false}\n```')
+        assert result == {"mode": "stay_silent", "will_reply": False}
+
+    def test_json_inside_plain_code_block(self) -> None:
+        result = _extract_safe_json('```\n{"key":"value"}\n```')
+        assert result == {"key": "value"}
+
+    def test_json_surrounded_by_explanation_text(self) -> None:
+        result = _extract_safe_json(
+            'Here is my decision:\n{"mode":"reply_brief","will_reply":true}\nI hope this works.'
+        )
+        assert result == {"mode": "reply_brief", "will_reply": True}
+
+    def test_nested_json_surrounded_by_text(self) -> None:
+        result = _extract_safe_json(
+            'Sure! {"context_analysis":"done","action_decision":{"mode":"reply_brief","will_reply":true}} Done.'
+        )
+        assert result == {
+            "context_analysis": "done",
+            "action_decision": {"mode": "reply_brief", "will_reply": True},
+        }
+
+    def test_complete_will_decision_in_explanation(self) -> None:
+        text = (
+            "Let me think about this...\n\n"
+            'I will output: ```json\n'
+            '{"context_analysis":"ready","internal_emotion":"calm","biological_clock_impact":"neutral",'
+            '"motivation_score":85,'
+            '"action_decision":{"mode":"act_directly","will_reply":true,"will_act":true,"execution_identity":"self",'
+            '"comment_kind":"response","handoff_to":null,"handoff_reason":"","focus_summary":"fix it","context_issue_numbers":[],'
+            '"continue_session":false,"done":false,"target_issue_number":null}}\n'
+            '```\n\nThat should work.'
+        )
+        result = _extract_safe_json(text)
+        assert result["context_analysis"] == "ready"
+        assert result["motivation_score"] == 85
+        assert result["action_decision"]["mode"] == "act_directly"
