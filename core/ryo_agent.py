@@ -30,10 +30,14 @@ LOG_TRUNCATE = 500
 MEMORY_MUTATION_TOOL_NAMES = frozenset({"commit_memory", "refine_memory", "archive_memory"})
 PASSIVE_EXECUTION_MODES = frozenset({"reply_brief", "reply_with_plan", "ask_clarifying_question", "act_directly"})
 ALL_EXECUTION_MODES = PASSIVE_EXECUTION_MODES | {"stay_silent"}
+VISIBLE_COMMENT_KINDS = frozenset({"response", "discussion", "handoff", "final"})
 WILL_MAX_ITERATIONS = 8
 WILL_MAX_TOOL_CALLS = 12
 WILL_CONVERGENCE_LIMIT = 3
 WILL_MAX_REPEAT_PER_RESOURCE = 2
+MAX_SESSION_ROUNDS = 6
+MAX_PUBLIC_DISCUSSION_COMMENTS = 3
+MAX_HANDOFFS = 3
 
 
 def _log(msg: str, *, end: str = "\n") -> None:
@@ -67,10 +71,30 @@ class ExecutionOutcome:
     kind: str
     reason: str
     mutated_tool_names: set[str] = field(default_factory=set)
+    continue_session: bool = False
+    done: bool = False
+    next_identity: str | None = None
+    visible_comment_posted: bool = False
 
     @property
     def acted(self) -> bool:
-        return self.kind in {"replied_on_thread", "acted_without_thread_reply"}
+        return self.kind in {
+            "replied_on_thread",
+            "acted_without_thread_reply",
+            "discussion_posted",
+            "handoff_posted",
+            "final_posted",
+        }
+
+
+@dataclass
+class SessionState:
+    current_identity: str
+    current_event: PluginEvent
+    discussion_count: int = 0
+    handoff_count: int = 0
+    responded_once: bool = False
+    rounds: int = 0
 
 
 class RyoAgent:
@@ -80,6 +104,7 @@ class RyoAgent:
         self,
         *,
         persona: dict[str, Any],
+        persona_registry: dict[str, dict[str, Any]] | None = None,
         skills: Sequence[BaseSkill],
         llm_client: Any,
         plugin: BasePlugin,
@@ -95,6 +120,7 @@ class RyoAgent:
             raise ValueError("persona must include 'model', 'identity', and 'system_prompt'.")
 
         self.persona = persona
+        self.persona_registry = dict(persona_registry or {str(persona["identity"]): dict(persona)})
         self.skills = skills
         self.llm_client = llm_client
         self.plugin = plugin
@@ -111,11 +137,19 @@ class RyoAgent:
         self._skills_by_name = {skill.name: skill for skill in skills}
         self._control_skills_by_name = {NO_REPLY_TOOL_NAME: _NoReplySkill()}
 
+    def _activate_identity(self, identity: str) -> None:
+        persona = self.persona_registry.get(identity)
+        if persona is None:
+            raise ValueError(f"Unknown persona identity for session handoff: {identity}")
+        self.persona = dict(persona)
+        self.plugin.set_identity(str(persona["identity"]), str(persona.get("display_name") or persona["identity"]))
+
     async def run(self, raw_event: Any) -> None:
         event = self.plugin.parse_event(raw_event)
+        identity = str(self.persona["identity"])
+        self._activate_identity(identity)
         history = await self.plugin.fetch_history(event)
         runtime_state = history.runtime_state.model_copy(deep=True)
-        identity = str(self.persona["identity"])
 
         kind = "Street Lurker" if event.is_patrol else "PR" if event.is_pull_request else "Issue"
         target_label = f"#{event.issue_number}" if event.issue_number else "repo-scan"
@@ -131,74 +165,118 @@ class RyoAgent:
                 _log(f"SKIP: street-lurker gate closed until {runtime_state.next_patrol_after}")
                 return
 
-            decision = await self._decide(event=event, history=history)
-            _log(
-                "will_decision: "
-                + json.dumps(decision.model_dump(), ensure_ascii=False)[:LOG_TRUNCATE]
-            )
-
             if event.is_patrol:
                 runtime_state.next_patrol_after = _next_patrol_after_iso()
+            session = SessionState(current_identity=identity, current_event=event)
+            final_outcome = ExecutionOutcome(kind="no_action", reason="no_action")
+            final_event = event
+            final_target_issue_number: int | None = None
+            final_dispatcher_identity = identity
+            skip_reason = ""
 
-            should_reply, skip_reason = self._should_reply(
-                event=event,
-                decision=decision,
-                runtime_state=runtime_state,
-            )
-            if not should_reply:
-                runtime_state.last_routing.event_id = event.event_id
-                runtime_state.last_routing.bot_identity = identity
-                runtime_state.last_routing.reason = skip_reason
-                runtime_state.last_routing.target_issue_number = decision.action_decision.target_issue_number
-                runtime_state.last_routing.routed_at = _utcnow_iso()
-                await self.plugin.update_runtime_state(runtime_state)
-                if event.is_patrol and decision.action_decision.target_issue_number is None:
-                    _log("今天没乐子")
-                else:
-                    _log(f"SKIP: {skip_reason}")
-                return
-
-            active_event = event
-            active_history = history
-            target_issue_number = decision.action_decision.target_issue_number
-            if target_issue_number is not None and target_issue_number != event.issue_number:
-                active_event = await self.plugin.resolve_target_event(event, target_issue_number)
+            for _ in range(MAX_SESSION_ROUNDS):
+                session.rounds += 1
+                self._activate_identity(session.current_identity)
+                active_event = session.current_event
                 active_history = await self.plugin.fetch_history(active_event)
-                _log(
-                    f"{'street-lurker' if event.is_patrol else 'passive'} target resolved to "
-                    f"{'PR' if active_event.is_pull_request else 'Issue'} #{active_event.issue_number}"
-                )
+                decision = await self._decide(event=active_event, history=active_history, session=session)
+                _log("will_decision: " + json.dumps(decision.model_dump(), ensure_ascii=False)[:LOG_TRUNCATE])
 
-            outcome = await self._reply(event=active_event, history=active_history, decision=decision)
-            if outcome.acted:
+                should_reply, skip_reason = self._should_reply(
+                    event=active_event,
+                    decision=decision,
+                    runtime_state=runtime_state,
+                    ignore_fatigue=session.rounds > 1,
+                )
+                if not should_reply:
+                    final_outcome = ExecutionOutcome(kind="no_action", reason=skip_reason, done=True)
+                    final_event = active_event
+                    final_target_issue_number = decision.action_decision.target_issue_number
+                    break
+
+                target_issue_number = decision.action_decision.target_issue_number
+                if target_issue_number is not None and target_issue_number != active_event.issue_number:
+                    active_event = await self.plugin.resolve_target_event(active_event, target_issue_number)
+                    active_history = await self.plugin.fetch_history(active_event)
+                    _log(
+                        f"{'street-lurker' if event.is_patrol else 'passive'} target resolved to "
+                        f"{'PR' if active_event.is_pull_request else 'Issue'} #{active_event.issue_number}"
+                    )
+
+                outcome = await self._reply(event=active_event, history=active_history, decision=decision)
+                final_outcome = outcome
+                final_event = active_event
+                final_target_issue_number = target_issue_number
+                final_dispatcher_identity = session.current_identity
+
+                if outcome.acted:
+                    fatigue_min_seconds, fatigue_max_seconds = self._fatigue_window_for_event(active_event)
+                    runtime_state = _mark_bot_fatigue(
+                        runtime_state,
+                        identity=session.current_identity,
+                        min_seconds=fatigue_min_seconds,
+                        max_seconds=fatigue_max_seconds,
+                    )
+                if decision.action_decision.comment_kind == "discussion" and outcome.visible_comment_posted:
+                    session.discussion_count += 1
+                if decision.action_decision.comment_kind == "handoff" and outcome.visible_comment_posted:
+                    session.handoff_count += 1
+                if outcome.visible_comment_posted:
+                    session.responded_once = True
+
+                if outcome.kind == "handoff_posted" and outcome.next_identity:
+                    if session.handoff_count >= MAX_HANDOFFS:
+                        final_outcome = ExecutionOutcome(
+                            kind="final_posted",
+                            reason="handoff_limit_reached",
+                            done=True,
+                            visible_comment_posted=outcome.visible_comment_posted,
+                            mutated_tool_names=set(outcome.mutated_tool_names),
+                        )
+                        break
+                    session.current_identity = outcome.next_identity
+                    session.current_event = active_event
+                    continue
+
+                if outcome.continue_session and not outcome.done:
+                    session.current_identity = outcome.next_identity or session.current_identity
+                    session.current_event = active_event
+                    continue
+
+                break
+
+            if final_outcome.acted and final_outcome.done:
                 try:
-                    await self._reflect(event=active_event, history=active_history)
+                    await self._reflect(event=final_event, history=await self.plugin.fetch_history(final_event))
                 except Exception as exc:  # pragma: no cover - defensive logging only
                     _log(f"WARN: reflection pass failed: {exc}")
+
             runtime_state.last_routing.event_id = event.event_id
-            runtime_state.last_routing.bot_identity = identity
-            runtime_state.last_routing.reason = outcome.reason
+            runtime_state.last_routing.bot_identity = session.current_identity
+            runtime_state.last_routing.dispatcher_identity = final_dispatcher_identity
+            runtime_state.last_routing.reason = final_outcome.reason
             runtime_state.last_routing.target_issue_number = (
-                active_event.issue_number if outcome.acted else target_issue_number
+                final_event.issue_number if final_outcome.acted else final_target_issue_number
             )
+            runtime_state.last_routing.handoff_to = final_outcome.next_identity
+            runtime_state.last_routing.handoff_reason = ""
+            runtime_state.last_routing.discussion_count = session.discussion_count
+            runtime_state.last_routing.handoff_count = session.handoff_count
             runtime_state.last_routing.routed_at = _utcnow_iso()
-            if outcome.acted:
-                fatigue_min_seconds, fatigue_max_seconds = self._fatigue_window_for_event(event)
-                runtime_state = _mark_bot_fatigue(
-                    runtime_state,
-                    identity=identity,
-                    min_seconds=fatigue_min_seconds,
-                    max_seconds=fatigue_max_seconds,
-                )
             await self.plugin.update_runtime_state(runtime_state)
+            if final_outcome.kind == "no_action":
+                if event.is_patrol and final_target_issue_number is None:
+                    _log("今天没乐子")
+                else:
+                    _log(f"SKIP: {skip_reason or final_outcome.reason}")
         finally:
             _gh_endgroup()
 
-    async def _decide(self, *, event: PluginEvent, history: Any) -> WillDecision:
+    async def _decide(self, *, event: PluginEvent, history: Any, session: SessionState) -> WillDecision:
         readonly_skills = self._available_skills_for_event(event, readonly_only=True)
         tools = [skill.get_tool_definition() for skill in readonly_skills]
         system_prompt = self._decision_prompt(history=history)
-        user_prompt = self._decision_user_prompt(event=event, history=history)
+        user_prompt = self._decision_user_prompt(event=event, history=history, session=session)
         messages: list[ChatMessage] = [
             {"role": "system", "content": system_prompt},
             *history.messages,
@@ -310,7 +388,7 @@ class RyoAgent:
                     json_repair_only = True
                     continue
                 try:
-                    self._validate_decision(event=event, decision=decision)
+                    self._validate_decision(event=event, decision=decision, session=session)
                 except ValueError as exc:
                     _log(f"WARN: invalid will decision constraint: {exc}")
                     messages.append(self._assistant_message_payload(assistant_message))
@@ -330,7 +408,14 @@ class RyoAgent:
             internal_emotion="Disengaged",
             biological_clock_impact="Prefer silence over malformed output.",
             motivation_score=0,
-            action_decision=ActionDecision(mode="stay_silent", will_reply=False, will_act=False, target_issue_number=None),
+            action_decision=ActionDecision(
+                mode="stay_silent",
+                will_reply=False,
+                will_act=False,
+                target_issue_number=None,
+                comment_kind="final",
+                done=True,
+            ),
         )
 
     async def _reply(self, *, event: PluginEvent, history: Any, decision: WillDecision) -> ExecutionOutcome:
@@ -389,6 +474,9 @@ class RyoAgent:
                                     kind="acted_without_thread_reply",
                                     reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
                                     mutated_tool_names=set(executed_tool_names),
+                                    done=decision.action_decision.done or not decision.action_decision.continue_session,
+                                    continue_session=decision.action_decision.continue_session,
+                                    next_identity=decision.action_decision.handoff_to,
                                 )
                             return ExecutionOutcome(kind="no_action", reason="no_reply")
                         if self._is_mutating_tool(tool_name):
@@ -412,16 +500,30 @@ class RyoAgent:
                                 kind="acted_without_thread_reply",
                                 reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
                                 mutated_tool_names=set(executed_tool_names),
+                                done=decision.action_decision.done or not decision.action_decision.continue_session,
+                                continue_session=decision.action_decision.continue_session,
+                                next_identity=decision.action_decision.handoff_to,
                             )
                         _log("WARN: text produced during repo-scan without a thread target; treating as no action")
                         return ExecutionOutcome(kind="no_action", reason="no_action")
                     _log(f"reply ({len(reply_text)} chars): {reply_text[:LOG_TRUNCATE]}")
                     await self.plugin.send_reply(event, reply_text, subconscious)
                     _log("reply posted")
+                    outcome_kind = "replied_on_thread"
+                    if decision.action_decision.comment_kind == "discussion":
+                        outcome_kind = "discussion_posted"
+                    elif decision.action_decision.comment_kind == "handoff":
+                        outcome_kind = "handoff_posted"
+                    elif decision.action_decision.comment_kind == "final":
+                        outcome_kind = "final_posted"
                     return ExecutionOutcome(
-                        kind="replied_on_thread",
-                        reason=_reason_from_tools(executed_tool_names, default="replied"),
+                        kind=outcome_kind,
+                        reason=self._comment_reason(decision=decision, executed_tool_names=executed_tool_names),
                         mutated_tool_names=set(executed_tool_names),
+                        continue_session=decision.action_decision.continue_session,
+                        done=decision.action_decision.done or not decision.action_decision.continue_session,
+                        next_identity=decision.action_decision.handoff_to,
+                        visible_comment_posted=True,
                     )
 
                 if executed_tool_names:
@@ -430,6 +532,9 @@ class RyoAgent:
                         kind="acted_without_thread_reply",
                         reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
                         mutated_tool_names=set(executed_tool_names),
+                        continue_session=decision.action_decision.continue_session,
+                        done=decision.action_decision.done or not decision.action_decision.continue_session,
+                        next_identity=decision.action_decision.handoff_to,
                     )
 
                 _log("WARN: no tool calls and no text reply, breaking")
@@ -447,7 +552,7 @@ class RyoAgent:
                 return ExecutionOutcome(kind="no_action", reason="no_action")
             _log("WARN: max iterations reached, sending fallback message")
             await self.plugin.send_reply(event, DEFAULT_FALLBACK_MESSAGE, subconscious)
-            return ExecutionOutcome(kind="replied_on_thread", reason="replied")
+            return ExecutionOutcome(kind="final_posted", reason="replied", done=True, visible_comment_posted=True)
         finally:
             clear_skill_context(context_token)
 
@@ -631,7 +736,7 @@ class RyoAgent:
             + "\n\n你现在处于第一阶段：只能做意愿判断，不能生成公开回复。"
             "\n你必须最终只输出一个 JSON 对象，严格匹配以下结构："
             '\n{"context_analysis":"...","internal_emotion":"...","biological_clock_impact":"...",'
-            '"motivation_score":0,"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"target_issue_number":null}}'
+            '"motivation_score":0,"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","handoff_to":null,"handoff_reason":"","continue_session":false,"done":false,"target_issue_number":null}}'
             "\n规则："
             "\n1. 当前看到的上下文是故意片面的；如果信息不够，先使用只读工具继续了解。"
             "\n2. 先排除 coordination、mind issue、memory 这类 bot 内务；默认不要把它们当候选工作。"
@@ -639,14 +744,18 @@ class RyoAgent:
             "\n4. 若当前消息或线程里出现明确编号（如 #54），先用 read_thread_meta/read_issue_body 精确核实，再决定是否扩展到 search_repo_context 或代码搜索。"
             "\n5. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
             "\n6. action_decision.mode 只能是：reply_brief、reply_with_plan、ask_clarifying_question、act_directly、stay_silent。"
-            "\n7. 如果这是被动事件（非 patrol），你必须回应或做事，不能选择 stay_silent。"
+            "\n7. comment_kind 只能是：response、discussion、handoff、final。discussion 用来公开技术分歧/补充，handoff 用来显式把麦克风交给另一个 bot，final 用来公开收口。"
+            "\n8. 如果这是被动事件（非 patrol），你必须回应或做事，不能选择 stay_silent。"
             "\n  被动事件里，reply_brief 适合直接事实回答；reply_with_plan 适合解释现状和下一步；ask_clarifying_question 只问一个关键问题；act_directly 适合直接动手。"
-            "\n8. 如果这是街溜子事件，stay_silent 合法，但只有在你确认没有新鲜动态、没有 stale thread、没有小型代码/测试/文档机会、也没有可收尾事项时才能用。"
+            "\n9. 如果这是街溜子事件，stay_silent 合法，但只有在你确认没有新鲜动态、没有 stale thread、没有小型代码/测试/文档机会、也没有可收尾事项时才能用。"
             "\n  不要因为“最近 24h 没有新增 issue/PR”就直接开摆；你要把 patrol_brief 当作机会雷达，主动寻找可推进的小机会。"
-            "\n9. target_issue_number 在街溜子事件里可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
-            "\n10. 只有当你真的准备公开发言时，will_reply 才能为 true；只有当你真的准备直接执行动作时，will_act 才能为 true。"
-            "\n11. 不要输出 Markdown，不要解释，不要包裹代码块。"
-            "\n12. motivation_score 评分锚定（0-100 整数）："
+            "\n10. target_issue_number 在街溜子事件里可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
+            "\n11. execution_identity='self' 表示当前 bot 自己执行这一轮；如果你要交给别人，填写 handoff_to，并把 comment_kind 设成 handoff 或 discussion。"
+            "\n12. 公开技术讨论最多 2-3 轮；如果已经讨论过几轮，下一步要么收敛成 final，要么 handoff，要么提出唯一关键阻塞问题。"
+            "\n13. 只有当你真的准备公开发言时，will_reply 才能为 true；只有当你真的准备直接执行动作时，will_act 才能为 true。"
+            "\n14. continue_session=true 表示这一轮之后 session 还要继续；done=true 表示当前事项已经收口。二者不能同时为 true。"
+            "\n15. 不要输出 Markdown，不要解释，不要包裹代码块。"
+            "\n16. motivation_score 评分锚定（0-100 整数）："
             "\n  0-29: 无趣/无关/已经答复过，不应说话"
             "\n  30-59: 常规跟进，有轻微价值但不必抢麦"
             "\n  60-79: 发现了值得讨论的技术问题或可改进点"
@@ -658,6 +767,7 @@ class RyoAgent:
 
     def _reply_prompt(self, *, history: Any, event: PluginEvent, decision: WillDecision) -> str:
         mode = decision.action_decision.mode
+        comment_kind = decision.action_decision.comment_kind
         prompt = (
             self.persona["system_prompt"]
             + self._mind_context(history)
@@ -677,9 +787,17 @@ class RyoAgent:
             prompt += "\n5. 当前 mode=act_directly：以完成动作和收尾为优先；若需要公开说明，保持简短。"
         elif event.is_patrol:
             prompt += "\n5. 当前 mode=stay_silent：只有在你已经确认没有值得推进的机会时才允许结束。"
+        if comment_kind == "discussion":
+            prompt += "\n6. 当前 comment_kind=discussion：给出一条短、聚焦、工程化的公开技术评论。必须回应前一个 bot 的观点，并推动收敛，不要复述现状。"
+        elif comment_kind == "handoff":
+            prompt += "\n6. 当前 comment_kind=handoff：写一条显式交接评论，说明已完成到哪里、为什么要交给下一个 bot、下一步该做什么。"
+        elif comment_kind == "final":
+            prompt += "\n6. 当前 comment_kind=final：这是一条收口评论，必须清楚说明最终结论、最终动作或当前唯一阻塞点。"
+        else:
+            prompt += "\n6. 当前 comment_kind=response：这是对当前线程的直接公开回应。"
         return prompt
 
-    def _decision_user_prompt(self, *, event: PluginEvent, history: Any) -> str:
+    def _decision_user_prompt(self, *, event: PluginEvent, history: Any, session: SessionState | None = None) -> str:
         prompt = event.message
         mentioned_issue_refs = _mentioned_issue_refs(event.message)
         if not event.is_patrol and mentioned_issue_refs:
@@ -691,6 +809,12 @@ class RyoAgent:
             )
         if event.is_patrol and history.patrol_brief:
             prompt += f"\n\n街溜子模式机会雷达：\n{history.patrol_brief}"
+        if session is not None:
+            prompt += (
+                f"\n\n当前公开协作 session 状态：active_bot={session.current_identity} "
+                f"discussion_count={session.discussion_count} handoff_count={session.handoff_count} "
+                f"responded_once={str(session.responded_once).lower()}。"
+            )
         return prompt
 
     def _reflection_prompt(self, *, history: Any) -> str:
@@ -725,7 +849,7 @@ class RyoAgent:
             f"update long-term memory.\n\n{history.mind_body}\n---\n"
         )
 
-    def _validate_decision(self, *, event: PluginEvent, decision: WillDecision) -> None:
+    def _validate_decision(self, *, event: PluginEvent, decision: WillDecision, session: SessionState) -> None:
         mode = decision.action_decision.mode
         if mode == "stay_silent" and (decision.action_decision.will_reply or decision.action_decision.will_act):
             inferred_mode = "act_directly" if decision.action_decision.will_act and not decision.action_decision.will_reply else "reply_with_plan"
@@ -735,6 +859,10 @@ class RyoAgent:
             raise ValueError(
                 f"action_decision.mode must be one of {sorted(ALL_EXECUTION_MODES)}, got {mode!r}"
             )
+        if decision.action_decision.comment_kind not in VISIBLE_COMMENT_KINDS:
+            raise ValueError(
+                f"comment_kind must be one of {sorted(VISIBLE_COMMENT_KINDS)}, got {decision.action_decision.comment_kind!r}"
+            )
         if mode == "stay_silent":
             if decision.action_decision.will_reply or decision.action_decision.will_act:
                 raise ValueError("stay_silent decisions cannot also set will_reply or will_act true.")
@@ -743,6 +871,28 @@ class RyoAgent:
             return
         if not (decision.action_decision.will_reply or decision.action_decision.will_act):
             raise ValueError("Non-silent decisions must set will_reply or will_act.")
+        if decision.action_decision.done and decision.action_decision.continue_session:
+            raise ValueError("done and continue_session cannot both be true.")
+        if decision.action_decision.comment_kind == "discussion":
+            if session.discussion_count >= MAX_PUBLIC_DISCUSSION_COMMENTS:
+                raise ValueError("discussion comment limit reached; you must conclude or hand off.")
+            if decision.action_decision.done:
+                raise ValueError("discussion comments must continue the session instead of finishing it immediately.")
+        if decision.action_decision.comment_kind == "handoff":
+            if not decision.action_decision.handoff_to:
+                raise ValueError("handoff comments must specify handoff_to.")
+            if decision.action_decision.handoff_to == session.current_identity:
+                raise ValueError("handoff_to must point to a different bot identity.")
+            if session.handoff_count >= MAX_HANDOFFS:
+                raise ValueError("handoff limit reached; you must conclude in the current bot.")
+        elif decision.action_decision.handoff_to:
+            raise ValueError("handoff_to is only valid when comment_kind is 'handoff'.")
+        if decision.action_decision.execution_identity not in {"self", *self.persona_registry.keys()}:
+            raise ValueError(f"Unknown execution_identity: {decision.action_decision.execution_identity!r}")
+        if decision.action_decision.handoff_to and decision.action_decision.handoff_to not in self.persona_registry:
+            raise ValueError(f"Unknown handoff_to identity: {decision.action_decision.handoff_to!r}")
+        if event.is_patrol and mode == "stay_silent" and not decision.action_decision.done:
+            decision.action_decision.done = True
 
     def _should_reply(
         self,
@@ -750,6 +900,7 @@ class RyoAgent:
         event: PluginEvent,
         decision: WillDecision,
         runtime_state: RepoRuntimeState,
+        ignore_fatigue: bool = False,
     ) -> tuple[bool, str]:
         if decision.action_decision.mode == "stay_silent":
             return False, "bot chose silence"
@@ -760,6 +911,9 @@ class RyoAgent:
         if decision.motivation_score < self.motivation_threshold:
             return False, f"street-lurker motivation {decision.motivation_score} below threshold {self.motivation_threshold}"
 
+        if ignore_fatigue:
+            return True, "session continuation approved"
+
         fatigue_state = runtime_state.bot_fatigue.get(str(self.persona["identity"]))
         if fatigue_state and fatigue_state.next_available_at:
             try:
@@ -769,6 +923,17 @@ class RyoAgent:
             if next_available and datetime.now(timezone.utc) < next_available:
                 return False, f"fatigue cooldown active until {fatigue_state.next_available_at}"
         return True, "reply approved"
+
+    def _comment_reason(self, *, decision: WillDecision, executed_tool_names: set[str]) -> str:
+        if executed_tool_names:
+            return _reason_from_tools(executed_tool_names, default="acted_without_comment")
+        if decision.action_decision.comment_kind == "discussion":
+            return "discussion_posted"
+        if decision.action_decision.comment_kind == "handoff":
+            return "handoff_posted"
+        if decision.action_decision.comment_kind == "final":
+            return "finalized"
+        return "replied"
 
     def _available_reflection_skills(self, event: PluginEvent) -> Sequence[BaseSkill]:
         skills: list[BaseSkill] = []

@@ -41,8 +41,13 @@ class BotFatigueState(BaseModel):
 class RoutingRecord(BaseModel):
     event_id: str = ""
     bot_identity: str = ""
+    dispatcher_identity: str = ""
     reason: str = ""
     target_issue_number: int | None = None
+    handoff_to: str | None = None
+    handoff_reason: str = ""
+    discussion_count: int = 0
+    handoff_count: int = 0
     routed_at: str | None = None
 
 
@@ -57,6 +62,12 @@ class ActionDecision(BaseModel):
     mode: str = "stay_silent"
     will_reply: bool
     will_act: bool = False
+    execution_identity: str = "self"
+    comment_kind: str = "response"
+    handoff_to: str | None = None
+    handoff_reason: str = ""
+    continue_session: bool = False
+    done: bool = False
     target_issue_number: int | None = None
 
 
@@ -91,6 +102,10 @@ class BasePlugin(ABC):
         subconscious: dict[str, Any] | None = None,
     ) -> None:
         """Deliver the final assistant reply back through the platform."""
+
+    @abstractmethod
+    def set_identity(self, identity: str, display_name: str) -> None:
+        """Switch the active bot identity used for mind issue lookups and comment markers."""
 
     @abstractmethod
     async def update_runtime_state(self, state: RepoRuntimeState) -> RepoRuntimeState:

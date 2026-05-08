@@ -52,9 +52,12 @@ class GitHubPlugin(BasePlugin):
         display_name: str = "",
     ) -> None:
         self._api = GitHubApiClient(token=token, client=client, api_base_url=api_base_url)
+        self.set_identity(identity, display_name or identity)
+        self._marker_author_logins = _marker_author_logins_from_env()
+
+    def set_identity(self, identity: str, display_name: str) -> None:
         self._identity = identity
         self._display_name = display_name or identity
-        self._marker_author_logins = _marker_author_logins_from_env()
         self._state_pattern = re.compile(
             rf"<!--\s*ryo:{re.escape(identity)}:\s*(?P<payload>\{{.*?\}})\s*-->",
             re.DOTALL,

@@ -225,13 +225,17 @@ bot 被唤醒时先输出一段 JSON：
   "biological_clock_impact": "现在像深夜，懒得说太多。",
   "motivation_score": 23,
   "action_decision": {
+    "mode": "stay_silent",
     "will_reply": false,
+    "will_act": false,
     "target_issue_number": null
   }
 }
 ```
 
 被动事件和街溜子模式现在走两套规则。只要是人类触发的 `issues` / `issue_comment` / `pull_request` / `pull_request_review_comment`，bot 就必须回应、追问或直接做事，不会再因为 `motivation_score` 太低而闭麦。`RYOBOT_MOTIVATION_THRESHOLD` 只用于街溜子模式：当 bot 自己巡逻时，它仍然可以因为“没乐子”而沉默，但这时看的不只是近 24 小时动态，还会看 stale tracker、旧 RFC、文档/测试缺口和小型实现机会。动作完成后，仓库会把该 bot 的疲劳信息写入 coordination issue，因此冷却是全仓库共享的，而不是某条线程单独计时。默认被动事件使用 `RYOBOT_FATIGUE_*`，街溜子模式使用更轻的 `RYOBOT_STREET_LURKER_FATIGUE_*`。
+
+同一个外部事件现在也不再只跑一轮回复。RyoBot 会把一次 webhook 处理成一个**公开协作 session**：必要时可以在同一个 workflow run 里连续经历 `discussion -> handoff -> act_directly -> final`，并把关键协作节点公开写进 comments。bot 之间可以短辩技术方案，但始终是**串行接力**，任一时刻只有一个 bot 在 work；公开讨论最多 2-3 轮，之后必须收敛成结论、派单或明确行动方案。
 
 ### 权限与安全边界
 
@@ -300,7 +304,7 @@ Ryo Ghost Engine 拒绝这个捆绑套餐。
 | `run_command` | 写 | 在仓库工作目录执行 allowlist 内的开发命令（pytest/ruff/mypy/pyright 等） |
 | `no_reply` | 控制 | 明确选择不公开回复，避免无意义 fallback 评论 |
 
-单次执行最多进行 `MAX_ITERATIONS` 轮工具调用（默认 100）。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息；如果调用 `no_reply`，本轮会静默结束。
+单次执行最多进行 `MAX_ITERATIONS` 轮工具调用（默认 100）。如果 LLM 连续调用工具而不给出最终文本回复，循环结束后返回 fallback 消息；如果调用 `no_reply`，本轮会静默结束。除工具调用上限外，公开协作 session 本身也有 continuation / handoff / discussion 上限，防止 bot 在同一条线程里无限讨论。
 
 ---
 

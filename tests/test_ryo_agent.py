@@ -89,6 +89,7 @@ class FakePlugin(BasePlugin):
         self.sent_replies: list[tuple[PluginEvent, str, dict[str, Any] | None]] = []
         self.updated_runtime_states: list[RepoRuntimeState] = []
         self.resolved_targets: list[int] = []
+        self.identity_history: list[tuple[str, str]] = []
 
     def parse_event(self, raw_payload: Any) -> PluginEvent:
         return self._event
@@ -122,6 +123,9 @@ class FakePlugin(BasePlugin):
         subconscious: dict[str, Any] | None = None,
     ) -> None:
         self.sent_replies.append((event, content, subconscious))
+
+    def set_identity(self, identity: str, display_name: str) -> None:
+        self.identity_history.append((identity, display_name))
 
     async def update_runtime_state(self, state: RepoRuntimeState) -> RepoRuntimeState:
         self.updated_runtime_states.append(state)
@@ -225,8 +229,18 @@ def build_agent(
 ) -> tuple[RyoAgent, FakeCompletions]:
     fake_completions = FakeCompletions(responses)
     llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+    persona_registry = {
+        identity: {
+            "identity": identity,
+            "display_name": identity.title(),
+            "model": "gpt-4.1-mini",
+            "system_prompt": f"You are {identity}.",
+        }
+        for identity in ["architect", "reviewer", "pm", "explorer", "coder"]
+    }
     agent = RyoAgent(
-        persona={"identity": "architect", "model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        persona={"identity": "architect", "display_name": "Architect", "model": "gpt-4.1-mini", "system_prompt": "You are helpful."},
+        persona_registry=persona_registry,
         skills=skills or [EchoSkill()],
         llm_client=llm_client,
         plugin=plugin,
@@ -352,6 +366,212 @@ async def test_passive_event_replies_even_when_motivation_is_below_threshold() -
     await agent.run(raw_event={})
 
     assert plugin.sent_replies[0][1] == "Short answer anyway"
+
+
+@pytest.mark.asyncio
+async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() -> None:
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-impl",
+            message="[Comment on Issue #12]\n\n请直接补实现并提 PR",
+            author="octocat",
+            author_association="OWNER",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+        ),
+        history_by_issue={12: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState())},
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "need one architecture constraint first",
+                            "internal_emotion": "focused",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 88,
+                            "action_decision": {
+                                "mode": "reply_with_plan",
+                                "will_reply": True,
+                                "will_act": False,
+                                "execution_identity": "self",
+                                "comment_kind": "discussion",
+                                "handoff_to": None,
+                                "handoff_reason": "",
+                                "continue_session": True,
+                                "done": False,
+                                "target_issue_number": None,
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="先别急着改，接口边界要保持最小。")),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "now hand this to coder",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 82,
+                            "action_decision": {
+                                "mode": "reply_with_plan",
+                                "will_reply": True,
+                                "will_act": False,
+                                "execution_identity": "self",
+                                "comment_kind": "handoff",
+                                "handoff_to": "coder",
+                                "handoff_reason": "明确实现任务，下一步该直接写代码并提 PR。",
+                                "continue_session": True,
+                                "done": False,
+                                "target_issue_number": None,
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="@Ryo Coder 这一步已经清楚是实现任务：请直接补代码并提 PR。")),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "implementation is straightforward now",
+                            "internal_emotion": "ready",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 93,
+                            "action_decision": {
+                                "mode": "act_directly",
+                                "will_reply": True,
+                                "will_act": True,
+                                "execution_identity": "self",
+                                "comment_kind": "final",
+                                "handoff_to": None,
+                                "handoff_reason": "",
+                                "continue_session": False,
+                                "done": True,
+                                "target_issue_number": None,
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(
+                            id="call-pr",
+                            function=FakeFunction(name="create_pull_request", arguments='{"text":"ship it"}'),
+                        )
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content="PR 已经提了，我这边收口。")),
+            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+        ],
+        skills=[CreatePullRequestTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    assert plugin.sent_replies[0][1] == "先别急着改，接口边界要保持最小。"
+    assert "实现任务" in plugin.sent_replies[1][1]
+    assert plugin.sent_replies[2][1] == "PR 已经提了，我这边收口。"
+    assert plugin.identity_history[0][0] == "architect"
+    assert any(identity == "coder" for identity, _ in plugin.identity_history)
+    assert plugin.updated_runtime_states[-1].last_routing.handoff_count == 1
+    assert plugin.updated_runtime_states[-1].last_routing.discussion_count == 1
+
+
+@pytest.mark.asyncio
+async def test_discussion_limit_forces_conclusion_in_same_session() -> None:
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="street lurker",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=patrol_event,
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
+    repeated_discussion = build_response(
+        FakeMessage(
+            content=json.dumps(
+                {
+                    "context_analysis": "still debating",
+                    "internal_emotion": "engaged",
+                    "biological_clock_impact": "neutral",
+                    "motivation_score": 90,
+                    "action_decision": {
+                        "mode": "reply_with_plan",
+                        "will_reply": True,
+                        "will_act": False,
+                        "execution_identity": "self",
+                        "comment_kind": "discussion",
+                        "handoff_to": None,
+                        "handoff_reason": "",
+                        "continue_session": True,
+                        "done": False,
+                        "target_issue_number": 12,
+                    },
+                }
+            )
+        )
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            repeated_discussion,
+            build_response(FakeMessage(content="观点一。")),
+            repeated_discussion,
+            build_response(FakeMessage(content="观点二。")),
+            repeated_discussion,
+            build_response(FakeMessage(content="观点三。")),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "must conclude now",
+                            "internal_emotion": "settled",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 85,
+                            "action_decision": {
+                                "mode": "reply_with_plan",
+                                "will_reply": True,
+                                "will_act": False,
+                                "execution_identity": "self",
+                                "comment_kind": "final",
+                                "handoff_to": None,
+                                "handoff_reason": "",
+                                "continue_session": False,
+                                "done": True,
+                                "target_issue_number": 12,
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(FakeMessage(content="讨论到此为止，当前结论已经足够了。")),
+            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+        ],
+    )
+
+    await agent.run(raw_event={})
+
+    assert plugin.updated_runtime_states[-1].last_routing.discussion_count == 3
+    assert plugin.sent_replies[-1][1] == "讨论到此为止，当前结论已经足够了。"
 
 
 @pytest.mark.asyncio

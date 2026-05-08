@@ -117,14 +117,24 @@ async def _run(
             os.getenv("RYOBOT_FATIGUE_MAX_SECONDS", str(DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS)),
         )
     )
-    roster_lines = [f"- {b.display_name}（{b.identity}）：{b.description}" for b in list_bots()]
+    all_bots = list_bots()
+    roster_lines = [f"- {b.display_name}（{b.identity}）：{b.description}" for b in all_bots]
     roster = "当前 Bot 社会成员：\n" + "\n".join(roster_lines)
-    system_prompt = f"{roster}\n\n{bot.system_prompt}"
+    fix_signal = ""
     if _detect_fix_command(payload):
-        system_prompt += (
+        fix_signal = (
             "\n\n补充信号：可信维护者触发了 /fix。"
             "这会显著提高你对直接实现或推动修复的意愿，但不会跳过意愿评估、全局麦克风、或疲劳机制。"
         )
+    persona_registry = {
+        b.identity: {
+            "identity": b.identity,
+            "display_name": b.display_name,
+            "model": model,
+            "system_prompt": f"{roster}\n\n{b.system_prompt}{fix_signal}",
+        }
+        for b in all_bots
+    }
 
     http_client = httpx.AsyncClient(
         base_url="https://api.github.com",
@@ -181,11 +191,9 @@ async def _run(
             llm_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         ryo_agent = RyoAgent(
             persona={
-                "identity": bot.identity,
-                "display_name": bot.display_name,
-                "model": model,
-                "system_prompt": system_prompt,
+                **persona_registry[bot.identity],
             },
+            persona_registry=persona_registry,
             skills=skills,
             llm_client=llm_client,
             plugin=plugin,
