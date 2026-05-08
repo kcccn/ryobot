@@ -294,7 +294,8 @@ class RyoAgent:
             for i in range(WILL_MAX_ITERATIONS):
                 _log(f"--- will iteration {i + 1}/{WILL_MAX_ITERATIONS} ---")
                 t_start = time.monotonic()
-                response = await self._create_completion_with_retry(messages=messages, tools=tools)
+                active_tools: list[dict[str, Any]] = [] if json_repair_only else tools
+                response = await self._create_completion_with_retry(messages=messages, tools=active_tools)
                 t_elapsed = time.monotonic() - t_start
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
@@ -368,7 +369,10 @@ class RyoAgent:
                                     "role": "user",
                                     "content": (
                                         "You have been looping without discovering new information. "
-                                        "You MUST output your WillDecision JSON now — no more tool calls."
+                                        "You MUST output your WillDecision JSON NOW. "
+                                        "If you fail to produce valid JSON this iteration, you will fall back to "
+                                        '"stay_silent" and all your analysis will be lost. '
+                                        "No more tool calls."
                                     ),
                                 }
                             )
@@ -1073,7 +1077,10 @@ class RyoAgent:
                 "role": "user",
                 "content": (
                     f"Your tool calls ({rejected}) were rejected: {reason}. "
-                    "Output only the WillDecision JSON now — no more tool calls."
+                    "Tools are no longer available. You must synthesize what you already know. "
+                    "Output only the WillDecision JSON NOW. "
+                    "If you fail to produce valid JSON, you will fall back to stay_silent "
+                    "and all your analysis will be lost."
                 ),
             }
         )
