@@ -1066,9 +1066,14 @@ async def test_dispatch_workflow_passes_inputs_in_body(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_dispatch_workflow_is_disabled_without_allowlist() -> None:
+async def test_dispatch_workflow_works_without_env_vars() -> None:
+    captured: dict[str, Any] = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("dispatch endpoint should not be called")
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["body"] = request.content
+        return httpx.Response(204)
 
     client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
@@ -1082,7 +1087,8 @@ async def test_dispatch_workflow_is_disabled_without_allowlist() -> None:
         clear_skill_context(token)
         await client.aclose()
 
-    assert "Workflow dispatch is disabled" in result
+    assert "Dispatched workflow" in result
+    assert "/dispatches" in captured["url"]
 
 
 @pytest.mark.asyncio

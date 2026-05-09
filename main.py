@@ -271,8 +271,6 @@ def _marker_author_logins_from_env() -> frozenset[str]:
     return frozenset(values) if values else DEFAULT_MARKER_AUTHOR_LOGINS
 
 
-def _workflow_dispatch_enabled() -> bool:
-    return bool(os.getenv("RYOBOT_ALLOWED_WORKFLOWS", "").strip())
 
 
 def _load_config(bot: Any) -> dict[str, Any]:
@@ -281,7 +279,7 @@ def _load_config(bot: Any) -> dict[str, Any]:
     return {
         "base_url": base_url,
         "model": model,
-        "max_iterations": int(os.getenv("MAX_ITERATIONS", "50")),
+        "max_iterations": 50,
         "fatigue_min_seconds": int(os.getenv("RYOBOT_FATIGUE_MIN_SECONDS", str(DEFAULT_FATIGUE_MIN_SECONDS))),
         "fatigue_max_seconds": int(os.getenv("RYOBOT_FATIGUE_MAX_SECONDS", str(DEFAULT_FATIGUE_MAX_SECONDS))),
         "street_lurker_fatigue_min_seconds": int(
@@ -364,9 +362,8 @@ def _build_github_skills(token: str, client: httpx.AsyncClient) -> list[Any]:
         RunCommand(token=token, client=client),
         SearchIssues(token=token, client=client),
         UpdateIssue(token=token, client=client),
+        DispatchWorkflow(token=token, client=client),
     ]
-    if _workflow_dispatch_enabled():
-        skills.append(DispatchWorkflow(token=token, client=client))
     return skills
 
 

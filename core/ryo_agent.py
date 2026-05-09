@@ -158,6 +158,9 @@ class RyoAgent:
 
             for _ in range(MAX_SESSION_ROUNDS):
                 session.rounds += 1
+                if session.rounds > 1 and final_outcome.done:
+                    _log("session already completed action in previous round; breaking")
+                    break
                 active_event = session.current_event
                 active_history = await self.plugin.fetch_history(active_event)
                 decision, scout_brief = await self._decide(event=active_event, history=active_history, session=session)
@@ -237,6 +240,7 @@ class RyoAgent:
         for (tool_name, resource_key), count in sorted(resource_uses.items()):
             label = _scout_resource_label(tool_name, resource_key)
             lines.append(f"- {label}")
+            lines.append(f"<!-- ryo:scout_key:{tool_name}:{resource_key} -->")
         return "\n".join(lines)
 
     async def _decide(self, *, event: PluginEvent, history: Any, session: SessionState) -> tuple[ScoutDecision, str]:
@@ -262,6 +266,7 @@ class RyoAgent:
         try:
             for i in range(scout_iterations):
                 _log(f"--- scout iteration {i + 1}/{scout_iterations} ---")
+                per_iteration_read_keys: set[tuple[str, str]] = set()
                 t_start = time.monotonic()
                 active_tools: list[dict[str, Any]] = [] if json_repair_only else tools
                 response = await self._create_completion_with_retry(
@@ -309,6 +314,7 @@ class RyoAgent:
                             tool_call,
                             event=event,
                             resource_uses=resource_uses,
+                            per_iteration_read_keys=per_iteration_read_keys,
                         )
                         if isinstance(tool_result, _NoReplyResult):
                             break
@@ -452,6 +458,7 @@ class RyoAgent:
         tools = [skill.get_tool_definition() for skill in [*available_skills, *self._control_skills_by_name.values()]]
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
+        scout_read_keys: set[tuple[str, str]] = _parse_scout_brief_keys(scout_brief)
         executed_tool_names: set[str] = set()
 
         self._log_available_tools("reply", tools)
@@ -489,6 +496,14 @@ class RyoAgent:
                             tool_name=tool_name,
                             args_raw=args_raw,
                         )
+                        if tool_result is None and not self._is_mutating_tool(tool_name):
+                            resource_key = self._scout_resource_key(tool_name, args_raw)
+                            if resource_key is not None and resource_key in scout_read_keys:
+                                tool_result = (
+                                    f"Tool skipped: resource {resource_key[0]}({resource_key[1]}) "
+                                    "was already read during the Scout phase. "
+                                    "Use the scout brief above instead of re-reading."
+                                )
                         if tool_result is None:
                             tool_result = await self._execute_tool_call(tool_call, event=event)
                         if tool_name == NO_REPLY_TOOL_NAME:
@@ -774,9 +789,28 @@ class RyoAgent:
         *,
         event: PluginEvent,
         resource_uses: dict[tuple[str, str], int],
+        per_iteration_read_keys: set[tuple[str, str]] | None = None,
     ) -> str | _NoReplyResult:
         tool_name, args_raw = self._tool_call_details(tool_call)
         resource_key = self._scout_resource_key(tool_name, args_raw)
+        # Prevent redundant reads within the same iteration
+        if per_iteration_read_keys is not None and resource_key is not None:
+            # Also check sibling keys for same-iteration dedup
+            any_hit = resource_key in per_iteration_read_keys
+            if not any_hit and resource_key[0] == "read_thread_context" and event.issue_number > 0:
+                any_hit = ("read_issue_body", str(event.issue_number)) in per_iteration_read_keys
+            if not any_hit and resource_key[0] == "read_issue_body":
+                try:
+                    parsed = self._parse_tool_arguments(args_raw)
+                    if int(parsed.get("issue_number", 0) or 0) == event.issue_number:
+                        any_hit = ("read_thread_context", "0") in per_iteration_read_keys
+                except Exception:
+                    pass
+            if any_hit:
+                return (
+                    f"Tool skipped: already read {resource_key[0]}({resource_key[1]}) "
+                    "in this iteration. Use the information you already have."
+                )
         # Cross-reference: read_thread_context and read_issue_body on the same
         # thread return the same content, so share their resource quota.
         sibling_keys: list[tuple[str, str]] = []
@@ -803,6 +837,10 @@ class RyoAgent:
             resource_uses[resource_key] = resource_uses.get(resource_key, 0) + 1
             for sibling in sibling_keys:
                 resource_uses[sibling] = resource_uses.get(sibling, 0) + 1
+            if per_iteration_read_keys is not None:
+                per_iteration_read_keys.add(resource_key)
+                for sibling in sibling_keys:
+                    per_iteration_read_keys.add(sibling)
         return await self._execute_tool_call(tool_call, event=event)
 
     async def _execute_validated_skill(self, skill: BaseSkill, tool_call: Any) -> str | _NoReplyResult:
@@ -1220,6 +1258,19 @@ def _scout_resource_label(tool_name: str, resource_key: str) -> str:
     return f"{tool_name}({resource_key[:80]})"
 
 
+
+
+_SCOUT_KEY_RE = re.compile(r"<!--\s*ryo:scout_key:(\w+):(.+?)\s*-->")
+
+
+def _parse_scout_brief_keys(scout_brief: str) -> set[tuple[str, str]]:
+    """Parse structured scout key markers from scout_brief text."""
+    if not scout_brief:
+        return set()
+    return {
+        (match.group(1), match.group(2).strip())
+        for match in _SCOUT_KEY_RE.finditer(scout_brief)
+    }
 
 
 def _patrol_due(runtime_state: RepoRuntimeState) -> bool:

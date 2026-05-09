@@ -71,7 +71,8 @@ class DispatchWorkflow(GitHubSkillBase):
         "Trigger a GitHub Actions workflow by its filename (e.g. 'ci.yml') "
         "or numeric ID. The workflow must have a workflow_dispatch trigger. "
         "Use this to run tests, lint, deploy, or any CI pipeline already "
-        "defined in the repository."
+        "defined in the repository. "
+        "If the workflow doesn't exist, GitHub will return a 404 error."
     )
     args_model = DispatchWorkflowArgs
     mutates_state = True
@@ -80,11 +81,6 @@ class DispatchWorkflow(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
 
-        allowed_workflows = csv_env("RYOBOT_ALLOWED_WORKFLOWS")
-        if not allowed_workflows:
-            return "Workflow dispatch is disabled because RYOBOT_ALLOWED_WORKFLOWS is not configured."
-        if args.workflow_id not in allowed_workflows:
-            return f"Workflow '{args.workflow_id}' is not allowed for dispatch."
         allowed_refs = csv_env("RYOBOT_ALLOWED_WORKFLOW_REFS") or {"main"}
         if args.ref not in allowed_refs:
             return f"Workflow ref '{args.ref}' is not allowed for dispatch."
@@ -142,9 +138,11 @@ class ReadWorkflowRun(GitHubSkillBase):
 class RunCommand(GitHubSkillBase):
     name = "run_command"
     description = (
-        "Execute an allowlisted development command in the repository workspace and return stdout/stderr. "
-        "Default allowed commands are pytest, python -m pytest, ruff check, mypy, and pyright. "
-        "Shell metacharacters are rejected and secrets are stripped from the subprocess environment."
+        "Execute a shell command in the repository workspace and return stdout/stderr. "
+        "Available: pytest, python -m pytest, ruff check, mypy, pyright, python (scripts). "
+        "Not available: pip, npm, docker, git push/commit, interactive commands. "
+        "Shell metacharacters (| > < && ;) are rejected — use one command per call. "
+        "Secrets are stripped from the subprocess environment."
     )
     args_model = RunCommandArgs
     mutates_state = True

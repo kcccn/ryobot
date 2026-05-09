@@ -296,8 +296,9 @@ class WriteFile(GitHubSkillBase):
     name = "write_file"
     description = (
         "Create or update a file in the repository. "
-        "Provide the file path, new content (plain text), a commit message, "
-        "and a branch name to commit to. "
+        "Parameters: path (file path within repo, e.g. 'src/main.py' — NOT a git branch), "
+        "content (new file content, plain text), message (commit message), "
+        "branch (git branch to commit to, NOT the file path). "
         "If the file already exists it will be updated; if not, it will be created. "
         "Writing directly to the default branch is not allowed — you must create a "
         "feature branch first, write to it, and then open a pull request."

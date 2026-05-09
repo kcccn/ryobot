@@ -154,9 +154,22 @@ def build_reply_prompt(
     prompt += (
         "\n\n【记忆沉淀】\n"
         "在完成本轮任务后，顺手判断是否有值得沉淀的长期知识。\n"
+        "不要用 commit_memory 存储：\n"
+        "- 代码实现细节（属于 git commit，不属于记忆）\n"
+        "- 单次运行的技术决策（应写在 PR/issue 描述里）\n"
+        "- 可以通过 git log/grep 获取的信息\n"
         "值得记的：学到的模式、踩过的坑、发现的仓库约定、非显而易见的架构决策。\n"
-        "不值得记的：项目状态更新（如 \"RFC 已启动\"、\"PR 已合并\"）、一次性的任务记录。\n"
         "如果没特别值得记的，不用勉强。这不是硬任务，是顺手做的软提醒。"
+    )
+    prompt += (
+        "\n\n【Session 终止规则 — 硬性要求】\n"
+        "当你生成最终回复文本（不调用工具，直接输出回答内容）时，你必须同时输出一个 JSON 决策对象。\n"
+        "在该 JSON 中，必须满足：\n"
+        "- comment_kind = \"final\"\n"
+        "- done = true\n"
+        "- continue_session = false\n"
+        "这确保本轮 session 在回复发出后立即结束，不会进入无意义的第二轮循环。\n"
+        "违反此规则会导致 session 无限循环，浪费算力。"
     )
     return prompt
 
