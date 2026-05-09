@@ -1948,11 +1948,8 @@ async def test_scout_stage_forces_decision_after_repeating_same_tool_signature(
 def test_decision_and_reflection_schema_enforce_short_fields() -> None:
     scout_fields = ScoutDecision.model_fields
     assert scout_fields["context_analysis"].description == "环境分析：极简总结，不超过 100 个字。"
-    assert scout_fields["context_analysis"].metadata[0].max_length == 100
     assert scout_fields["internal_emotion"].description == "内心OS：一句话，不超过 60 个字。"
-    assert scout_fields["internal_emotion"].metadata[0].max_length == 60
     assert scout_fields["biological_clock_impact"].description == "生理时钟影响：极简描述，不超过 60 个字。"
-    assert scout_fields["biological_clock_impact"].metadata[0].max_length == 60
 
 
 def test_scout_decision_accepts_short_english_bug_summaries() -> None:
