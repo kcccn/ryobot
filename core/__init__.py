@@ -6,7 +6,7 @@ from .plugins import (
     PluginEvent,
     RepoRuntimeState,
     RoutingRecord,
-    WillDecision,
+    ScoutDecision,
 )
 from .ryo_agent import DEFAULT_FALLBACK_MESSAGE, RyoAgent
 from .skills import BaseSkill, clear_skill_context, get_skill_context, set_skill_context
@@ -21,7 +21,7 @@ __all__ = [
     "PluginEvent",
     "RepoRuntimeState",
     "RoutingRecord",
-    "WillDecision",
+    "ScoutDecision",
     "ActionDecision",
     "clear_skill_context",
     "get_skill_context",

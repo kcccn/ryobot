@@ -29,27 +29,27 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
     return (
         system_prompt
         + mind_context
-        + "\n\n你现在处于第一阶段：只能做意愿判断，不能生成公开回复。"
+        + "\n\n你现在处于第一阶段：侦察上下文并规划行动，不能生成公开回复。"
         "\n你必须最终只输出一个 JSON 对象，严格匹配以下结构："
         '\n{"context_analysis":"...","internal_emotion":"...","biological_clock_impact":"...",'
         '"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","handoff_to":null,"handoff_reason":"","focus_summary":"","context_issue_numbers":[],"continue_session":false,"done":false,"target_issue_number":null}}'
         "\n\n【阶段边界警告 (CRITICAL PHASE BOUNDARY)】"
-        "\n你正处于 \"Will（意愿与规划）\" 阶段，手里只有只读工具。"
-        "\n你唯一能做的是调查问题、弄清上下文，然后输出 WillDecision JSON。"
+        "\n你正处于 \"Scout（侦察与规划）\" 阶段，手里只有只读工具。"
+        "\n你唯一能做的是调查问题、弄清上下文，然后输出 ScoutDecision JSON。"
         "\n严禁在当前阶段修改文件、创建 PR、发布评论或执行任何写操作！"
         "\n"
         "\n两阶段工作流："
-        "\n  Will 阶段（当前）→ 调查 + 输出 JSON 决策"
+        "\n  Scout 阶段（当前）→ 调查 + 输出 JSON 决策"
         "\n  Reply 阶段（下一阶段）→ 拿到全部读写工具，执行你在 JSON 里声明要做的动作"
         "\n"
         "\n如果你发现需要修复的 Bug 或需要做的改动："
         "\n  1. 在 focus_summary 中简述修复方案（如 \"修改 engine_manager.py，给自行车分配站点\"）"
         "\n  2. 设置 will_act=true, mode=\"act_directly\""
         "\n  3. 系统看到 will_act=true 后，会在 Reply 阶段赋予你完整的读写权限"
-        "\n在 Will 阶段试图修改文件只会浪费你的工具配额，不会产生任何效果。"
+        "\n在 Scout 阶段试图修改文件只会浪费你的工具配额，不会产生任何效果。"
         "\n"
         "\n如果你看到 \"resource probe limit reached\" 或 \"budget exhausted\" 的提示："
-        "\n  这说明你在 Will 阶段查得够多了。立即输出 WillDecision JSON，不要继续调用工具。"
+        "\n  这说明你在 Scout 阶段查得够多了。立即输出 ScoutDecision JSON，不要继续调用工具。"
         "\n  将你已经掌握的修复方案写入 focus_summary，will_act=true，在下个阶段执行。"
         "\n"
         "\n规则："
@@ -139,9 +139,18 @@ def build_reply_prompt(
         "在工具物理执行完毕前，绝不允许结束思考循环！"
     )
     prompt += (
+        "\n\n【执行效率约束】\n"
+        "Scout 阶段已完成所有必要的上下文调查。Reply 阶段的工作是执行，不是重新研究。\n"
+        "- 不要重新读取 Scout 阶段已经查过的 issue/PR/文件\n"
+        "- 不要为了\"全面了解背景\"而探索代码库\n"
+        "- 只在你缺少执行 focus_summary 所需的具体信息时才读取文件\n"
+        "- 如果前 3 个迭代没有产生任何进度，直接执行 focus_summary 声明的核心动作"
+    )
+    prompt += (
         "\n\n【记忆沉淀】\n"
-        "在完成本轮任务后，顺手判断是否有值得沉淀的长期知识：\n"
-        "如果学到了新的模式、踩了坑、发现了重要的仓库约定，用 commit_memory 记下来。\n"
+        "在完成本轮任务后，顺手判断是否有值得沉淀的长期知识。\n"
+        "值得记的：学到的模式、踩过的坑、发现的仓库约定、非显而易见的架构决策。\n"
+        "不值得记的：项目状态更新（如 \"RFC 已启动\"、\"PR 已合并\"）、一次性的任务记录。\n"
         "如果没特别值得记的，不用勉强。这不是硬任务，是顺手做的软提醒。"
     )
     return prompt

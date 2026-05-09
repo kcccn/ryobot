@@ -16,7 +16,7 @@ from core.plugins import (
     HistorySnapshot,
     PluginEvent,
     RepoRuntimeState,
-    WillDecision,
+    ScoutDecision,
 )
 from core.ryo_agent import RyoAgent, _extract_safe_json, _looks_like_truncated_json
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
@@ -391,7 +391,7 @@ async def test_run_skips_when_decision_says_no_reply() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_replies_after_passing_will_decision() -> None:
+async def test_run_replies_after_passing_scout_decision() -> None:
     plugin = FakePlugin(
         history_by_issue={
             12: HistorySnapshot(
@@ -1483,7 +1483,7 @@ async def test_decide_replays_reasoning_content_after_tool_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_will_stage_logs_reasoning_and_tool_details(capsys: pytest.CaptureFixture[str]) -> None:
+async def test_scout_stage_logs_reasoning_and_tool_details(capsys: pytest.CaptureFixture[str]) -> None:
     patrol_plugin = FakePlugin(
         event=PluginEvent(
             event_id="evt-patrol",
@@ -1531,8 +1531,8 @@ async def test_will_stage_logs_reasoning_and_tool_details(capsys: pytest.Capture
     await agent.run(raw_event={})
 
     stderr = capsys.readouterr().err
-    assert "will available tools: echo" in stderr
-    assert "will reasoning" in stderr
+    assert "scout available tools: echo" in stderr
+    assert "scout reasoning" in stderr
     assert "tool calls: ['echo']" in stderr
     assert '-> echo({"text":"probe"})' in stderr
     assert "<- result: echo:probe" in stderr
@@ -1584,7 +1584,7 @@ async def test_decision_prompt_prefers_memory_before_repo_context() -> None:
 
 
 @pytest.mark.asyncio
-async def test_repo_scan_hides_read_issue_memory_from_will_tools() -> None:
+async def test_repo_scan_hides_read_issue_memory_from_scout_tools() -> None:
     plugin = FakePlugin(
         event=PluginEvent(
             event_id="evt-patrol",
@@ -1673,7 +1673,7 @@ async def test_decision_prompt_mentions_read_thread_meta_and_current_human_inten
 
 
 @pytest.mark.asyncio
-async def test_will_stage_uses_independent_iteration_budget() -> None:
+async def test_scout_stage_uses_independent_iteration_budget() -> None:
     plugin = FakePlugin()
     looping_responses = [
         build_response(
@@ -1697,7 +1697,7 @@ async def test_will_stage_uses_independent_iteration_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_will_tool_budget_exhaustion_immediately_forces_json_repair() -> None:
+async def test_scout_tool_budget_exhaustion_immediately_forces_json_repair() -> None:
     patrol_event = PluginEvent(
         event_id="evt-patrol",
         message="street lurker",
@@ -1910,7 +1910,7 @@ async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.skip(reason="reflection phase removed")
-async def test_stage_specific_max_tokens_floor_for_will_and_reflection() -> None:
+async def test_stage_specific_max_tokens_floor_for_scout() -> None:
     plugin = FakePlugin()
     agent, fake_completions = build_agent(
         plugin=plugin,
@@ -1947,7 +1947,7 @@ async def test_stage_specific_max_tokens_floor_for_will_and_reflection() -> None
     assert fake_completions.calls[2]["max_tokens"] == 4096
 
 
-def test_will_iteration_budget_varies_by_event_type() -> None:
+def test_scout_iteration_budget_varies_by_event_type() -> None:
     passive_event = PluginEvent(
         event_id="evt-passive",
         message="hello",
@@ -1971,12 +1971,12 @@ def test_will_iteration_budget_varies_by_event_type() -> None:
         is_patrol=True,
     )
 
-    assert RyoAgent._will_iteration_budget(passive_event) == 8
-    assert RyoAgent._will_iteration_budget(patrol_event) == 16
+    assert RyoAgent._scout_iteration_budget(passive_event) == 8
+    assert RyoAgent._scout_iteration_budget(patrol_event) == 16
 
 
 @pytest.mark.asyncio
-async def test_will_stage_does_not_treat_same_tool_with_different_args_as_loop(
+async def test_scout_stage_does_not_treat_same_tool_with_different_args_as_loop(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     plugin = FakePlugin(
@@ -2019,12 +2019,12 @@ async def test_will_stage_does_not_treat_same_tool_with_different_args_as_loop(
     await agent.run(raw_event={})
 
     stderr = capsys.readouterr().err
-    assert "effective_will_iterations=16" in stderr
+    assert "effective_scout_iterations=16" in stderr
     assert "without new tool signatures" not in stderr
 
 
 @pytest.mark.asyncio
-async def test_will_stage_forces_decision_after_repeating_same_tool_signature(
+async def test_scout_stage_forces_decision_after_repeating_same_tool_signature(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     plugin = FakePlugin(
@@ -2068,21 +2068,22 @@ async def test_will_stage_forces_decision_after_repeating_same_tool_signature(
     await agent.run(raw_event={})
 
     stderr = capsys.readouterr().err
-    assert "without new tool signatures, forcing decision" in stderr
+    assert "resource probe limit reached" in stderr
+    assert "JSON repair" in stderr
 
 
 def test_decision_and_reflection_schema_enforce_short_fields() -> None:
-    will_fields = WillDecision.model_fields
-    assert will_fields["context_analysis"].description == "环境分析：极简总结，不超过 100 个字。"
-    assert will_fields["context_analysis"].metadata[0].max_length == 100
-    assert will_fields["internal_emotion"].description == "内心OS：一句话，不超过 60 个字。"
-    assert will_fields["internal_emotion"].metadata[0].max_length == 60
-    assert will_fields["biological_clock_impact"].description == "生理时钟影响：极简描述，不超过 60 个字。"
-    assert will_fields["biological_clock_impact"].metadata[0].max_length == 60
+    scout_fields = ScoutDecision.model_fields
+    assert scout_fields["context_analysis"].description == "环境分析：极简总结，不超过 100 个字。"
+    assert scout_fields["context_analysis"].metadata[0].max_length == 100
+    assert scout_fields["internal_emotion"].description == "内心OS：一句话，不超过 60 个字。"
+    assert scout_fields["internal_emotion"].metadata[0].max_length == 60
+    assert scout_fields["biological_clock_impact"].description == "生理时钟影响：极简描述，不超过 60 个字。"
+    assert scout_fields["biological_clock_impact"].metadata[0].max_length == 60
 
 
-def test_will_decision_accepts_short_english_bug_summaries() -> None:
-    decision = WillDecision.model_validate(
+def test_scout_decision_accepts_short_english_bug_summaries() -> None:
+    decision = ScoutDecision.model_validate(
         {
             "context_analysis": "Ghost bikes found in starter fleet initialization; PR needs review.",
             "internal_emotion": "bug found, time to review",
@@ -2111,7 +2112,7 @@ def test_prompts_require_short_json_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_will_stage_logs_critical_when_json_looks_truncated(capsys: pytest.CaptureFixture[str]) -> None:
+async def test_scout_stage_logs_critical_when_json_looks_truncated(capsys: pytest.CaptureFixture[str]) -> None:
     plugin = FakePlugin(
         event=PluginEvent(
             event_id="evt-patrol",
@@ -2155,7 +2156,7 @@ async def test_will_stage_logs_critical_when_json_looks_truncated(capsys: pytest
 
     stderr = capsys.readouterr().err
     assert "[CRITICAL] JSON 解析失败！疑似命中 max_tokens 截断" in stderr
-    assert "stage=will" in stderr
+    assert "stage=scout" in stderr
 
 
 @pytest.mark.asyncio
@@ -2232,7 +2233,7 @@ class TestExtractSafeJson:
             "action_decision": {"mode": "reply_brief", "will_reply": True},
         }
 
-    def test_complete_will_decision_in_explanation(self) -> None:
+    def test_complete_scout_decision_in_explanation(self) -> None:
         text = (
             "Let me think about this...\n\n"
             'I will output: ```json\n'

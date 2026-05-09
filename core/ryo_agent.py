@@ -15,7 +15,7 @@ from typing import Any, TypedDict
 from pydantic import BaseModel, Field, ValidationError
 
 from . import prompts
-from .plugins import ActionDecision, BasePlugin, PluginEvent, RepoRuntimeState, WillDecision
+from .plugins import ActionDecision, BasePlugin, PluginEvent, RepoRuntimeState, ScoutDecision
 from .skills import BaseSkill, clear_skill_context, set_skill_context
 
 DEFAULT_FALLBACK_MESSAGE = "I'm sorry, but I couldn't complete your request right now."
@@ -30,13 +30,15 @@ LOG_TRUNCATE = 500
 PASSIVE_EXECUTION_MODES = frozenset({"reply_brief", "reply_with_plan", "ask_clarifying_question", "act_directly"})
 ALL_EXECUTION_MODES = PASSIVE_EXECUTION_MODES | {"stay_silent"}
 VISIBLE_COMMENT_KINDS = frozenset({"response", "discussion", "handoff", "final"})
-WILL_MAX_ITERATIONS = 8
-WILL_MAX_TOOL_CALLS = 12
-WILL_CONVERGENCE_LIMIT = 3
-WILL_MAX_REPEAT_PER_RESOURCE = 2
+SCOUT_MAX_ITERATIONS = 8
+SCOUT_MAX_TOOL_CALLS = 12
+SCOUT_CONVERGENCE_LIMIT = 3
+SCOUT_MAX_REPEAT_PER_RESOURCE = 2
 MAX_SESSION_ROUNDS = 6
 MAX_PUBLIC_DISCUSSION_COMMENTS = 3
 MAX_HANDOFFS = 3
+REPLY_MAX_READONLY_ITERATIONS = 6
+REPLY_CONVERGENCE_LIMIT = 4
 
 
 def _log(msg: str, *, end: str = "\n") -> None:
@@ -104,7 +106,7 @@ class RyoAgent:
         skills: Sequence[BaseSkill],
         llm_client: Any,
         plugin: BasePlugin,
-        max_iterations: int = 100,
+        max_iterations: int = 50,
         max_tokens: int = 4096,
         fatigue_min_seconds: int = DEFAULT_FATIGUE_MIN_SECONDS,
         fatigue_max_seconds: int = DEFAULT_FATIGUE_MAX_SECONDS,
@@ -174,7 +176,7 @@ class RyoAgent:
                 active_event = session.current_event
                 active_history = await self.plugin.fetch_history(active_event)
                 decision = await self._decide(event=active_event, history=active_history, session=session)
-                _log("will_decision: " + json.dumps(decision.model_dump(), ensure_ascii=False)[:LOG_TRUNCATE])
+                _log("scout_decision: " + json.dumps(decision.model_dump(), ensure_ascii=False)[:LOG_TRUNCATE])
 
                 should_reply, skip_reason = self._should_reply(
                     event=active_event,
@@ -269,7 +271,7 @@ class RyoAgent:
         finally:
             _gh_endgroup()
 
-    async def _decide(self, *, event: PluginEvent, history: Any, session: SessionState) -> WillDecision:
+    async def _decide(self, *, event: PluginEvent, history: Any, session: SessionState) -> ScoutDecision:
         readonly_skills = self._available_skills_for_event(event, readonly_only=True)
         tools = [skill.get_tool_definition() for skill in readonly_skills]
         system_prompt = self._decision_prompt(history=history)
@@ -281,28 +283,28 @@ class RyoAgent:
         ]
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
-        will_iterations = self._will_iteration_budget(event)
-        self._log_available_tools("will", tools)
-        _log(f"effective_will_iterations={will_iterations}")
+        scout_iterations = self._scout_iteration_budget(event)
+        self._log_available_tools("scout", tools)
+        _log(f"effective_scout_iterations={scout_iterations}")
         seen_signatures: set[str] = set()
         no_new_tool_count = 0
         total_tool_calls = 0
         json_repair_only = False
         resource_uses: dict[tuple[str, str], int] = {}
         try:
-            for i in range(will_iterations):
-                _log(f"--- will iteration {i + 1}/{will_iterations} ---")
+            for i in range(scout_iterations):
+                _log(f"--- scout iteration {i + 1}/{scout_iterations} ---")
                 t_start = time.monotonic()
                 active_tools: list[dict[str, Any]] = [] if json_repair_only else tools
                 response = await self._create_completion_with_retry(
                     messages=messages,
                     tools=active_tools,
-                    stage="will",
+                    stage="scout",
                 )
                 t_elapsed = time.monotonic() - t_start
                 assistant_message = response.choices[0].message
                 tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
-                self._log_stage_response("will", assistant_message, elapsed_seconds=t_elapsed)
+                self._log_stage_response("scout", assistant_message, elapsed_seconds=t_elapsed)
                 if tool_calls:
                     if json_repair_only:
                         _log("WARN: tool calls are no longer allowed during JSON repair")
@@ -312,35 +314,38 @@ class RyoAgent:
                         self._append_rejected_tool_calls(messages, tool_calls, reason="JSON repair mode — no more tool calls allowed")
                         json_repair_only = True
                         continue
-                    if total_tool_calls >= WILL_MAX_TOOL_CALLS:
-                        _log(f"WARN: will tool-call budget exhausted at {total_tool_calls}, forcing decision")
+                    if total_tool_calls >= SCOUT_MAX_TOOL_CALLS:
+                        _log(f"WARN: scout tool-call budget exhausted at {total_tool_calls}, forcing decision")
                         self._append_rejected_tool_calls(messages, tool_calls, reason="tool-call budget exhausted")
-                        self._append_will_budget_exhausted_nudge(messages)
+                        self._append_scout_budget_exhausted_nudge(messages)
                         json_repair_only = True
                         continue
                     self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
                     new_signature_seen = False
+                    resource_limit_hit = False
                     executed_tc_ids: set[str] = set()
                     for tool_call in tool_calls:
-                        if total_tool_calls >= WILL_MAX_TOOL_CALLS:
-                            _log(f"WARN: reached will tool-call budget {WILL_MAX_TOOL_CALLS}, skipping remaining tool calls")
+                        if total_tool_calls >= SCOUT_MAX_TOOL_CALLS:
+                            _log(f"WARN: reached scout tool-call budget {SCOUT_MAX_TOOL_CALLS}, skipping remaining tool calls")
                             json_repair_only = True
                             break
                         tool_name, args_raw = self._tool_call_details(tool_call)
                         _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
-                        tool_signature = self._will_tool_signature(tool_name, args_raw)
+                        tool_signature = self._scout_tool_signature(tool_name, args_raw)
                         if tool_signature not in seen_signatures:
                             seen_signatures.add(tool_signature)
                             new_signature_seen = True
                         total_tool_calls += 1
-                        tool_result = await self._execute_will_tool_call(
+                        tool_result = await self._execute_scout_tool_call(
                             tool_call,
                             event=event,
                             resource_uses=resource_uses,
                         )
                         if isinstance(tool_result, _NoReplyResult):
                             break
+                        if "Tool skipped: resource probe limit reached" in str(tool_result):
+                            resource_limit_hit = True
                         _log(f"  <- result: {_truncate_log(tool_result)}")
                         tc_id = getattr(tool_call, "id", "")
                         executed_tc_ids.add(tc_id)
@@ -363,20 +368,34 @@ class RyoAgent:
                                     "content": "Tool call skipped: budget exhausted.",
                                 }
                             )
+                    if resource_limit_hit:
+                        json_repair_only = True
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "One or more of your tool calls were rejected because you hit the resource "
+                                    "probe limit. You have already read the same information more than once. "
+                                    "You MUST output your ScoutDecision JSON NOW — no more tools. "
+                                    "If you fail to produce valid JSON, you will fall back to stay_silent "
+                                    "and all your analysis will be lost."
+                                ),
+                            }
+                        )
                     if json_repair_only:
-                        self._append_will_budget_exhausted_nudge(messages)
+                        self._append_scout_budget_exhausted_nudge(messages)
                     if new_signature_seen:
                         no_new_tool_count = 0
                     else:
                         no_new_tool_count += 1
-                        if no_new_tool_count >= WILL_CONVERGENCE_LIMIT:
+                        if no_new_tool_count >= SCOUT_CONVERGENCE_LIMIT:
                             _log(f"WARN: {no_new_tool_count} iterations without new tool signatures, forcing decision")
                             messages.append(
                                 {
                                     "role": "user",
                                     "content": (
                                         "You have been looping without discovering new information. "
-                                        "You MUST output your WillDecision JSON NOW. "
+                                        "You MUST output your ScoutDecision JSON NOW. "
                                         "If you fail to produce valid JSON this iteration, you will fall back to "
                                         '"stay_silent" and all your analysis will be lost. '
                                         "No more tool calls."
@@ -391,11 +410,11 @@ class RyoAgent:
                     break
                 try:
                     cleaned = _extract_safe_json(decision_text)
-                    decision = WillDecision.model_validate(cleaned)
+                    decision = ScoutDecision.model_validate(cleaned)
                 except (ValidationError, JSONDecodeError) as exc:
-                    _log(f"WARN: invalid will JSON: {_truncate_log(exc)}")
+                    _log(f"WARN: invalid scout JSON: {_truncate_log(exc)}")
                     truncated = self._log_possible_json_truncation(
-                        stage="will",
+                        stage="scout",
                         raw_text=decision_text,
                         exc=exc,
                     )
@@ -431,7 +450,7 @@ class RyoAgent:
         finally:
             clear_skill_context(context_token)
 
-        return WillDecision(
+        return ScoutDecision(
             context_analysis="No valid JSON.",
             internal_emotion="Quiet",
             biological_clock_impact="Prefer silence.",
@@ -450,7 +469,7 @@ class RyoAgent:
         *,
         event: PluginEvent,
         history: Any,
-        decision: WillDecision,
+        decision: ScoutDecision,
         session: SessionState,
     ) -> ExecutionOutcome:
         system_prompt = self._reply_prompt(history=history, event=event, decision=decision)
@@ -466,6 +485,8 @@ class RyoAgent:
         executed_tool_names: set[str] = set()
 
         self._log_available_tools("reply", tools)
+        no_new_mutation_count = 0
+        _prev_mutated: set[str] = set()
 
         try:
             for i in range(self.max_iterations):
@@ -574,6 +595,34 @@ class RyoAgent:
                                 next_identity=decision.action_decision.handoff_to,
                             )
                         return ExecutionOutcome(kind="no_action", reason="no_reply")
+
+                    any_new_mutation = bool(executed_tool_names - _prev_mutated)
+                    _prev_mutated = set(executed_tool_names)
+                    if any_new_mutation:
+                        no_new_mutation_count = 0
+                    else:
+                        no_new_mutation_count += 1
+                        if no_new_mutation_count >= REPLY_CONVERGENCE_LIMIT:
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        f"You have had {no_new_mutation_count} iterations without new progress "
+                                        "toward your focus_summary. Execute the core action now. "
+                                        "Produce visible text output or a terminal mutation immediately."
+                                    ),
+                                }
+                            )
+                    if not executed_tool_names and i + 1 >= REPLY_MAX_READONLY_ITERATIONS:
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"You've spent {i + 1} iterations reading but haven't performed any action. "
+                                    "Stop researching and execute your focus_summary now."
+                                ),
+                            }
+                        )
                     continue
 
                 reply_text = self._extract_text_content(assistant_message).strip()
@@ -653,7 +702,7 @@ class RyoAgent:
         stage: str,
     ) -> Any:
         max_tokens = self.max_tokens
-        if stage == "will":
+        if stage == "scout":
             max_tokens = max(max_tokens, 4096)
         request: dict[str, Any] = {
             "model": self.persona["model"],
@@ -687,10 +736,10 @@ class RyoAgent:
                 await asyncio.sleep(delay)
 
     @staticmethod
-    def _will_iteration_budget(event: PluginEvent) -> int:
+    def _scout_iteration_budget(event: PluginEvent) -> int:
         return 16 if event.is_patrol else 8
 
-    def _will_tool_signature(self, tool_name: str, args_raw: str) -> str:
+    def _scout_tool_signature(self, tool_name: str, args_raw: str) -> str:
         try:
             parsed_args = self._parse_tool_arguments(args_raw)
         except JSONDecodeError:
@@ -717,13 +766,13 @@ class RyoAgent:
         return skills
 
     @staticmethod
-    def _append_will_budget_exhausted_nudge(messages: list[ChatMessage]) -> None:
+    def _append_scout_budget_exhausted_nudge(messages: list[ChatMessage]) -> None:
         messages.append(
             {
                 "role": "user",
                 "content": (
-                    "Your will-stage tool-call budget is exhausted. "
-                    "You MUST output the raw WillDecision JSON on the next turn. "
+                    "Your scout-stage tool-call budget is exhausted. "
+                    "You MUST output the raw ScoutDecision JSON on the next turn. "
                     "Do not call any more tools. Do not wrap the JSON in markdown or explanation."
                 ),
             }
@@ -749,7 +798,7 @@ class RyoAgent:
 
         return await self._execute_validated_skill(skill, tool_call)
 
-    async def _execute_will_tool_call(
+    async def _execute_scout_tool_call(
         self,
         tool_call: Any,
         *,
@@ -757,15 +806,33 @@ class RyoAgent:
         resource_uses: dict[tuple[str, str], int],
     ) -> str | _NoReplyResult:
         tool_name, args_raw = self._tool_call_details(tool_call)
-        resource_key = self._will_resource_key(tool_name, args_raw)
+        resource_key = self._scout_resource_key(tool_name, args_raw)
+        # Cross-reference: read_thread_context and read_issue_body on the same
+        # thread return the same content, so share their resource quota.
+        sibling_keys: list[tuple[str, str]] = []
         if resource_key is not None:
-            uses = resource_uses.get(resource_key, 0)
-            if uses >= WILL_MAX_REPEAT_PER_RESOURCE:
-                return (
-                    f"Tool skipped: resource probe limit reached for {resource_key[0]} "
-                    f"'{resource_key[1]}'. Output the WillDecision JSON instead of repeating this check."
-                )
-            resource_uses[resource_key] = uses + 1
+            if resource_key[0] == "read_thread_context" and event.issue_number > 0:
+                sibling_keys.append(("read_issue_body", str(event.issue_number)))
+            elif resource_key[0] == "read_issue_body":
+                try:
+                    parsed = self._parse_tool_arguments(args_raw)
+                    if int(parsed.get("issue_number", 0) or 0) == event.issue_number:
+                        sibling_keys.append(("read_thread_context", "0"))
+                except Exception:
+                    pass
+        keys_to_check = [resource_key] + sibling_keys if resource_key is not None else []
+        if any(
+            resource_uses.get(key, 0) >= SCOUT_MAX_REPEAT_PER_RESOURCE
+            for key in keys_to_check
+        ):
+            return (
+                f"Tool skipped: resource probe limit reached for {resource_key[0] if resource_key else tool_name} "
+                f"'{resource_key[1] if resource_key else ''}'. Output the ScoutDecision JSON instead of repeating this check."
+            )
+        if resource_key is not None:
+            resource_uses[resource_key] = resource_uses.get(resource_key, 0) + 1
+            for sibling in sibling_keys:
+                resource_uses[sibling] = resource_uses.get(sibling, 0) + 1
         return await self._execute_tool_call(tool_call, event=event)
 
     async def _execute_validated_skill(self, skill: BaseSkill, tool_call: Any) -> str | _NoReplyResult:
@@ -802,7 +869,7 @@ class RyoAgent:
             mind_context=self._mind_context(history),
         )
 
-    def _reply_prompt(self, *, history: Any, event: PluginEvent, decision: WillDecision) -> str:
+    def _reply_prompt(self, *, history: Any, event: PluginEvent, decision: ScoutDecision) -> str:
         return prompts.build_reply_prompt(
             system_prompt=self.persona["system_prompt"],
             mind_context=self._mind_context(history),
@@ -823,7 +890,7 @@ class RyoAgent:
             mind_issue_number=history.mind_issue_number,
         )
 
-    def _validate_decision(self, *, event: PluginEvent, decision: WillDecision, session: SessionState) -> None:
+    def _validate_decision(self, *, event: PluginEvent, decision: ScoutDecision, session: SessionState) -> None:
         mode = decision.action_decision.mode
         if mode == "stay_silent" and (decision.action_decision.will_reply or decision.action_decision.will_act):
             inferred_mode = "act_directly" if decision.action_decision.will_act and not decision.action_decision.will_reply else "reply_with_plan"
@@ -878,7 +945,7 @@ class RyoAgent:
         self,
         *,
         event: PluginEvent,
-        decision: WillDecision,
+        decision: ScoutDecision,
         runtime_state: RepoRuntimeState,
         ignore_fatigue: bool = False,
     ) -> tuple[bool, str]:
@@ -902,7 +969,7 @@ class RyoAgent:
                 return False, f"fatigue cooldown active until {fatigue_state.next_available_at}"
         return True, "reply approved"
 
-    def _comment_reason(self, *, decision: WillDecision, executed_tool_names: set[str]) -> str:
+    def _comment_reason(self, *, decision: ScoutDecision, executed_tool_names: set[str]) -> str:
         if executed_tool_names:
             return _reason_from_tools(executed_tool_names, default="acted_without_comment")
         if decision.action_decision.comment_kind == "discussion":
@@ -965,7 +1032,7 @@ class RyoAgent:
         *,
         event: PluginEvent,
         tool_name: str,
-        decision: WillDecision,
+        decision: ScoutDecision,
     ) -> bool:
         if event.is_patrol:
             return (
@@ -1089,7 +1156,7 @@ class RyoAgent:
         tool_calls: list[Any],
         *,
         reason: str,
-        output_name: str = "WillDecision",
+        output_name: str = "ScoutDecision",
         fallback_name: str = "stay_silent",
     ) -> None:
         """Append a user message explaining that tool calls were rejected.
@@ -1118,7 +1185,7 @@ class RyoAgent:
         skill = self._skills_by_name.get(tool_name)
         return bool(skill and skill.mutates_state)
 
-    def _will_resource_key(self, tool_name: str, args_raw: str) -> tuple[str, str] | None:
+    def _scout_resource_key(self, tool_name: str, args_raw: str) -> tuple[str, str] | None:
         try:
             args = self._parse_tool_arguments(args_raw)
         except JSONDecodeError:

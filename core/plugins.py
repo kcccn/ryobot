@@ -74,7 +74,7 @@ class ActionDecision(BaseModel):
     target_issue_number: int | None = None
 
 
-class WillDecision(BaseModel):
+class ScoutDecision(BaseModel):
     context_analysis: str = Field(
         description="环境分析：极简总结，不超过 100 个字。",
         max_length=100,
