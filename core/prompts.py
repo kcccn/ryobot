@@ -146,9 +146,11 @@ def build_reply_prompt(
     prompt += (
         "\n\n【执行效率约束】\n"
         "Scout 阶段已完成所有必要的上下文调查。Reply 阶段的工作是执行，不是重新研究。\n"
-        "- 不要重新读取 Scout 阶段已经查过的 issue/PR/文件\n"
-        "- 不要为了\"全面了解背景\"而探索代码库\n"
-        "- 只在你缺少执行 focus_summary 所需的具体信息时才读取文件\n"
+        "- 不要重新调用 read_issue_body / read_thread_meta / read_thread_comments / read_code_diff\n"
+        "  （Scout 已读取的 GitHub API 资源会被自动拦截）\n"
+        "- read_file, list_files, search_code, search_symbol 等本地文件工具不受限制，\n"
+        "  执行阶段可以自由读取本地文件（不会消耗 API quota）\n"
+        "- 避免重复读同一个本地文件；读一次，记住内容，继续行动\n"
         "- 如果前 3 个迭代没有产生任何进度，直接执行 focus_summary 声明的核心动作"
     )
     prompt += (

@@ -37,6 +37,12 @@ SCOUT_MAX_REPEAT_PER_RESOURCE = 2
 MAX_SESSION_ROUNDS = 6
 REPLY_MAX_READONLY_ITERATIONS = 6
 REPLY_CONVERGENCE_LIMIT = 4
+# 在 Reply 阶段对 Scout 已读资源进行去重时，只拦截 GitHub API 读取
+#（慢、有 rate limit），本地文件工具（read_file 等）放行。
+_GITHUB_READ_TOOLS = frozenset({
+    "read_thread_meta", "read_issue_body", "read_thread_context",
+    "read_thread_comments", "read_code_diff",
+})
 
 
 def _log(msg: str, *, end: str = "\n") -> None:
@@ -236,8 +242,14 @@ class RyoAgent:
     def _build_scout_brief(self, resource_uses: dict[tuple[str, str], int]) -> str:
         if not resource_uses:
             return ""
-        lines = ["【Scout 阶段已读取的资源，无需重复读取】"]
-        for (tool_name, resource_key), count in sorted(resource_uses.items()):
+        api_items = {
+            k: v for k, v in resource_uses.items()
+            if k[0] in _GITHUB_READ_TOOLS
+        }
+        if not api_items:
+            return ""
+        lines = ["【Scout 阶段已读取的 GitHub API 资源，无需重复调用 API】"]
+        for (tool_name, resource_key), count in sorted(api_items.items()):
             label = _scout_resource_label(tool_name, resource_key)
             lines.append(f"- {label}")
             lines.append(f"<!-- ryo:scout_key:{tool_name}:{resource_key} -->")
@@ -496,7 +508,7 @@ class RyoAgent:
                             tool_name=tool_name,
                             args_raw=args_raw,
                         )
-                        if tool_result is None and not self._is_mutating_tool(tool_name):
+                        if tool_result is None and tool_name in _GITHUB_READ_TOOLS:
                             resource_key = self._scout_resource_key(tool_name, args_raw)
                             if resource_key is not None and resource_key in scout_read_keys:
                                 tool_result = (
