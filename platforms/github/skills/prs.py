@@ -71,7 +71,7 @@ class CreatePRReview(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
         effective_event = args.event
-        if args.event == "REQUEST_CHANGES":
+        if args.event in ("REQUEST_CHANGES", "APPROVE"):
             pr = await self._api.get_json(
                 f"/repos/{context['owner']}/{context['repo']}/pulls/{args.pr_number}",
             )
@@ -108,7 +108,7 @@ class CreatePRReview(GitHubSkillBase):
             )
         if effective_event != args.event:
             return (
-                f"GitHub disallows REQUEST_CHANGES on self-authored PRs; submitted {effective_event} instead.\n"
+                f"GitHub disallows {args.event} on self-authored PRs; submitted {effective_event} instead.\n"
                 f"State: {result.get('state', '?')}\n"
                 f"ID: {result.get('id', '?')}"
             )

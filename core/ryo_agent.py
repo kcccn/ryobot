@@ -530,6 +530,7 @@ class RyoAgent:
                             event=event,
                             tool_name=tool_name,
                             decision=decision,
+                            tool_result=str(tool_result),
                         ):
                             has_terminal_mutation = True
                             terminal_tool_names.append(tool_name)
@@ -991,9 +992,14 @@ class RyoAgent:
         event: PluginEvent,
         tool_name: str,
         decision: ScoutDecision,
+        tool_result: str = "",
     ) -> bool:
         if event.is_patrol:
-            return tool_name == "create_pr_review"
+            if tool_name != "create_pr_review":
+                return False
+            if tool_result.startswith("GitHub API error"):
+                return False
+            return True
         return False
 
     @staticmethod

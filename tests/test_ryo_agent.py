@@ -1853,6 +1853,54 @@ def test_decision_and_reflection_schema_enforce_short_fields() -> None:
     assert scout_fields["biological_clock_impact"].description == "生理时钟影响：极简描述，不超过 60 个字。"
 
 
+def test_terminal_visible_mutation_rejects_error_results() -> None:
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+    decision = ScoutDecision.model_validate(
+        {
+            "context_analysis": "review",
+            "internal_emotion": "focused",
+            "biological_clock_impact": "neutral",
+            "action_decision": {
+                "mode": "act_directly",
+                "will_reply": True,
+                "will_act": True,
+                "focus_summary": "Submit review.",
+                "context_issue_numbers": [],
+                "target_issue_number": 77,
+            },
+        }
+    )
+    assert RyoAgent._is_terminal_visible_mutation(
+        event=patrol_event,
+        tool_name="create_pr_review",
+        decision=decision,
+        tool_result="Submitted APPROVE review on PR #103",
+    )
+    assert not RyoAgent._is_terminal_visible_mutation(
+        event=patrol_event,
+        tool_name="create_pr_review",
+        decision=decision,
+        tool_result='GitHub API error (422): {"message":"Unprocessable Entity"}',
+    )
+    assert not RyoAgent._is_terminal_visible_mutation(
+        event=patrol_event,
+        tool_name="create_pr_review",
+        decision=decision,
+        tool_result="GitHub API error (404): Not Found",
+    )
+
+
 def test_scout_decision_accepts_short_english_bug_summaries() -> None:
     decision = ScoutDecision.model_validate(
         {
