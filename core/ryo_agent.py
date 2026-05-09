@@ -508,6 +508,10 @@ class RyoAgent:
                 if tool_calls:
                     self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
+                    has_terminal_mutation = False
+                    terminal_tool_names: list[str] = []
+                    no_reply_requested = False
+                    no_reply_reason = "(no reason)"
                     for tool_call in tool_calls:
                         tool_name, args_raw = self._tool_call_details(tool_call)
                         _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
@@ -521,39 +525,19 @@ class RyoAgent:
                             tool_result = await self._execute_tool_call(tool_call, event=event)
                         if tool_name == NO_REPLY_TOOL_NAME:
                             try:
-                                reason = json.loads(args_raw).get("reason", "(no reason)")
+                                no_reply_reason = json.loads(args_raw).get("reason", "(no reason)")
                             except Exception:
-                                reason = "(no reason)"
-                            _log(f"  <- no_reply: {reason}")
+                                no_reply_reason = "(no reason)"
+                            _log(f"  <- no_reply: {no_reply_reason}")
                             messages.append(
                                 {
                                     "role": "tool",
                                     "tool_call_id": getattr(tool_call, "id", ""),
-                                    "content": f"no_reply executed: {reason}",
+                                    "content": f"no_reply executed: {no_reply_reason}",
                                 }
                             )
-                            if not event.is_patrol and not executed_tool_names:
-                                messages.append(
-                                    {
-                                        "role": "user",
-                                        "content": (
-                                            "This is a passive human-triggered event. You must respond or do real work here. "
-                                            "no_reply is not allowed unless you already completed a mutating action. "
-                                            "Continue and produce a visible response or action."
-                                        ),
-                                    }
-                                )
-                                continue
-                            if executed_tool_names:
-                                return ExecutionOutcome(
-                                    kind="acted_without_thread_reply",
-                                    reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
-                                    mutated_tool_names=set(executed_tool_names),
-                                    done=decision.action_decision.done or not decision.action_decision.continue_session,
-                                    continue_session=decision.action_decision.continue_session,
-                                    next_identity=decision.action_decision.handoff_to,
-                                )
-                            return ExecutionOutcome(kind="no_action", reason="no_reply")
+                            no_reply_requested = True
+                            continue
                         if self._is_mutating_tool(tool_name):
                             executed_tool_names.add(tool_name)
                             self._record_session_mutation(
@@ -575,15 +559,44 @@ class RyoAgent:
                             tool_name=tool_name,
                             decision=decision,
                         ):
-                            _log("Terminal visible mutation completed; ending this passive session now")
-                            return ExecutionOutcome(
-                                kind="final_posted",
-                                reason=tool_name,
-                                mutated_tool_names=set(executed_tool_names),
-                                continue_session=False,
-                                done=True,
-                                visible_comment_posted=True,
+                            has_terminal_mutation = True
+                            terminal_tool_names.append(tool_name)
+                    if has_terminal_mutation:
+                        _log(
+                            "Terminal visible mutation batch completed; ending this passive session now "
+                            f"(executed={len(tool_calls)} terminal={terminal_tool_names})"
+                        )
+                        return ExecutionOutcome(
+                            kind="final_posted",
+                            reason=_reason_from_tools(executed_tool_names, default=terminal_tool_names[0] if terminal_tool_names else "acted_without_comment"),
+                            mutated_tool_names=set(executed_tool_names),
+                            continue_session=False,
+                            done=True,
+                            visible_comment_posted=True,
+                        )
+                    if no_reply_requested:
+                        if not event.is_patrol and not executed_tool_names:
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "This is a passive human-triggered event. You must respond or do real work here. "
+                                        "no_reply is not allowed unless you already completed a mutating action. "
+                                        "Continue and produce a visible response or action."
+                                    ),
+                                }
                             )
+                            continue
+                        if executed_tool_names:
+                            return ExecutionOutcome(
+                                kind="acted_without_thread_reply",
+                                reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
+                                mutated_tool_names=set(executed_tool_names),
+                                done=decision.action_decision.done or not decision.action_decision.continue_session,
+                                continue_session=decision.action_decision.continue_session,
+                                next_identity=decision.action_decision.handoff_to,
+                            )
+                        return ExecutionOutcome(kind="no_action", reason="no_reply")
                     continue
 
                 reply_text = self._extract_text_content(assistant_message).strip()

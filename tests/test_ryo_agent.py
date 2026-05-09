@@ -147,6 +147,14 @@ class SymbolArgs(BaseModel):
     symbol_name: str
 
 
+class IssueNumberArgs(BaseModel):
+    issue_number: int
+
+
+class ThreadNumberArgs(BaseModel):
+    thread_number: int
+
+
 class EchoSkill(BaseSkill):
     name = "echo"
     description = "Repeat the provided text."
@@ -262,6 +270,36 @@ class SearchSymbolTestSkill(BaseSkill):
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         return f"symbol:{args.symbol_name}"
+
+
+class RecordingCloseIssueSkill(BaseSkill):
+    name = "close_issue"
+    description = "Close an issue and record the call order."
+    args_model = IssueNumberArgs
+    mutates_state = True
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        self.calls.append(args.issue_number)
+        return f"closed:{args.issue_number}"
+
+
+class RecordingCommentOnThreadSkill(BaseSkill):
+    name = "comment_on_thread"
+    description = "Comment on a thread and record the call order."
+    args_model = ThreadNumberArgs
+    mutates_state = True
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        self.calls.append(args.thread_number)
+        return f"commented:{args.thread_number}"
 
 
 class ProbeEchoSkill(EchoSkill):
@@ -991,6 +1029,202 @@ async def test_street_lurker_reply_stage_exposes_full_mutation_tools_for_trusted
     assert "add_labels" in tool_names
     assert "close_issue" in tool_names
     assert "dispatch_workflow" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_reply_executes_all_terminal_mutations_in_same_batch_before_stopping() -> None:
+    close_skill = RecordingCloseIssueSkill()
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="hello",
+            author="octocat",
+            author_association="OWNER",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+        )
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "close duplicates",
+                            "internal_emotion": "focused",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 92,
+                            "action_decision": {
+                                "mode": "act_directly",
+                                "will_reply": True,
+                                "will_act": True,
+                                "execution_identity": "self",
+                                "comment_kind": "final",
+                                "handoff_to": None,
+                                "handoff_reason": "",
+                                "focus_summary": "Close all duplicate issues in one batch.",
+                                "context_issue_numbers": [],
+                                "continue_session": False,
+                                "done": True,
+                                "target_issue_number": None,
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(id="call-1", function=FakeFunction(name="close_issue", arguments='{"issue_number":81}')),
+                        FakeToolCall(id="call-2", function=FakeFunction(name="close_issue", arguments='{"issue_number":85}')),
+                        FakeToolCall(id="call-3", function=FakeFunction(name="close_issue", arguments='{"issue_number":82}')),
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+        ],
+        skills=[close_skill],
+    )
+
+    await agent.run(raw_event={})
+
+    assert close_skill.calls == [81, 85, 82]
+    assert plugin.updated_runtime_states[-1].last_routing.reason == "closed_issue"
+
+
+@pytest.mark.asyncio
+async def test_reply_executes_mixed_batch_in_order_before_terminal_stop() -> None:
+    comment_skill = RecordingCommentOnThreadSkill()
+    close_skill = RecordingCloseIssueSkill()
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="hello",
+            author="octocat",
+            author_association="OWNER",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+        )
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "comment then close",
+                            "internal_emotion": "steady",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 90,
+                            "action_decision": {
+                                "mode": "act_directly",
+                                "will_reply": True,
+                                "will_act": True,
+                                "execution_identity": "self",
+                                "comment_kind": "final",
+                                "handoff_to": None,
+                                "handoff_reason": "",
+                                "focus_summary": "Post one note and close duplicate issues.",
+                                "context_issue_numbers": [],
+                                "continue_session": False,
+                                "done": True,
+                                "target_issue_number": None,
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(id="call-comment", function=FakeFunction(name="comment_on_thread", arguments='{"thread_number":12}')),
+                        FakeToolCall(id="call-close-1", function=FakeFunction(name="close_issue", arguments='{"issue_number":81}')),
+                        FakeToolCall(id="call-close-2", function=FakeFunction(name="close_issue", arguments='{"issue_number":82}')),
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+        ],
+        skills=[comment_skill, close_skill],
+    )
+
+    await agent.run(raw_event={})
+
+    assert comment_skill.calls == [12]
+    assert close_skill.calls == [81, 82]
+    assert plugin.updated_runtime_states[-1].last_routing.reason == "closed_issue"
+
+
+@pytest.mark.asyncio
+async def test_reply_defers_no_reply_until_after_other_batch_tools() -> None:
+    close_skill = RecordingCloseIssueSkill()
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-1",
+            message="hello",
+            author="octocat",
+            author_association="OWNER",
+            issue_id="1001",
+            issue_number=12,
+            comment_id=21,
+            owner="acme",
+            repo="widgets",
+        )
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "close and stop",
+                            "internal_emotion": "firm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 88,
+                            "action_decision": {
+                                "mode": "act_directly",
+                                "will_reply": True,
+                                "will_act": True,
+                                "execution_identity": "self",
+                                "comment_kind": "response",
+                                "handoff_to": None,
+                                "handoff_reason": "",
+                                "focus_summary": "Close the issue and avoid extra public reply.",
+                                "context_issue_numbers": [],
+                                "continue_session": False,
+                                "done": True,
+                                "target_issue_number": None,
+                            },
+                        }
+                    )
+                )
+            ),
+            build_response(
+                FakeMessage(
+                    tool_calls=[
+                        FakeToolCall(id="call-close", function=FakeFunction(name="close_issue", arguments='{"issue_number":81}')),
+                        FakeToolCall(id="call-no-reply", function=FakeFunction(name="no_reply", arguments='{"reason":"done"}')),
+                    ]
+                )
+            ),
+            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+        ],
+        skills=[close_skill],
+    )
+
+    await agent.run(raw_event={})
+
+    assert close_skill.calls == [81]
+    assert plugin.updated_runtime_states[-1].last_routing.reason == "closed_issue"
 
 
 @pytest.mark.asyncio
