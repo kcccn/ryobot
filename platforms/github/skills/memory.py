@@ -19,25 +19,43 @@ from ._models import (
 
 class SearchRepoMemory(GitHubSkillBase):
     name = "search_repo_memory"
-    description = "Search similar issues in the current GitHub repository."
+    description = "Search the closed long-term memory issue database in the current GitHub repository."
     args_model = SearchRepoMemoryArgs
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
-        query = f"{args.query} repo:{context['owner']}/{context['repo']} is:issue"
+        query = (
+            f'repo:{context["owner"]}/{context["repo"]} is:issue is:closed '
+            f'label:"{MEMORY_LABEL}" {args.query}'
+        )
         result = await self._api.get_json(
             "/search/issues",
-            params={"q": query, "per_page": max(args.limit + 1, 2)},
+            params={"q": query, "per_page": max(args.limit + 5, 5), "sort": "updated", "order": "desc"},
+        )
+        issue_numbers = [
+            int(item["number"])
+            for item in result.get("items", [])
+            if int(item["number"]) != int(context["issue_number"])
+        ]
+        if not issue_numbers:
+            return "No similar memory records found."
+        detailed_items = await asyncio.gather(
+            *[
+                self._api.get_json(f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}")
+                for issue_number in issue_numbers
+            ]
         )
         lines: list[str] = []
-        for item in result.get("items", []):
-            if int(item["number"]) == int(context["issue_number"]):
+        for item in detailed_items:
+            try:
+                self._validated_memory_record(item)
+            except RuntimeError:
                 continue
             lines.append(f"#{item['number']}: {item['title']} ({item['html_url']})")
             if len(lines) >= args.limit:
                 break
-        return "\n".join(lines) if lines else "No similar issues found."
+        return "\n".join(lines) if lines else "No similar memory records found."
 
 
 class CommitMemory(GitHubSkillBase):
@@ -117,10 +135,10 @@ class RetrieveMemory(GitHubSkillBase):
 
         ranked: list[tuple[int, dict[str, Any], str, dict[str, Any]]] = []
         for issue in detailed_items:
-            labels = self._labels_from_issue(issue)
-            if MEMORY_LABEL not in labels or DELETED_MEMORY_LABEL in labels:
+            try:
+                summary, metadata, _labels = self._validated_memory_record(issue)
+            except RuntimeError:
                 continue
-            summary, metadata = self._parse_memory_body(str(issue.get("body") or ""))
             score = self._score_memory_candidate(args.query, issue, summary, metadata)
             ranked.append((score, issue, summary, metadata))
 
@@ -164,15 +182,9 @@ class RefineMemory(GitHubSkillBase):
         issue = await self._api.get_json(
             f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}"
         )
-        existing_summary, metadata = self._parse_memory_body(str(issue.get("body") or ""))
-        if not metadata:
-            metadata = {
-                "schema_version": MEMORY_SCHEMA_VERSION,
-                "status": "active",
-                "tags": [],
-                "source": self._memory_source(context),
-                "created_at": str(issue.get("created_at") or datetime.now(timezone.utc).isoformat()),
-            }
+        existing_summary, metadata, labels = self._validated_memory_record(issue)
+        if DELETED_MEMORY_LABEL in labels:
+            raise RuntimeError("Archived memory records cannot be refined. Create a new memory instead.")
         metadata["schema_version"] = MEMORY_SCHEMA_VERSION
         metadata["status"] = "active"
         metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -186,7 +198,7 @@ class RefineMemory(GitHubSkillBase):
                 "title": new_title,
                 "body": self._memory_body(new_summary, metadata),
                 "state": "closed",
-                "labels": self._labels_from_issue(issue) or [MEMORY_LABEL],
+                "labels": labels,
             },
         )
         return f"Refined memory issue #{updated['number']}: {updated['title']}"
@@ -211,20 +223,13 @@ class ArchiveMemory(GitHubSkillBase):
         issue = await self._api.get_json(
             f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}"
         )
-        summary, metadata = self._parse_memory_body(str(issue.get("body") or ""))
-        if not metadata:
-            metadata = {
-                "schema_version": MEMORY_SCHEMA_VERSION,
-                "tags": [],
-                "source": self._memory_source(context),
-                "created_at": str(issue.get("created_at") or datetime.now(timezone.utc).isoformat()),
-            }
+        summary, metadata, labels = self._validated_memory_record(issue)
         metadata["schema_version"] = MEMORY_SCHEMA_VERSION
         metadata["status"] = "archived"
         metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
         if args.reason.strip():
             metadata["archive_reason"] = args.reason.strip()
-        labels = [label for label in self._labels_from_issue(issue) if label != MEMORY_LABEL and label != DELETED_MEMORY_LABEL]
+        labels = [label for label in labels if label != MEMORY_LABEL and label != DELETED_MEMORY_LABEL]
         labels.append(DELETED_MEMORY_LABEL)
         updated = await self._api.patch_json(
             f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}",

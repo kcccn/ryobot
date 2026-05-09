@@ -5,6 +5,9 @@ from typing import Any
 
 MEMORY_LABEL = "🧠 memory"
 DELETED_MEMORY_LABEL = "🗑️ deleted"
+LIVE_MIND_LABEL = "🧠 live-mind"
+COORDINATION_LABEL = "🎙️ coordination"
+BOT_LABEL_PREFIX = "bot:"
 COORDINATION_ISSUE_TITLE = "🎙️ RyoBot Coordination"
 MIND_ISSUE_TITLE_PREFIX = "🧠 "
 
@@ -38,8 +41,13 @@ def sanitize_mentions(text: str) -> str:
 
 
 def is_internal_issue_artifact(issue: dict[str, Any]) -> bool:
-    title = str(issue.get("title") or "")
-    if title == COORDINATION_ISSUE_TITLE or title.startswith(MIND_ISSUE_TITLE_PREFIX):
-        return True
     labels = {str(label.get("name") or "") for label in issue.get("labels", [])}
-    return MEMORY_LABEL in labels or DELETED_MEMORY_LABEL in labels
+    if (
+        MEMORY_LABEL in labels
+        or DELETED_MEMORY_LABEL in labels
+        or LIVE_MIND_LABEL in labels
+        or COORDINATION_LABEL in labels
+        or any(label.startswith(BOT_LABEL_PREFIX) for label in labels)
+    ):
+        return True
+    return False

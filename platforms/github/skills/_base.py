@@ -17,6 +17,9 @@ from ..utils import (
 )
 from ._models import (
     _MEMORY_MARKER_RE,
+    DELETED_MEMORY_LABEL,
+    MEMORY_LABEL,
+    MEMORY_SCHEMA_VERSION,
 )
 
 
@@ -236,6 +239,25 @@ class GitHubSkillBase(BaseSkill):
             visible_body = visible_body[len("### 记忆摘要") :].strip()
         visible_body = re.sub(r"\n?---\s*$", "", visible_body).strip()
         return visible_body, metadata
+
+    @classmethod
+    def _validated_memory_record(
+        cls,
+        issue: dict[str, Any],
+        *,
+        allow_archived: bool = False,
+    ) -> tuple[str, dict[str, Any], list[str]]:
+        labels = cls._labels_from_issue(issue)
+        summary, metadata = cls._parse_memory_body(str(issue.get("body") or ""))
+        if str(issue.get("state") or "") != "closed":
+            raise RuntimeError("Target issue is not a closed memory record.")
+        if MEMORY_LABEL not in labels:
+            raise RuntimeError("Target issue is not labeled as a long-term memory record.")
+        if not metadata or int(metadata.get("schema_version") or 0) != MEMORY_SCHEMA_VERSION:
+            raise RuntimeError("Target issue is missing a valid ryo:memory marker.")
+        if not allow_archived and DELETED_MEMORY_LABEL in labels:
+            raise RuntimeError("Archived memory records are read-only in this workflow.")
+        return summary, metadata, labels
 
     @staticmethod
     def _labels_from_issue(issue: dict[str, Any]) -> list[str]:

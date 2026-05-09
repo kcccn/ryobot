@@ -207,16 +207,45 @@ async def test_search_repo_memory_scopes_search_to_current_repo_and_respects_lim
     captured: dict[str, str] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
+        if request.url.path == "/search/issues":
+            captured["url"] = str(request.url)
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"number": 12, "title": "Current issue", "html_url": "https://github.test/12"},
+                        {"number": 9, "title": "Similar bug", "html_url": "https://github.test/9"},
+                        {"number": 8, "title": "Another bug", "html_url": "https://github.test/8"},
+                    ]
+                },
+            )
+        if request.url.path.endswith("/issues/9"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": 9,
+                    "state": "closed",
+                    "title": "Similar bug",
+                    "body": "### 记忆摘要\n相似 memory\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"active\",\"tags\":[\"bug\"]} -->",
+                    "labels": [{"name": "🧠 memory"}],
+                    "html_url": "https://github.test/9",
+                },
+            )
+        if request.url.path.endswith("/issues/8"):
+            return httpx.Response(
+                200,
+                json={
+                    "number": 8,
+                    "state": "closed",
+                    "title": "Another bug",
+                    "body": "### 记忆摘要\n另一个 memory\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"active\",\"tags\":[\"bug\"]} -->",
+                    "labels": [{"name": "🧠 memory"}],
+                    "html_url": "https://github.test/8",
+                },
+            )
         return httpx.Response(
             200,
-            json={
-                "items": [
-                    {"number": 12, "title": "Current issue", "html_url": "https://github.test/12"},
-                    {"number": 9, "title": "Similar bug", "html_url": "https://github.test/9"},
-                    {"number": 8, "title": "Another bug", "html_url": "https://github.test/8"},
-                ]
-            },
+            json={},
         )
 
     client = httpx.AsyncClient(
@@ -234,6 +263,8 @@ async def test_search_repo_memory_scopes_search_to_current_repo_and_respects_lim
     query = parse_qs(urlparse(captured["url"]).query)["q"][0]
     assert "repo:acme/widgets" in query
     assert "widget failure" in query
+    assert 'label:"🧠 memory"' in query
+    assert "is:closed" in query
     assert "Similar bug" in result
     assert "Current issue" not in result
     assert "Another bug" not in result
@@ -300,6 +331,7 @@ async def test_retrieve_memory_only_returns_active_memory_results() -> None:
                 200,
                 json={
                     "number": 30,
+                    "state": "closed",
                     "title": "Ascend focus",
                     "body": "### 记忆摘要\n月月鸟关注 NPU 算子优化。\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"active\",\"tags\":[\"user:月月鸟\",\"module:npu\"],\"updated_at\":\"2026-05-01T00:00:00+00:00\"} -->",
                     "labels": [{"name": "🧠 memory"}],
@@ -312,6 +344,7 @@ async def test_retrieve_memory_only_returns_active_memory_results() -> None:
                 200,
                 json={
                     "number": 31,
+                    "state": "closed",
                     "title": "Archived noise",
                     "body": "### 记忆摘要\n旧噪声。\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"archived\",\"tags\":[\"noise\"],\"updated_at\":\"2026-04-01T00:00:00+00:00\"} -->",
                     "labels": [{"name": "🧠 memory"}, {"name": "🗑️ deleted"}],
@@ -350,6 +383,7 @@ async def test_refine_memory_updates_existing_body_and_metadata() -> None:
                 200,
                 json={
                     "number": 45,
+                    "state": "closed",
                     "title": "Old title",
                     "body": "### 记忆摘要\n旧总结\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"active\",\"tags\":[\"old\"],\"created_at\":\"2026-05-01T00:00:00+00:00\",\"updated_at\":\"2026-05-01T00:00:00+00:00\"} -->",
                     "labels": [{"name": "🧠 memory"}],
@@ -394,6 +428,7 @@ async def test_archive_memory_removes_memory_label_and_marks_deleted() -> None:
                 200,
                 json={
                     "number": 55,
+                    "state": "closed",
                     "title": "Stale memory",
                     "body": "### 记忆摘要\n旧总结\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"active\",\"tags\":[\"legacy\"],\"created_at\":\"2026-05-01T00:00:00+00:00\",\"updated_at\":\"2026-05-01T00:00:00+00:00\"} -->",
                     "labels": [{"name": "🧠 memory"}, {"name": "legacy"}],
@@ -418,6 +453,60 @@ async def test_archive_memory_removes_memory_label_and_marks_deleted() -> None:
     assert '"status":"archived"' in captured["body"]["body"]
     assert '"archive_reason":"no longer useful"' in captured["body"]["body"]
     assert result == "Archived memory issue #55: Stale memory"
+
+
+@pytest.mark.asyncio
+async def test_refine_memory_rejects_non_memory_issue() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/labels"):
+            return httpx.Response(200, json=[{"name": "🧠 memory"}])
+        return httpx.Response(
+            200,
+            json={
+                "number": 77,
+                "state": "open",
+                "title": "Human issue",
+                "body": "plain issue body",
+                "labels": [{"name": "enhancement"}],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = RefineMemory(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        with pytest.raises(RuntimeError, match="closed memory record|labeled as a long-term memory record|valid ryo:memory"):
+            await skill.execute(memory_issue_number=77, summary="should fail")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_archive_memory_rejects_archived_memory_record() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/labels"):
+            return httpx.Response(200, json=[{"name": "🧠 memory"}, {"name": "🗑️ deleted"}])
+        return httpx.Response(
+            200,
+            json={
+                "number": 57,
+                "state": "closed",
+                "title": "Archived memory",
+                "body": "### 记忆摘要\n旧总结\n\n---\n<!-- ryo:memory: {\"schema_version\":1,\"status\":\"archived\",\"tags\":[],\"updated_at\":\"2026-05-01T00:00:00+00:00\"} -->",
+                "labels": [{"name": "🧠 memory"}, {"name": "🗑️ deleted"}],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ArchiveMemory(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        with pytest.raises(RuntimeError, match="Archived memory records are read-only"):
+            await skill.execute(memory_issue_number=57, reason="again")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
 
 
 @pytest.mark.asyncio
@@ -1178,8 +1267,8 @@ async def test_list_open_issues_hides_internal_artifacts_by_default() -> None:
         return httpx.Response(
             200,
             json=[
-                {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [], "user": {"login": "github-actions[bot]"}, "updated_at": "", "html_url": ""},
-                {"number": 63, "title": "🧠 Ryo Coder", "state": "open", "labels": [], "user": {"login": "github-actions[bot]"}, "updated_at": "", "html_url": ""},
+                {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [{"name": "🎙️ coordination"}], "user": {"login": "github-actions[bot]"}, "updated_at": "", "html_url": ""},
+                {"number": 63, "title": "🧠 Ryo Coder", "state": "open", "labels": [{"name": "🧠 live-mind"}, {"name": "bot:coder"}], "user": {"login": "github-actions[bot]"}, "updated_at": "", "html_url": ""},
                 {"number": 56, "title": "Human-facing tracker", "state": "open", "labels": [{"name": "enhancement"}], "user": {"login": "github-actions[bot]"}, "updated_at": "", "html_url": ""},
             ],
         )
@@ -1565,8 +1654,8 @@ async def test_search_repo_context_hides_internal_artifacts_by_default() -> None
             json={
                 "total_count": 3,
                 "items": [
-                    {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [], "updated_at": "", "html_url": ""},
-                    {"number": 63, "title": "🧠 Ryo Coder", "state": "open", "labels": [], "updated_at": "", "html_url": ""},
+                    {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [{"name": "🎙️ coordination"}], "updated_at": "", "html_url": ""},
+                    {"number": 63, "title": "🧠 Ryo Coder", "state": "open", "labels": [{"name": "🧠 live-mind"}, {"name": "bot:coder"}], "updated_at": "", "html_url": ""},
                     {"number": 56, "title": "Human-facing tracker", "state": "open", "labels": [{"name": "enhancement"}], "updated_at": "", "html_url": ""},
                 ],
             },
@@ -1594,7 +1683,7 @@ async def test_search_issues_hides_internal_artifacts_by_default() -> None:
             json={
                 "total_count": 3,
                 "items": [
-                    {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [], "html_url": "", "user": {"login": "bot"}},
+                    {"number": 69, "title": "🎙️ RyoBot Coordination", "state": "open", "labels": [{"name": "🎙️ coordination"}], "html_url": "", "user": {"login": "bot"}},
                     {"number": 59, "title": "🧠 Ryo Architect", "state": "closed", "labels": [{"name": "🧠 memory"}], "html_url": "", "user": {"login": "bot"}},
                     {"number": 56, "title": "Human-facing tracker", "state": "open", "labels": [{"name": "enhancement"}], "html_url": "", "user": {"login": "bot"}},
                 ],
