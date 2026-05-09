@@ -33,9 +33,12 @@ from .prs import (
 from .repo import (
     CreateBranch,
     DeleteBranch,
+    FindFilePaths,
+    GetProjectTree,
     ListFiles,
     ReadFile,
     SearchCode,
+    SearchSymbol,
     WriteFile,
 )
 from .thread import (
@@ -59,6 +62,8 @@ __all__ = [
     "CreatePullRequest",
     "DeleteBranch",
     "DispatchWorkflow",
+    "FindFilePaths",
+    "GetProjectTree",
     "ListFiles",
     "ListOpenIssues",
     "ListOpenPullRequests",
@@ -77,6 +82,7 @@ __all__ = [
     "RetrieveMemory",
     "RunCommand",
     "SearchCode",
+    "SearchSymbol",
     "SearchIssues",
     "SearchRepoContext",
     "SearchRepoMemory",

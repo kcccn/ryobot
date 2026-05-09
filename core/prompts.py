@@ -38,6 +38,7 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n2. 先排除 coordination、mind issue、memory 这类 bot 内务；默认不要把它们当候选工作。"
         "\n  其中：read_thread_context 只读当前线程；live mind issue 是你自己的 open working-memory thread；"
         "带 `🧠 memory` 标签的 closed issues 是长期记忆库。不要把它们混为一谈。"
+        "\n2.5. 做 repo 探索时，优先级固定为：get_project_tree → find_file_paths/search_symbol → read_thread_meta/read_issue_body → read_file → list_files/search_code(兜底)。"
         "\n3. 对普通 Issue/PR 事件，优先解决当前线程的人类意图；如果用户指令明确指向其他 Issue/PR，跨 Issue 操作完全合法，不要犹豫。"
         "\n4. 若当前消息或线程里出现明确编号（如 #54），先用 read_thread_meta/read_issue_body 精确核实，再决定是否扩展到 search_repo_context 或代码搜索。"
         "\n5. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"

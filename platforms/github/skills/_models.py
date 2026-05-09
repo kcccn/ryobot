@@ -153,6 +153,21 @@ class ListFilesArgs(BaseModel):
     limit: int = Field(default=30, ge=1, le=100)
 
 
+class GetProjectTreeArgs(BaseModel):
+    max_depth: int = Field(default=4, ge=1, le=8)
+    ref: str = Field(default="", description="Branch, tag, or commit SHA (empty for contextual default)")
+
+
+class FindFilePathsArgs(BaseModel):
+    keyword: str = Field(description="Case-insensitive path keyword to search for")
+    ref: str = Field(default="", description="Branch, tag, or commit SHA (empty for contextual default)")
+
+
+class SearchSymbolArgs(BaseModel):
+    symbol_name: str = Field(description="Python symbol name to locate")
+    ref: str = Field(default="", description="Branch, tag, or commit SHA (empty for contextual default)")
+
+
 class ReadFileArgs(BaseModel):
     path: str = Field(description="File path relative to repo root")
     ref: str = Field(default="", description="Branch, tag, or commit SHA (empty for default branch)")

@@ -139,6 +139,14 @@ class EchoArgs(BaseModel):
     text: str
 
 
+class PathArgs(BaseModel):
+    path: str = ""
+
+
+class SymbolArgs(BaseModel):
+    symbol_name: str
+
+
 class EchoSkill(BaseSkill):
     name = "echo"
     description = "Repeat the provided text."
@@ -234,6 +242,31 @@ class ReadIssueMemoryTestSkill(EchoSkill):
 class ReadThreadContextTestSkill(EchoSkill):
     name = "read_thread_context"
     description = "Read the current thread context."
+
+
+class ListFilesTestSkill(BaseSkill):
+    name = "list_files"
+    description = "List a directory."
+    args_model = PathArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        return f"listed:{args.path}"
+
+
+class SearchSymbolTestSkill(BaseSkill):
+    name = "search_symbol"
+    description = "Locate a symbol."
+    args_model = SymbolArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        return f"symbol:{args.symbol_name}"
+
+
+class ProbeEchoSkill(EchoSkill):
+    name = "probe_echo"
+    description = "Probe for convergence behavior."
 
 
 def build_response(message: FakeMessage) -> FakeResponse:
@@ -1711,6 +1744,132 @@ async def test_stage_specific_max_tokens_floor_for_will_and_reflection() -> None
     assert fake_completions.calls[2]["max_tokens"] == 4096
 
 
+def test_will_iteration_budget_varies_by_event_type() -> None:
+    passive_event = PluginEvent(
+        event_id="evt-passive",
+        message="hello",
+        author="octocat",
+        issue_id="1001",
+        issue_number=12,
+        comment_id=21,
+        owner="acme",
+        repo="widgets",
+    )
+    patrol_event = PluginEvent(
+        event_id="evt-patrol",
+        message="patrol",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="acme",
+        repo="widgets",
+        is_patrol=True,
+    )
+
+    assert RyoAgent._will_iteration_budget(passive_event) == 8
+    assert RyoAgent._will_iteration_budget(patrol_event) == 16
+
+
+@pytest.mark.asyncio
+async def test_will_stage_does_not_treat_same_tool_with_different_args_as_loop(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-patrol",
+            message="street lurker",
+            author="system",
+            author_association="OWNER",
+            issue_id="",
+            issue_number=0,
+            comment_id=0,
+            owner="acme",
+            repo="widgets",
+            is_patrol=True,
+        ),
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(FakeMessage(tool_calls=[FakeToolCall(id="call-1", function=FakeFunction(name="list_files", arguments='{"path":"backend"}'))])),
+            build_response(FakeMessage(tool_calls=[FakeToolCall(id="call-2", function=FakeFunction(name="list_files", arguments='{"path":"backend/app"}'))])),
+            build_response(FakeMessage(tool_calls=[FakeToolCall(id="call-3", function=FakeFunction(name="list_files", arguments='{"path":"backend/tests"}'))])),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "done",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+        ],
+        skills=[ListFilesTestSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    stderr = capsys.readouterr().err
+    assert "effective_will_iterations=16" in stderr
+    assert "without new tool signatures" not in stderr
+
+
+@pytest.mark.asyncio
+async def test_will_stage_forces_decision_after_repeating_same_tool_signature(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plugin = FakePlugin(
+        event=PluginEvent(
+            event_id="evt-patrol",
+            message="street lurker",
+            author="system",
+            author_association="OWNER",
+            issue_id="",
+            issue_number=0,
+            comment_id=0,
+            owner="acme",
+            repo="widgets",
+            is_patrol=True,
+        ),
+        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
+    )
+    agent, _ = build_agent(
+        plugin=plugin,
+        responses=[
+            build_response(FakeMessage(tool_calls=[FakeToolCall(id="call-1", function=FakeFunction(name="probe_echo", arguments='{"text":"same"}'))])),
+            build_response(FakeMessage(tool_calls=[FakeToolCall(id="call-2", function=FakeFunction(name="probe_echo", arguments='{"text":"same"}'))])),
+            build_response(FakeMessage(tool_calls=[FakeToolCall(id="call-3", function=FakeFunction(name="probe_echo", arguments='{"text":"same"}'))])),
+            build_response(FakeMessage(tool_calls=[FakeToolCall(id="call-4", function=FakeFunction(name="probe_echo", arguments='{"text":"same"}'))])),
+            build_response(
+                FakeMessage(
+                    content=json.dumps(
+                        {
+                            "context_analysis": "done",
+                            "internal_emotion": "calm",
+                            "biological_clock_impact": "neutral",
+                            "motivation_score": 0,
+                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                        }
+                    )
+                )
+            ),
+        ],
+        skills=[ProbeEchoSkill()],
+    )
+
+    await agent.run(raw_event={})
+
+    stderr = capsys.readouterr().err
+    assert "without new tool signatures, forcing decision" in stderr
+
+
 def test_decision_and_reflection_schema_enforce_short_fields() -> None:
     will_fields = WillDecision.model_fields
     assert will_fields["context_analysis"].description == "环境分析：极简总结，不超过 50 个字。"
@@ -1729,6 +1888,7 @@ def test_prompts_require_short_json_fields() -> None:
     decision_prompt = prompts.build_decision_prompt(system_prompt="sys", mind_context="")
     reflection_prompt = prompts.build_reflection_prompt(system_prompt="sys", mind_context="")
 
+    assert "get_project_tree → find_file_paths/search_symbol" in decision_prompt
     assert "context_analysis 必须极短，不超过 50 个字" in decision_prompt
     assert "internal_emotion 必须一句话，不超过 20 个字" in decision_prompt
     assert "biological_clock_impact 不超过 20 个字" in decision_prompt

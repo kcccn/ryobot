@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -21,6 +22,10 @@ from ._models import (
 
 class GitHubSkillBase(BaseSkill):
     """Shared GitHub client plumbing for skills."""
+
+    _tree_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+    _blob_cache: dict[str, str] = {}
+    _repo_default_branch_cache: dict[tuple[str, str], str] = {}
 
     def __init__(
         self,
@@ -67,6 +72,63 @@ class GitHubSkillBase(BaseSkill):
         if requested:
             return requested
         return cls._default_ref_for_context(context)
+
+    async def _repo_default_branch(self, context: dict[str, Any]) -> str:
+        key = (str(context["owner"]), str(context["repo"]))
+        cached = self._repo_default_branch_cache.get(key)
+        if cached:
+            return cached
+        repo_info = await self._api.get_json(f"/repos/{context['owner']}/{context['repo']}")
+        default_branch = str(repo_info.get("default_branch") or "main")
+        self._repo_default_branch_cache[key] = default_branch
+        return default_branch
+
+    async def _resolved_ref(self, context: dict[str, Any], requested_ref: str) -> str:
+        effective_ref = self._effective_ref(context, requested_ref)
+        if effective_ref:
+            return effective_ref
+        return await self._repo_default_branch(context)
+
+    async def _load_project_tree(self, context: dict[str, Any], requested_ref: str) -> tuple[str, dict[str, Any]]:
+        resolved_ref = await self._resolved_ref(context, requested_ref)
+        cache_key = (str(context["owner"]), str(context["repo"]), resolved_ref)
+        cached = self._tree_cache.get(cache_key)
+        if cached is not None:
+            return resolved_ref, cached
+
+        commit = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/commits/{resolved_ref}"
+        )
+        tree_sha = str((((commit.get("commit") or {}).get("tree") or {}).get("sha")) or "")
+        if not tree_sha:
+            raise RuntimeError(f"Could not resolve tree SHA for ref '{resolved_ref}'.")
+        tree = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/git/trees/{tree_sha}",
+            params={"recursive": "1"},
+        )
+        entries = [item for item in tree.get("tree", []) if isinstance(item, dict)]
+        payload = {
+            "entries": entries,
+            "path_map": {str(item.get("path") or ""): item for item in entries},
+        }
+        self._tree_cache[cache_key] = payload
+        return resolved_ref, payload
+
+    async def _read_blob_text(self, context: dict[str, Any], blob_sha: str) -> str:
+        cached = self._blob_cache.get(blob_sha)
+        if cached is not None:
+            return cached
+        blob = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}/git/blobs/{blob_sha}"
+        )
+        raw_content = str(blob.get("content") or "")
+        encoding = str(blob.get("encoding") or "")
+        if encoding == "base64":
+            decoded = base64.b64decode(raw_content).decode("utf-8")
+        else:
+            decoded = raw_content
+        self._blob_cache[blob_sha] = decoded
+        return decoded
 
     async def _current_authenticated_login(self) -> str:
         profile = await self._api.get_json("/user")

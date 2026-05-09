@@ -303,15 +303,17 @@ class RyoAgent:
         ]
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
+        will_iterations = self._will_iteration_budget(event)
         self._log_available_tools("will", tools)
-        seen_tools: set[str] = set()
+        _log(f"effective_will_iterations={will_iterations}")
+        seen_signatures: set[str] = set()
         no_new_tool_count = 0
         total_tool_calls = 0
         json_repair_only = False
         resource_uses: dict[tuple[str, str], int] = {}
         try:
-            for i in range(WILL_MAX_ITERATIONS):
-                _log(f"--- will iteration {i + 1}/{WILL_MAX_ITERATIONS} ---")
+            for i in range(will_iterations):
+                _log(f"--- will iteration {i + 1}/{will_iterations} ---")
                 t_start = time.monotonic()
                 active_tools: list[dict[str, Any]] = [] if json_repair_only else tools
                 response = await self._create_completion_with_retry(
@@ -340,7 +342,7 @@ class RyoAgent:
                         continue
                     self._log_tool_calls(tool_calls)
                     messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
-                    new_tool_seen = False
+                    new_signature_seen = False
                     executed_tc_ids: set[str] = set()
                     for tool_call in tool_calls:
                         if total_tool_calls >= WILL_MAX_TOOL_CALLS:
@@ -349,9 +351,10 @@ class RyoAgent:
                             break
                         tool_name, args_raw = self._tool_call_details(tool_call)
                         _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
-                        if tool_name not in seen_tools:
-                            seen_tools.add(tool_name)
-                            new_tool_seen = True
+                        tool_signature = self._will_tool_signature(tool_name, args_raw)
+                        if tool_signature not in seen_signatures:
+                            seen_signatures.add(tool_signature)
+                            new_signature_seen = True
                         total_tool_calls += 1
                         tool_result = await self._execute_will_tool_call(
                             tool_call,
@@ -384,12 +387,12 @@ class RyoAgent:
                             )
                     if json_repair_only:
                         self._append_will_budget_exhausted_nudge(messages)
-                    if new_tool_seen:
+                    if new_signature_seen:
                         no_new_tool_count = 0
                     else:
                         no_new_tool_count += 1
                         if no_new_tool_count >= WILL_CONVERGENCE_LIMIT:
-                            _log(f"WARN: {no_new_tool_count} iterations without new tools, forcing decision")
+                            _log(f"WARN: {no_new_tool_count} iterations without new tool signatures, forcing decision")
                             messages.append(
                                 {
                                     "role": "user",
@@ -789,6 +792,18 @@ class RyoAgent:
                 delay = 2 ** (attempt - 1)
                 _log(f"LLM call failed (attempt {attempt}), retrying in {delay}s...")
                 await asyncio.sleep(delay)
+
+    @staticmethod
+    def _will_iteration_budget(event: PluginEvent) -> int:
+        return 16 if event.is_patrol else 8
+
+    def _will_tool_signature(self, tool_name: str, args_raw: str) -> str:
+        try:
+            parsed_args = self._parse_tool_arguments(args_raw)
+        except JSONDecodeError:
+            return f"{tool_name}:<invalid-json>"
+        normalized_args = json.dumps(parsed_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return f"{tool_name}:{normalized_args}"
 
     def _available_skills_for_event(
         self,
@@ -1242,9 +1257,22 @@ class RyoAgent:
             return (tool_name, str(args.get("issue_number", 0) or 0))
         if tool_name in {"read_file", "list_files"}:
             return (tool_name, str(args.get("path", "")).strip())
+        if tool_name == "get_project_tree":
+            ref = str(args.get("ref", "")).strip()
+            depth = str(args.get("max_depth", 4))
+            return (tool_name, f"{ref}|{depth}")
+        if tool_name == "find_file_paths":
+            ref = str(args.get("ref", "")).strip()
+            keyword = _normalize_query_key(str(args.get("keyword", "")).strip())
+            return (tool_name, f"{ref}|{keyword}")
+        if tool_name == "search_symbol":
+            ref = str(args.get("ref", "")).strip()
+            symbol_name = str(args.get("symbol_name", "")).strip().lower()
+            return (tool_name, f"{ref}|{symbol_name}")
         if tool_name in {"search_issues", "search_repo_context", "retrieve_memory", "search_code"}:
             return (tool_name, _normalize_query_key(str(args.get("query", "")).strip()))
-        return None
+        normalized_args = json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return (tool_name, normalized_args)
 
 
 def _is_trusted_mutation_author(author_association: str) -> bool:

@@ -22,6 +22,8 @@ from platforms.github.skills import (
     CreatePullRequest,
     DeleteBranch,
     DispatchWorkflow,
+    FindFilePaths,
+    GetProjectTree,
     ListFiles,
     ListOpenIssues,
     ListRepoLabels,
@@ -42,6 +44,7 @@ from platforms.github.skills import (
     SearchIssues,
     SearchRepoContext,
     SearchRepoMemory,
+    SearchSymbol,
     UpdateIssue,
     WriteFile,
 )
@@ -1306,6 +1309,139 @@ async def test_read_thread_comments_reads_issue_comments_and_review_comments() -
 
 
 # ---- list_files ----
+
+
+@pytest.mark.asyncio
+async def test_get_project_tree_returns_cached_tree_for_pr_head_ref() -> None:
+    GetProjectTree._tree_cache.clear()
+    GetProjectTree._blob_cache.clear()
+    GetProjectTree._repo_default_branch_cache.clear()
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/commits/feat/example-pr"):
+            return httpx.Response(200, json={"commit": {"tree": {"sha": "tree123"}}})
+        if request.url.path.endswith("/git/trees/tree123"):
+            return httpx.Response(
+                200,
+                json={
+                    "tree": [
+                        {"path": "backend", "type": "tree", "sha": "sha-backend"},
+                        {"path": "backend/app", "type": "tree", "sha": "sha-app"},
+                        {"path": "backend/app/core", "type": "tree", "sha": "sha-core"},
+                        {"path": "backend/app/core/engine.py", "type": "blob", "sha": "sha-engine"},
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = GetProjectTree(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_pr_context()
+    try:
+        first = await skill.execute()
+        second = await skill.execute()
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Project tree:" in first
+    assert "engine.py" in first
+    assert "(ref: feat/example-pr, max_depth: 4)" in first
+    assert first == second
+    assert sum("/commits/feat/example-pr" in call for call in calls) == 1
+    assert sum("/git/trees/tree123?recursive=1" in call for call in calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_find_file_paths_uses_tree_cache_without_code_search() -> None:
+    FindFilePaths._tree_cache.clear()
+    FindFilePaths._blob_cache.clear()
+    FindFilePaths._repo_default_branch_cache.clear()
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/repos/acme/widgets"):
+            return httpx.Response(200, json={"default_branch": "main"})
+        if request.url.path.endswith("/commits/main"):
+            return httpx.Response(200, json={"commit": {"tree": {"sha": "tree123"}}})
+        if request.url.path.endswith("/git/trees/tree123"):
+            return httpx.Response(
+                200,
+                json={
+                    "tree": [
+                        {"path": "backend/app/core/engine.py", "type": "blob", "sha": "sha-engine"},
+                        {"path": "backend/app/services/demand_service.py", "type": "blob", "sha": "sha-demand"},
+                    ]
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = FindFilePaths(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(keyword="service")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "demand_service.py" in result
+    assert not any("/search/code" in call for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_search_symbol_locates_python_definitions_and_skips_bad_files() -> None:
+    SearchSymbol._tree_cache.clear()
+    SearchSymbol._blob_cache.clear()
+    SearchSymbol._repo_default_branch_cache.clear()
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/repos/acme/widgets"):
+            return httpx.Response(200, json={"default_branch": "main"})
+        if request.url.path.endswith("/commits/main"):
+            return httpx.Response(200, json={"commit": {"tree": {"sha": "tree123"}}})
+        if request.url.path.endswith("/git/trees/tree123"):
+            return httpx.Response(
+                200,
+                json={
+                    "tree": [
+                        {"path": "backend/app/core/engine.py", "type": "blob", "sha": "sha-engine"},
+                        {"path": "backend/app/bad.py", "type": "blob", "sha": "sha-bad"},
+                    ]
+                },
+            )
+        if request.url.path.endswith("/git/blobs/sha-engine"):
+            return httpx.Response(
+                200,
+                json={
+                    "encoding": "base64",
+                    "content": "Y2xhc3MgU2ltdWxhdGlvbkVuZ2luZToKICAgIGRlZiBhZHZhbmNlKHNlbGYpIC0+IE5vbmU6CiAgICAgICAgcGFzcwo=",
+                },
+            )
+        if request.url.path.endswith("/git/blobs/sha-bad"):
+            return httpx.Response(
+                200,
+                json={"encoding": "base64", "content": "ZGVmIGJyb2tlbig6Cg=="},
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = SearchSymbol(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(symbol_name="advance")
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "function" not in result
+    assert "method advance -> backend/app/core/engine.py:2" in result
+    assert any("/git/blobs/sha-bad" in call for call in calls)
 
 
 @pytest.mark.asyncio
