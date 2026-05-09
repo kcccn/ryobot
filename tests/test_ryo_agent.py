@@ -2106,16 +2106,37 @@ async def test_will_stage_forces_decision_after_repeating_same_tool_signature(
 
 def test_decision_and_reflection_schema_enforce_short_fields() -> None:
     will_fields = WillDecision.model_fields
-    assert will_fields["context_analysis"].description == "环境分析：极简总结，不超过 50 个字。"
-    assert will_fields["context_analysis"].metadata[0].max_length == 50
-    assert will_fields["internal_emotion"].description == "内心OS：一句话，不超过 20 个字。"
-    assert will_fields["internal_emotion"].metadata[0].max_length == 20
-    assert will_fields["biological_clock_impact"].description == "生理时钟影响：极简描述，不超过 20 个字。"
-    assert will_fields["biological_clock_impact"].metadata[0].max_length == 20
+    assert will_fields["context_analysis"].description == "环境分析：极简总结，不超过 100 个字。"
+    assert will_fields["context_analysis"].metadata[0].max_length == 100
+    assert will_fields["internal_emotion"].description == "内心OS：一句话，不超过 60 个字。"
+    assert will_fields["internal_emotion"].metadata[0].max_length == 60
+    assert will_fields["biological_clock_impact"].description == "生理时钟影响：极简描述，不超过 60 个字。"
+    assert will_fields["biological_clock_impact"].metadata[0].max_length == 60
 
     reflection_field = ReflectionDecision.model_fields["summary"]
-    assert reflection_field.description == "反思摘要：极简一句话，不超过 40 个字。"
-    assert reflection_field.metadata[0].max_length == 40
+    assert reflection_field.description == "反思摘要：极简一句话，不超过 80 个字。"
+    assert reflection_field.metadata[0].max_length == 80
+
+
+def test_will_decision_accepts_short_english_bug_summaries() -> None:
+    decision = WillDecision.model_validate(
+        {
+            "context_analysis": "Ghost bikes found in starter fleet initialization; PR needs review.",
+            "internal_emotion": "bug found, time to review",
+            "biological_clock_impact": "Fresh catch, best timing",
+            "motivation_score": 92,
+            "action_decision": {
+                "mode": "act_directly",
+                "will_reply": True,
+                "will_act": True,
+                "focus_summary": "Post a blocking review on the PR.",
+                "context_issue_numbers": [],
+                "target_issue_number": 89,
+            },
+        }
+    )
+    assert decision.internal_emotion == "bug found, time to review"
+    assert decision.biological_clock_impact == "Fresh catch, best timing"
 
 
 def test_prompts_require_short_json_fields() -> None:
@@ -2123,10 +2144,10 @@ def test_prompts_require_short_json_fields() -> None:
     reflection_prompt = prompts.build_reflection_prompt(system_prompt="sys", mind_context="")
 
     assert "get_project_tree → find_file_paths/search_symbol" in decision_prompt
-    assert "context_analysis 必须极短，不超过 50 个字" in decision_prompt
-    assert "internal_emotion 必须一句话，不超过 20 个字" in decision_prompt
-    assert "biological_clock_impact 不超过 20 个字" in decision_prompt
-    assert "summary 必须极短，不超过 40 个字" in reflection_prompt
+    assert "context_analysis 必须极短，不超过 100 个字" in decision_prompt
+    assert "internal_emotion 必须一句话，不超过 60 个字" in decision_prompt
+    assert "biological_clock_impact 不超过 60 个字" in decision_prompt
+    assert "summary 必须极短，不超过 80 个字" in reflection_prompt
 
 
 @pytest.mark.asyncio

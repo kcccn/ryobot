@@ -69,8 +69,8 @@ class ReflectionDecision(BaseModel):
     action: str
     summary: str = Field(
         default="",
-        description="反思摘要：极简一句话，不超过 40 个字。",
-        max_length=40,
+        description="反思摘要：极简一句话，不超过 80 个字。",
+        max_length=80,
     )
 
 
