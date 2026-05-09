@@ -479,8 +479,6 @@ async def test_passive_final_comment_stops_session_without_second_bot() -> None:
 
                                 "focus_summary": "Post the final cleanup summary and end the session.",
                                 "context_issue_numbers": [],
-                                "continue_session": False,
-                                "done": True,
                                 "target_issue_number": None,
                             },
                         }
@@ -498,95 +496,6 @@ async def test_passive_final_comment_stops_session_without_second_bot() -> None:
 
     assert plugin.sent_replies == [(plugin.parse_event(None), "整理完毕，当前请求已收口。", {})]
     assert len(fake_completions.calls) == 2
-
-
-@pytest.mark.asyncio
-async def test_multi_round_single_bot_discussion_then_handoff_then_acts() -> None:
-    """A single bot can post discussion, then handoff comment, then act — all as the same identity."""
-    plugin = FakePlugin(
-        event=PluginEvent(
-            event_id="evt-impl",
-            message="[Comment on Issue #12]\n\n请直接补实现并提 PR",
-            author="octocat",
-            author_association="OWNER",
-            issue_id="1001",
-            issue_number=12,
-            comment_id=21,
-            owner="acme",
-            repo="widgets",
-        ),
-        history_by_issue={12: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState())},
-    )
-    agent, _ = build_agent(
-        plugin=plugin,
-        responses=[
-            build_response(
-                FakeMessage(
-                    content=json.dumps(
-                        {
-                            "context_analysis": "need one architecture constraint first",
-                            "internal_emotion": "focused",
-                            "biological_clock_impact": "neutral",
-                            "action_decision": {
-                                "mode": "reply_with_plan",
-                                "will_reply": True,
-                                "will_act": False,
-                                "execution_identity": "self",
-                                "comment_kind": "discussion",
-                                "focus_summary": "State the architecture constraint before implementation starts.",
-                                "context_issue_numbers": [],
-                                "continue_session": True,
-                                "done": False,
-                                "target_issue_number": None,
-                            },
-                        }
-                    )
-                )
-            ),
-            build_response(FakeMessage(content="先别急着改，接口边界要保持最小。")),
-            build_response(
-                FakeMessage(
-                    content=json.dumps(
-                        {
-                            "context_analysis": "now hand off to coder via dispatch",
-                            "internal_emotion": "calm",
-                            "biological_clock_impact": "neutral",
-                            "action_decision": {
-                                "mode": "act_directly",
-                                "will_reply": True,
-                                "will_act": True,
-                                "execution_identity": "self",
-                                "comment_kind": "handoff",
-                                "focus_summary": "Dispatch coder to implement the PR.",
-                                "context_issue_numbers": [],
-                                "continue_session": False,
-                                "done": True,
-                                "target_issue_number": None,
-                            },
-                        }
-                    )
-                )
-            ),
-            build_response(
-                FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-dispatch",
-                            function=FakeFunction(name="dispatch_workflow", arguments='{"bot_identity":"coder","issue_number":12}'),
-                        )
-                    ]
-                )
-            ),
-            build_response(FakeMessage(content="已召唤 coder 来实现，我这边交接完成。")),
-        ],
-        skills=[CreatePullRequestTestSkill()],
-    )
-
-    await agent.run(raw_event={})
-
-    assert plugin.sent_replies[0][1] == "先别急着改，接口边界要保持最小。"
-    assert "交接完成" in plugin.sent_replies[1][1]
-    assert len(plugin.sent_replies) == 2
 
 
 @pytest.mark.asyncio
@@ -625,8 +534,6 @@ async def test_pr_review_submission_ends_session_without_extra_signoff() -> None
                             "comment_kind": "response",
                             "focus_summary": "Submit the PR review on the active target thread.",
                             "context_issue_numbers": [],
-                            "continue_session": False,
-                            "done": True,
                             "target_issue_number": 77,
                             },
                         }
@@ -925,8 +832,6 @@ async def test_reply_executes_all_terminal_mutations_in_same_batch_before_stoppi
 
                                 "focus_summary": "Close all duplicate issues in one batch.",
                                 "context_issue_numbers": [],
-                                "continue_session": False,
-                                "done": True,
                                 "target_issue_number": None,
                             },
                         }
@@ -989,8 +894,6 @@ async def test_reply_executes_mixed_batch_in_order_before_terminal_stop() -> Non
 
                                 "focus_summary": "Post one note and close duplicate issues.",
                                 "context_issue_numbers": [],
-                                "continue_session": False,
-                                "done": True,
                                 "target_issue_number": None,
                             },
                         }
@@ -1053,8 +956,6 @@ async def test_reply_defers_no_reply_until_after_other_batch_tools() -> None:
 
                                 "focus_summary": "Close the issue and avoid extra public reply.",
                                 "context_issue_numbers": [],
-                                "continue_session": False,
-                                "done": True,
                                 "target_issue_number": None,
                             },
                         }
@@ -2110,7 +2011,7 @@ class TestExtractSafeJson:
             '{"context_analysis":"ready","internal_emotion":"calm","biological_clock_impact":"neutral",'
             '"action_decision":{"mode":"act_directly","will_reply":true,"will_act":true,"execution_identity":"self",'
             '"comment_kind":"response","focus_summary":"fix it","context_issue_numbers":[],'
-            '"continue_session":false,"done":false,"target_issue_number":null}}\n'
+            '"target_issue_number":null}}\n'
             '```\n\nThat should work.'
         )
         result = _extract_safe_json(text)

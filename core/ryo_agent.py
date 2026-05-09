@@ -34,7 +34,6 @@ SCOUT_MAX_ITERATIONS = 8
 SCOUT_MAX_TOOL_CALLS = 12
 SCOUT_CONVERGENCE_LIMIT = 3
 SCOUT_MAX_REPEAT_PER_RESOURCE = 2
-MAX_SESSION_ROUNDS = 6
 REPLY_MAX_READONLY_ITERATIONS = 6
 REPLY_CONVERGENCE_LIMIT = 4
 # 在 Reply 阶段对 Scout 已读资源进行去重时，只拦截 GitHub API 读取
@@ -71,8 +70,6 @@ class ExecutionOutcome:
     kind: str
     reason: str
     mutated_tool_names: set[str] = field(default_factory=set)
-    continue_session: bool = False
-    done: bool = False
     visible_comment_posted: bool = False
 
     @property
@@ -156,34 +153,29 @@ class RyoAgent:
             if event.is_patrol:
                 runtime_state.next_patrol_after = _next_patrol_after_iso()
             session = SessionState(current_identity=identity, current_event=event)
+            session.rounds += 1
             final_outcome = ExecutionOutcome(kind="no_action", reason="no_action")
             final_event = event
             final_target_issue_number: int | None = None
             final_dispatcher_identity = identity
             skip_reason = ""
 
-            for _ in range(MAX_SESSION_ROUNDS):
-                session.rounds += 1
-                if session.rounds > 1 and final_outcome.done:
-                    _log("session already completed action in previous round; breaking")
-                    break
-                active_event = session.current_event
-                active_history = await self.plugin.fetch_history(active_event)
-                decision, scout_brief = await self._decide(event=active_event, history=active_history, session=session)
-                _log("scout_decision: " + json.dumps(decision.model_dump(), ensure_ascii=False)[:LOG_TRUNCATE])
+            active_event = session.current_event
+            active_history = await self.plugin.fetch_history(active_event)
+            decision, scout_brief = await self._decide(event=active_event, history=active_history, session=session)
+            _log("scout_decision: " + json.dumps(decision.model_dump(), ensure_ascii=False)[:LOG_TRUNCATE])
 
-                should_reply, skip_reason = self._should_reply(
-                    event=active_event,
-                    decision=decision,
-                    runtime_state=runtime_state,
-                    ignore_fatigue=session.rounds > 1,
-                )
-                if not should_reply:
-                    final_outcome = ExecutionOutcome(kind="no_action", reason=skip_reason, done=True)
-                    final_event = active_event
-                    final_target_issue_number = decision.action_decision.target_issue_number
-                    break
-
+            should_reply, skip_reason = self._should_reply(
+                event=active_event,
+                decision=decision,
+                runtime_state=runtime_state,
+                ignore_fatigue=False,
+            )
+            if not should_reply:
+                final_outcome = ExecutionOutcome(kind="no_action", reason=skip_reason)
+                final_event = active_event
+                final_target_issue_number = decision.action_decision.target_issue_number
+            else:
                 target_issue_number = decision.action_decision.target_issue_number
                 if target_issue_number is not None and target_issue_number != active_event.issue_number:
                     active_event = await self.plugin.resolve_target_event(active_event, target_issue_number)
@@ -207,20 +199,6 @@ class RyoAgent:
                         min_seconds=fatigue_min_seconds,
                         max_seconds=fatigue_max_seconds,
                     )
-
-                if (
-                    not active_event.is_patrol
-                    and outcome.visible_comment_posted
-                    and decision.action_decision.comment_kind == "final"
-                ):
-                    outcome.continue_session = False
-                    outcome.done = True
-
-                if outcome.continue_session and not outcome.done:
-                    session.current_event = active_event
-                    continue
-
-                break
 
             runtime_state.last_routing.event_id = event.event_id
             runtime_state.last_routing.bot_identity = session.current_identity
@@ -447,7 +425,6 @@ class RyoAgent:
                 will_act=False,
                 target_issue_number=None,
                 comment_kind="final",
-                done=True,
             ),
         ), ""
 
@@ -565,8 +542,6 @@ class RyoAgent:
                             kind="final_posted",
                             reason=_reason_from_tools(executed_tool_names, default=terminal_tool_names[0] if terminal_tool_names else "acted_without_comment"),
                             mutated_tool_names=set(executed_tool_names),
-                            continue_session=False,
-                            done=True,
                             visible_comment_posted=True,
                         )
                     if no_reply_requested:
@@ -587,9 +562,6 @@ class RyoAgent:
                                 kind="acted_without_thread_reply",
                                 reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
                                 mutated_tool_names=set(executed_tool_names),
-                                done=decision.action_decision.done or not decision.action_decision.continue_session,
-                                continue_session=decision.action_decision.continue_session,
-        
                             )
                         return ExecutionOutcome(kind="no_action", reason="no_reply")
 
@@ -631,9 +603,6 @@ class RyoAgent:
                                 kind="acted_without_thread_reply",
                                 reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
                                 mutated_tool_names=set(executed_tool_names),
-                                done=decision.action_decision.done or not decision.action_decision.continue_session,
-                                continue_session=decision.action_decision.continue_session,
-        
                             )
                         _log("WARN: text produced during repo-scan without a thread target; treating as no action")
                         return ExecutionOutcome(kind="no_action", reason="no_action")
@@ -651,13 +620,6 @@ class RyoAgent:
                         kind=outcome_kind,
                         reason=self._comment_reason(decision=decision, executed_tool_names=executed_tool_names),
                         mutated_tool_names=set(executed_tool_names),
-                        continue_session=False
-                        if (not event.is_patrol and decision.action_decision.comment_kind == "final")
-                        else decision.action_decision.continue_session,
-                        done=True
-                        if (not event.is_patrol and decision.action_decision.comment_kind == "final")
-                        else (decision.action_decision.done or not decision.action_decision.continue_session),
-
                         visible_comment_posted=True,
                     )
 
@@ -667,9 +629,6 @@ class RyoAgent:
                         kind="acted_without_thread_reply",
                         reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),
                         mutated_tool_names=set(executed_tool_names),
-                        continue_session=decision.action_decision.continue_session,
-                        done=decision.action_decision.done or not decision.action_decision.continue_session,
-
                     )
 
                 _log("WARN: no tool calls and no text reply, breaking")
@@ -687,7 +646,7 @@ class RyoAgent:
                 return ExecutionOutcome(kind="no_action", reason="no_action")
             _log("WARN: max iterations reached, sending fallback message")
             await self.plugin.send_reply(event, DEFAULT_FALLBACK_MESSAGE, subconscious)
-            return ExecutionOutcome(kind="final_posted", reason="replied", done=True, visible_comment_posted=True)
+            return ExecutionOutcome(kind="final_posted", reason="replied", visible_comment_posted=True)
         finally:
             clear_skill_context(context_token)
 
@@ -937,17 +896,8 @@ class RyoAgent:
             raise ValueError("Non-silent decisions must provide a non-empty focus_summary.")
         if any(issue_number <= 0 for issue_number in decision.action_decision.context_issue_numbers):
             raise ValueError("context_issue_numbers may only contain positive issue numbers.")
-        if decision.action_decision.done and decision.action_decision.continue_session:
-            raise ValueError("done and continue_session cannot both be true.")
-        if decision.action_decision.comment_kind == "discussion":
-            if decision.action_decision.done:
-                raise ValueError("discussion comments must continue the session instead of finishing it immediately.")
-        if decision.action_decision.comment_kind == "final" and decision.action_decision.continue_session:
-            raise ValueError("final comments must conclude the current session.")
         if decision.action_decision.execution_identity not in {"self", *self.persona_registry.keys()}:
             raise ValueError(f"Unknown execution_identity: {decision.action_decision.execution_identity!r}")
-        if event.is_patrol and mode == "stay_silent" and not decision.action_decision.done:
-            decision.action_decision.done = True
 
     def _should_reply(
         self,
@@ -1043,11 +993,7 @@ class RyoAgent:
         decision: ScoutDecision,
     ) -> bool:
         if event.is_patrol:
-            return (
-                tool_name == "create_pr_review"
-                and decision.action_decision.comment_kind not in {"discussion", "handoff"}
-                and not decision.action_decision.continue_session
-            )
+            return tool_name == "create_pr_review"
         return False
 
     @staticmethod

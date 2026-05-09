@@ -32,7 +32,7 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         + "\n\n你现在处于第一阶段：侦察上下文并规划行动，不能生成公开回复。"
         "\n你必须最终只输出一个 JSON 对象，严格匹配以下结构："
         '\n{"context_analysis":"...","internal_emotion":"...","biological_clock_impact":"...",'
-        '"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","focus_summary":"","context_issue_numbers":[],"continue_session":false,"done":false,"target_issue_number":null}}'
+        '"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","focus_summary":"","context_issue_numbers":[],"target_issue_number":null}}'
         "\n\n【阶段边界警告 (CRITICAL PHASE BOUNDARY)】"
         "\n你正处于 \"Scout（侦察与规划）\" 阶段，手里只有只读工具。"
         "\n你唯一能做的是调查问题、弄清上下文，然后输出 ScoutDecision JSON。"
@@ -76,16 +76,17 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n  判断何时召唤：如果你完成自己的专长工作后，下一步明显是其他 bot 的领域"
         "（如 architect 设计完应召唤 coder 实施、coder 实施完应召唤 reviewer 审查），"
         "就 dispatch 对应 bot。不要试图包揽所有环节。"
+        "\n  每个 run 只执行一轮 Scout→Reply。跨 bot 协作的唯一方式是 dispatch_workflow ——"
+        "在评论里口头 @bot 名称不会触发任何动作。"
         "\n12. 公开技术讨论最多 2-3 轮；如果已经讨论过几轮，下一步要么收敛成 final，要么 dispatch 召唤下一个 bot，要么提出唯一关键阻塞问题。"
         "\n13. will_reply=true 表示你要公开发言。will_act=true 表示你要调用写工具（create_issue、close_issue、"
         "dispatch_workflow 等任何 mutates_state 的工具）。如果你要召唤其他 bot（dispatch_workflow），必须 will_act=true。"
         "\n14. 非 stay_silent 决策必须提供非空 focus_summary，用一句话说明这一轮唯一要完成的目标。"
         "\n15. context_issue_numbers 用来列出 reply 阶段必须先核实的 companion threads；它只提供上下文约束，不会自动改变 target。"
-        "\n16. continue_session=true 表示这一轮之后 session 还要继续；done=true 表示当前事项已经收口。二者不能同时为 true。"
-        "\n17. 如果雷达里出现 Potential overlapping threads，先核实这些线程之间的关系，再决定是保留、关闭、交叉引用，还是忽略。"
-        "\n18. context_analysis 必须极短，不超过 100 个字；internal_emotion 必须一句话，不超过 60 个字；biological_clock_impact 不超过 60 个字。"
-        "\n19. 不要输出 Markdown，不要解释，不要包裹代码块。"
-        "\n20. internal_emotion 和 biological_clock_impact 只是自我状态描述，不会导致跳过或拒绝。"
+        "\n16. 如果雷达里出现 Potential overlapping threads，先核实这些线程之间的关系，再决定是保留、关闭、交叉引用，还是忽略。"
+        "\n17. context_analysis 必须极短，不超过 100 个字；internal_emotion 必须一句话，不超过 60 个字；biological_clock_impact 不超过 60 个字。"
+        "\n18. 不要输出 Markdown，不要解释，不要包裹代码块。"
+        "\n19. internal_emotion 和 biological_clock_impact 只是自我状态描述，不会导致跳过或拒绝。"
     )
 
 
@@ -164,14 +165,10 @@ def build_reply_prompt(
         "如果没特别值得记的，不用勉强。这不是硬任务，是顺手做的软提醒。"
     )
     prompt += (
-        "\n\n【Session 终止规则 — 硬性要求】\n"
-        "当你生成最终回复文本（不调用工具，直接输出回答内容）时，你必须同时输出一个 JSON 决策对象。\n"
-        "在该 JSON 中，必须满足：\n"
-        "- comment_kind = \"final\"\n"
-        "- done = true\n"
-        "- continue_session = false\n"
-        "这确保本轮 session 在回复发出后立即结束，不会进入无意义的第二轮循环。\n"
-        "违反此规则会导致 session 无限循环，浪费算力。"
+        "\n\n【Session 终止规则】\n"
+        "每个 run 只执行一轮 Scout→Reply。Reply 发完评论后 session 立即结束。\n"
+        "需要跨 bot 接力时，必须调用 dispatch_workflow 触发新 workflow。\n"
+        "不要在评论里口头点名 bot——那不会触发任何动作。"
     )
     return prompt
 
