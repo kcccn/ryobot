@@ -950,7 +950,7 @@ async def test_reply_executes_all_terminal_mutations_in_same_batch_before_stoppi
     await agent.run(raw_event={})
 
     assert close_skill.calls == [81, 85, 82]
-    assert plugin.updated_runtime_states[-1].last_routing.reason == "closed_issue"
+    assert plugin.updated_runtime_states[-1].last_routing.reason == "finalized"
 
 
 @pytest.mark.asyncio
@@ -1015,7 +1015,7 @@ async def test_reply_executes_mixed_batch_in_order_before_terminal_stop() -> Non
 
     assert comment_skill.calls == [12]
     assert close_skill.calls == [81, 82]
-    assert plugin.updated_runtime_states[-1].last_routing.reason == "closed_issue"
+    assert plugin.updated_runtime_states[-1].last_routing.reason == "finalized"
 
 
 @pytest.mark.asyncio

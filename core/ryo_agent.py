@@ -978,14 +978,14 @@ class RyoAgent:
         return True, "reply approved"
 
     def _comment_reason(self, *, decision: ScoutDecision, executed_tool_names: set[str]) -> str:
-        if executed_tool_names:
-            return _reason_from_tools(executed_tool_names, default="acted_without_comment")
         if decision.action_decision.comment_kind == "discussion":
             return "discussion_posted"
         if decision.action_decision.comment_kind == "handoff":
             return "handoff_posted"
         if decision.action_decision.comment_kind == "final":
             return "finalized"
+        if executed_tool_names:
+            return _reason_from_tools(executed_tool_names, default="acted_without_comment")
         return "replied"
 
     def _session_mutation_preflight(
@@ -1048,11 +1048,7 @@ class RyoAgent:
                 and decision.action_decision.comment_kind not in {"discussion", "handoff"}
                 and not decision.action_decision.continue_session
             )
-        if decision.action_decision.comment_kind in {"discussion", "handoff"}:
-            return False
-        if decision.action_decision.continue_session:
-            return False
-        return tool_name in {"close_issue", "merge_pull_request", "create_pr_review", "reopen_issue"}
+        return False
 
     @staticmethod
     def _log_possible_json_truncation(*, stage: str, raw_text: str, exc: Exception) -> bool:
