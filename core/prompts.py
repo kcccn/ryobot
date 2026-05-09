@@ -32,7 +32,7 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         + "\n\n你现在处于第一阶段：只能做意愿判断，不能生成公开回复。"
         "\n你必须最终只输出一个 JSON 对象，严格匹配以下结构："
         '\n{"context_analysis":"...","internal_emotion":"...","biological_clock_impact":"...",'
-        '"motivation_score":0,"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","handoff_to":null,"handoff_reason":"","focus_summary":"","context_issue_numbers":[],"continue_session":false,"done":false,"target_issue_number":null}}'
+        '"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","handoff_to":null,"handoff_reason":"","focus_summary":"","context_issue_numbers":[],"continue_session":false,"done":false,"target_issue_number":null}}'
         "\n\n【阶段边界警告 (CRITICAL PHASE BOUNDARY)】"
         "\n你正处于 \"Will（意愿与规划）\" 阶段，手里只有只读工具。"
         "\n你唯一能做的是调查问题、弄清上下文，然后输出 WillDecision JSON。"
@@ -68,7 +68,12 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n9. 如果这是街溜子事件，stay_silent 合法，但只有在你确认没有新鲜动态、没有 stale thread、没有小型代码/测试/文档机会、也没有可收尾事项时才能用。"
         "\n  不要因为\"最近 24h 没有新增 issue/PR\"就直接开摆；你要把 patrol_brief 当作机会雷达，主动寻找可推进的小机会。"
         "\n10. target_issue_number 在街溜子事件里可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
-        "\n11. execution_identity='self' 表示当前 bot 自己执行这一轮；如果你要交给别人，填写 handoff_to，并把 comment_kind 设成 handoff 或 discussion。"
+        "\n11. execution_identity='self' 表示当前 bot 自己执行这一轮。如果要召唤其他 bot 接力，"
+        "在你的 reply 阶段用 dispatch_workflow 触发 github-ryobot.yml，inputs 中传 bot_identity "
+        "和 issue_number 指定目标 bot 和线程。concurrency 队列会自动串行执行。"
+        "\n  同步交接（同一次 workflow 内）使用 handoff_to + comment_kind=\"handoff\"。"
+        "\n  异步召唤（触发新 workflow）使用 dispatch_workflow + bot_identity。"
+        "\n  完成自己的工作后，应当主动召唤对应专长的 bot 接力，不要试图包揽所有环节。"
         "\n12. 公开技术讨论最多 2-3 轮；如果已经讨论过几轮，下一步要么收敛成 final，要么 handoff，要么提出唯一关键阻塞问题。"
         "\n13. 只有当你真的准备公开发言时，will_reply 才能为 true；只有当你真的准备直接执行动作时，will_act 才能为 true。"
         "\n14. 非 stay_silent 决策必须提供非空 focus_summary，用一句话说明这一轮唯一要完成的目标。"
@@ -77,16 +82,7 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n17. 如果雷达里出现 Potential overlapping threads，先核实这些线程之间的关系，再决定是保留、关闭、交叉引用，还是忽略。"
         "\n18. context_analysis 必须极短，不超过 100 个字；internal_emotion 必须一句话，不超过 60 个字；biological_clock_impact 不超过 60 个字。"
         "\n19. 不要输出 Markdown，不要解释，不要包裹代码块。"
-        "\n20. motivation_score 评分锚定（0-100 整数）："
-        "\n  0-29: 无趣/无关/已经答复过，不应说话"
-        "\n  30-59: 常规跟进，有轻微价值但不必抢麦"
-        "\n  60-79: 发现了值得讨论的技术问题或可改进点"
-        "\n  80-100: 发现了重大架构漏洞/突破口/高价值行动机会，必须抢麦"
-        "\n  若 internal_emotion 表达兴奋/激动/惊喜等强烈情绪，motivation_score 必须 ≥ 80。"
-        "\n  若 internal_emotion 表达无聊/疲惫/无感，motivation_score 必须 ≤ 29。"
-        "\n  如果当前事件是人类直接明确的指令或回复，且意图清晰，motivation_score 必须强制 ≥ 80。"
-        "\n  严禁以'不符合人设喜好'为由给人类指令打低分怠工。"
-        "\n  情绪与分数必须自洽，不匹配会被拒绝重新来过。"
+        "\n20. internal_emotion 和 biological_clock_impact 只是自我状态描述，不会导致跳过或拒绝。"
     )
 
 
@@ -142,6 +138,12 @@ def build_reply_prompt(
         "你必须优先调用具体工具彻底完成该决断。\n"
         "在工具物理执行完毕前，绝不允许结束思考循环！"
     )
+    prompt += (
+        "\n\n【记忆沉淀】\n"
+        "在完成本轮任务后，顺手判断是否有值得沉淀的长期知识：\n"
+        "如果学到了新的模式、踩了坑、发现了重要的仓库约定，用 commit_memory 记下来。\n"
+        "如果没特别值得记的，不用勉强。这不是硬任务，是顺手做的软提醒。"
+    )
     return prompt
 
 
@@ -168,31 +170,4 @@ def build_decision_user_prompt(
             f"discussion_count={session.discussion_count} handoff_count={session.handoff_count} "
             f"responded_once={str(session.responded_once).lower()}。"
         )
-    return prompt
-
-
-def build_reflection_prompt(*, system_prompt: str, mind_context: str) -> str:
-    return (
-        system_prompt
-        + mind_context
-        + "\n\n你现在处于任务结束后的反思阶段。"
-        "\n你的目标是判断这次互动是否值得写入、修订或归档长期记忆。"
-        "\n可用工具只包含长期记忆 CRUD 和长期记忆检索。"
-        "\n规则："
-        "\n1. 只有长期有效、未来大概率还会有价值的信息才值得记忆。"
-        "\n2. 当前任务上下文只来自你已经看到的 history.messages；不要再把当前 thread 当 memory 去读。"
-        "\n3. 如果要改记忆，优先先读取或检索已有记忆，再决定 commit_memory / refine_memory / archive_memory。"
-        "\n  live mind issue 只能通过 `🧠 live-mind + bot:<identity> + ryo:mind` 识别；"
-        "带 `🧠 memory` 标签的 closed issues 才是长期记忆库。不要根据标题猜 memory 身份。"
-        "\n4. summary 必须极短，不超过 80 个字。"
-        "\n5. 如果没有值得沉淀的长期知识，输出 {\"action\":\"noop\",\"summary\":\"...\"}。"
-        "\n6. 如果你调用了记忆工具，最后仍然只输出一个 JSON 对象，action 只能是 noop、commit_memory、refine_memory 或 archive_memory。"
-    )
-
-
-def build_reflection_user_prompt(*, event: Any, history: Any) -> str:
-    prompt = f"事件内容：\n{event.message}"
-    if event.is_patrol and history.patrol_brief:
-        prompt += f"\n\n街溜子早报：\n{history.patrol_brief}"
-    prompt += "\n\n请判断这次任务后是否需要沉淀、修订或归档长期记忆。"
     return prompt

@@ -21,17 +21,12 @@ from .skills import BaseSkill, clear_skill_context, set_skill_context
 DEFAULT_FALLBACK_MESSAGE = "I'm sorry, but I couldn't complete your request right now."
 TRUSTED_MUTATION_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 DEFAULT_MAX_TOOL_RESULT_CHARS = 20000
-DEFAULT_MOTIVATION_THRESHOLD = 70
 DEFAULT_FATIGUE_MIN_SECONDS = 480
 DEFAULT_FATIGUE_MAX_SECONDS = 720
 DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS = 60
 DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS = 180
 NO_REPLY_TOOL_NAME = "no_reply"
 LOG_TRUNCATE = 500
-MEMORY_MUTATION_TOOL_NAMES = frozenset({"commit_memory", "refine_memory", "archive_memory"})
-MEMORY_REFLECTION_TOOL_NAMES = frozenset(
-    {"retrieve_memory", "search_repo_memory", *MEMORY_MUTATION_TOOL_NAMES}
-)
 PASSIVE_EXECUTION_MODES = frozenset({"reply_brief", "reply_with_plan", "ask_clarifying_question", "act_directly"})
 ALL_EXECUTION_MODES = PASSIVE_EXECUTION_MODES | {"stay_silent"}
 VISIBLE_COMMENT_KINDS = frozenset({"response", "discussion", "handoff", "final"})
@@ -63,15 +58,6 @@ class ChatMessage(TypedDict, total=False):
     tool_calls: list[dict[str, Any]]
     tool_call_id: str
     reasoning_content: str | None
-
-
-class ReflectionDecision(BaseModel):
-    action: str
-    summary: str = Field(
-        default="",
-        description="反思摘要：极简一句话，不超过 80 个字。",
-        max_length=80,
-    )
 
 
 @dataclass
@@ -120,7 +106,6 @@ class RyoAgent:
         plugin: BasePlugin,
         max_iterations: int = 100,
         max_tokens: int = 4096,
-        motivation_threshold: int = DEFAULT_MOTIVATION_THRESHOLD,
         fatigue_min_seconds: int = DEFAULT_FATIGUE_MIN_SECONDS,
         fatigue_max_seconds: int = DEFAULT_FATIGUE_MAX_SECONDS,
         street_lurker_fatigue_min_seconds: int = DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS,
@@ -136,7 +121,6 @@ class RyoAgent:
         self.plugin = plugin
         self.max_iterations = max_iterations
         self.max_tokens = max_tokens
-        self.motivation_threshold = max(0, min(100, motivation_threshold))
         self.fatigue_min_seconds = max(0, fatigue_min_seconds)
         self.fatigue_max_seconds = max(self.fatigue_min_seconds, fatigue_max_seconds)
         self.street_lurker_fatigue_min_seconds = max(0, street_lurker_fatigue_min_seconds)
@@ -166,7 +150,7 @@ class RyoAgent:
         _gh_group(f"Run: {kind} {target_label} as {identity} ({event.owner}/{event.repo})")
         _log(
             f"model={self.persona['model']} max_iterations={self.max_iterations} "
-            f"skills={len(self.skills)} threshold={self.motivation_threshold}"
+            f"skills={len(self.skills)}"
         )
         _log(f"event message: {event.message[:LOG_TRUNCATE]}")
 
@@ -263,12 +247,6 @@ class RyoAgent:
                     continue
 
                 break
-
-            if final_outcome.acted and final_outcome.done:
-                try:
-                    await self._reflect(event=final_event, history=await self.plugin.fetch_history(final_event))
-                except Exception as exc:  # pragma: no cover - defensive logging only
-                    _log(f"WARN: reflection pass failed: {exc}")
 
             runtime_state.last_routing.event_id = event.event_id
             runtime_state.last_routing.bot_identity = session.current_identity
@@ -457,7 +435,6 @@ class RyoAgent:
             context_analysis="No valid JSON.",
             internal_emotion="Quiet",
             biological_clock_impact="Prefer silence.",
-            motivation_score=0,
             action_decision=ActionDecision(
                 mode="stay_silent",
                 will_reply=False,
@@ -668,103 +645,6 @@ class RyoAgent:
         finally:
             clear_skill_context(context_token)
 
-    async def _reflect(self, *, event: PluginEvent, history: Any) -> None:
-        reflection_skills = self._available_reflection_skills(event)
-        if not reflection_skills:
-            return
-        tools = [skill.get_tool_definition() for skill in reflection_skills]
-        messages: list[ChatMessage] = [
-            {"role": "system", "content": self._reflection_prompt(history=history)},
-            *history.messages,
-            {"role": "user", "content": self._reflection_user_prompt(event=event, history=history)},
-        ]
-        subconscious = dict(history.subconscious)
-        context_token = set_skill_context(event=event, subconscious=subconscious)
-        self._log_available_tools("reflection", tools)
-        json_repair_only = False
-        repair_attempts = 0
-        try:
-            for i in range(self.max_iterations):
-                _log(f"--- reflection iteration {i + 1}/{self.max_iterations} ---")
-                t_start = time.monotonic()
-                active_tools: list[dict[str, Any]] = [] if json_repair_only else tools
-                response = await self._create_completion_with_retry(
-                    messages=messages,
-                    tools=active_tools,
-                    stage="reflection",
-                )
-                t_elapsed = time.monotonic() - t_start
-                assistant_message = response.choices[0].message
-                tool_calls = list(getattr(assistant_message, "tool_calls", []) or [])
-                self._log_stage_response("reflection", assistant_message, elapsed_seconds=t_elapsed)
-                if tool_calls:
-                    if json_repair_only:
-                        _log("WARN: tool calls are no longer allowed during reflection JSON repair")
-                        self._append_rejected_tool_calls(
-                            messages,
-                            tool_calls,
-                            reason="Reflection JSON repair mode — no more tool calls allowed",
-                            output_name="ReflectionDecision",
-                            fallback_name="noop",
-                        )
-                        continue
-                    self._log_tool_calls(tool_calls)
-                    messages.append(self._assistant_message_payload(assistant_message, tool_calls=tool_calls))
-                    for tool_call in tool_calls:
-                        tool_name, args_raw = self._tool_call_details(tool_call)
-                        _log(f"  -> {tool_name}({args_raw[:LOG_TRUNCATE]})")
-                        tool_result = await self._execute_tool_call(tool_call, event=event)
-                        if isinstance(tool_result, _NoReplyResult):
-                            return
-                        _log(f"  <- result: {_truncate_log(tool_result)}")
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": getattr(tool_call, "id", ""),
-                                "content": str(tool_result),
-                            }
-                        )
-                    continue
-
-                reflection_text = self._extract_text_content(assistant_message).strip()
-                if not reflection_text:
-                    return
-                try:
-                    cleaned = _extract_safe_json(reflection_text)
-                    decision = ReflectionDecision.model_validate(cleaned)
-                except (ValidationError, JSONDecodeError) as exc:
-                    _log(f"WARN: invalid reflection JSON: {_truncate_log(exc)}")
-                    truncated = self._log_possible_json_truncation(
-                        stage="reflection",
-                        raw_text=reflection_text,
-                        exc=exc,
-                    )
-                    repair_attempts += 1
-                    if repair_attempts >= 2:
-                        decision = ReflectionDecision(
-                            action="noop",
-                            summary="reflection JSON repair exhausted",
-                        )
-                        _log(f"reflection result: {decision.action} {decision.summary[:LOG_TRUNCATE]}")
-                        return
-                    json_repair_only = True
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Your previous reflection output was invalid JSON. "
-                                "On the next turn, output ONLY the raw ReflectionDecision JSON object. "
-                                "Do not call tools. Do not wrap the JSON in markdown or explanation. "
-                                f"{'Keep it shorter and prioritize a complete JSON object.' if truncated else ''}"
-                            ),
-                        }
-                    )
-                    continue
-                _log(f"reflection result: {decision.action} {decision.summary[:LOG_TRUNCATE]}")
-                return
-        finally:
-            clear_skill_context(context_token)
-
     async def _create_completion(
         self,
         *,
@@ -773,7 +653,7 @@ class RyoAgent:
         stage: str,
     ) -> Any:
         max_tokens = self.max_tokens
-        if stage in {"will", "reflection"}:
+        if stage == "will":
             max_tokens = max(max_tokens, 4096)
         request: dict[str, Any] = {
             "model": self.persona["model"],
@@ -937,15 +817,6 @@ class RyoAgent:
             session=session,
         )
 
-    def _reflection_prompt(self, *, history: Any) -> str:
-        return prompts.build_reflection_prompt(
-            system_prompt=self.persona["system_prompt"],
-            mind_context=self._mind_context(history),
-        )
-
-    def _reflection_user_prompt(self, *, event: PluginEvent, history: Any) -> str:
-        return prompts.build_reflection_user_prompt(event=event, history=history)
-
     def _mind_context(self, history: Any) -> str:
         return prompts.build_mind_context(
             mind_body=history.mind_body,
@@ -1017,8 +888,6 @@ class RyoAgent:
             return True, "passive event requires response"
         if not (decision.action_decision.will_reply or decision.action_decision.will_act):
             return False, "street-lurker found no concrete action"
-        if decision.motivation_score < self.motivation_threshold:
-            return False, f"street-lurker motivation {decision.motivation_score} below threshold {self.motivation_threshold}"
 
         if ignore_fatigue:
             return True, "session continuation approved"
@@ -1109,18 +978,6 @@ class RyoAgent:
         if decision.action_decision.continue_session:
             return False
         return tool_name in {"close_issue", "merge_pull_request", "create_pr_review", "reopen_issue"}
-
-    def _available_reflection_skills(self, event: PluginEvent) -> Sequence[BaseSkill]:
-        skills: list[BaseSkill] = []
-        for skill in self.skills:
-            if skill.name not in MEMORY_REFLECTION_TOOL_NAMES:
-                continue
-            if skill.requires_trusted_author and not _is_trusted_mutation_author(event.author_association):
-                continue
-            if skill.mutates_state and not _is_trusted_mutation_author(event.author_association):
-                continue
-            skills.append(skill)
-        return skills
 
     @staticmethod
     def _log_possible_json_truncation(*, stage: str, raw_text: str, exc: Exception) -> bool:

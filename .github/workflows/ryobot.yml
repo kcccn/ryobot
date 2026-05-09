@@ -6,12 +6,12 @@ on:
       max_iterations:
         description: 'Maximum tool-call iterations per run'
         type: number
+      bot_identity:
+        description: 'Target bot identity (architect/reviewer/pm/explorer/coder); random if empty'
+        type: string
       bot_activity_weights:
         description: 'JSON or key=value list of per-bot activity weights'
         type: string
-      motivation_threshold:
-        description: 'Minimum motivation score required before public reply'
-        type: number
       fatigue_min_seconds:
         description: 'Minimum fatigue cooldown after a bot speaks'
         type: number
@@ -76,12 +76,11 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EVENT_PAYLOAD: ${{ toJson(github.event) }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          BOT_IDENTITY: ${{ vars.BOT_IDENTITY || '' }}
+          BOT_IDENTITY: ${{ inputs.bot_identity || vars.BOT_IDENTITY || '' }}
           LLM_BASE_URL: ${{ vars.LLM_BASE_URL || '' }}
           LLM_MODEL: ${{ vars.LLM_MODEL || '' }}
           MAX_ITERATIONS: ${{ inputs.max_iterations || vars.RYOBOT_MAX_ITERATIONS || '100' }}
           RYOBOT_BOT_ACTIVITY_WEIGHTS: ${{ inputs.bot_activity_weights || vars.RYOBOT_BOT_ACTIVITY_WEIGHTS || '' }}
-          RYOBOT_MOTIVATION_THRESHOLD: ${{ inputs.motivation_threshold || vars.RYOBOT_MOTIVATION_THRESHOLD || '70' }}
           RYOBOT_FATIGUE_MIN_SECONDS: ${{ inputs.fatigue_min_seconds || vars.RYOBOT_FATIGUE_MIN_SECONDS || '480' }}
           RYOBOT_FATIGUE_MAX_SECONDS: ${{ inputs.fatigue_max_seconds || vars.RYOBOT_FATIGUE_MAX_SECONDS || '720' }}
           RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS: ${{ inputs.street_lurker_fatigue_min_seconds || vars.RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS || '60' }}

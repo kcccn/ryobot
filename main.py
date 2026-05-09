@@ -59,7 +59,6 @@ from platforms.llm import AnthropicAdapter
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_MARKER_AUTHOR_LOGINS = frozenset({"github-actions[bot]"})
-DEFAULT_MOTIVATION_THRESHOLD = 70
 DEFAULT_FATIGUE_MIN_SECONDS = 480
 DEFAULT_FATIGUE_MAX_SECONDS = 720
 DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS = 60
@@ -141,7 +140,6 @@ async def _run(
             plugin=plugin,
             max_iterations=config["max_iterations"],
             max_tokens=bot.max_tokens,
-            motivation_threshold=config["motivation_threshold"],
             fatigue_min_seconds=config["fatigue_min_seconds"],
             fatigue_max_seconds=config["fatigue_max_seconds"],
             street_lurker_fatigue_min_seconds=config["street_lurker_fatigue_min_seconds"],
@@ -284,7 +282,6 @@ def _load_config(bot: Any) -> dict[str, Any]:
         "base_url": base_url,
         "model": model,
         "max_iterations": int(os.getenv("MAX_ITERATIONS", "100")),
-        "motivation_threshold": int(os.getenv("RYOBOT_MOTIVATION_THRESHOLD", str(DEFAULT_MOTIVATION_THRESHOLD))),
         "fatigue_min_seconds": int(os.getenv("RYOBOT_FATIGUE_MIN_SECONDS", str(DEFAULT_FATIGUE_MIN_SECONDS))),
         "fatigue_max_seconds": int(os.getenv("RYOBOT_FATIGUE_MAX_SECONDS", str(DEFAULT_FATIGUE_MAX_SECONDS))),
         "street_lurker_fatigue_min_seconds": int(

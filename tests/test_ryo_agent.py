@@ -18,7 +18,7 @@ from core.plugins import (
     RepoRuntimeState,
     WillDecision,
 )
-from core.ryo_agent import ReflectionDecision, RyoAgent, _extract_safe_json, _looks_like_truncated_json
+from core.ryo_agent import RyoAgent, _extract_safe_json, _looks_like_truncated_json
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
 
@@ -316,7 +316,6 @@ def build_agent(
     plugin: FakePlugin,
     responses: list[FakeResponse],
     skills: list[BaseSkill] | None = None,
-    threshold: int = 70,
     street_lurker_fatigue_min_seconds: int = 60,
     street_lurker_fatigue_max_seconds: int = 180,
     max_tokens: int = 4096,
@@ -339,7 +338,6 @@ def build_agent(
         llm_client=llm_client,
         plugin=plugin,
         max_tokens=max_tokens,
-        motivation_threshold=threshold,
         fatigue_min_seconds=480,
         fatigue_max_seconds=480,
         street_lurker_fatigue_min_seconds=street_lurker_fatigue_min_seconds,
@@ -378,7 +376,6 @@ async def test_run_skips_when_decision_says_no_reply() -> None:
                                 "context_analysis": "nothing new",
                                 "internal_emotion": "lazy",
                                 "biological_clock_impact": "neutral",
-                                "motivation_score": 20,
                                 "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                             }
                         )
@@ -414,7 +411,6 @@ async def test_run_replies_after_passing_will_decision() -> None:
                             "context_analysis": "worth answering",
                             "internal_emotion": "awake",
                             "biological_clock_impact": "daytime",
-                            "motivation_score": 90,
                             "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Post the final answer on the current thread."},
                         }
                     )
@@ -439,7 +435,6 @@ async def test_passive_event_replies_even_when_motivation_is_below_threshold() -
     plugin = FakePlugin()
     agent, _ = build_agent(
         plugin=plugin,
-        threshold=90,
         responses=[
             build_response(
                 FakeMessage(
@@ -448,7 +443,6 @@ async def test_passive_event_replies_even_when_motivation_is_below_threshold() -
                             "context_analysis": "simple factual answer",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 15,
                             "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None, "focus_summary": "Answer the factual question briefly."},
                         }
                     )
@@ -476,7 +470,6 @@ async def test_passive_final_comment_stops_session_without_second_bot() -> None:
                             "context_analysis": "cleanup complete",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 72,
                             "action_decision": {
                                 "mode": "reply_with_plan",
                                 "will_reply": True,
@@ -505,7 +498,7 @@ async def test_passive_final_comment_stops_session_without_second_bot() -> None:
     await agent.run(raw_event={})
 
     assert plugin.sent_replies == [(plugin.parse_event(None), "整理完毕，当前请求已收口。", {})]
-    assert len(fake_completions.calls) == 3
+    assert len(fake_completions.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -534,7 +527,6 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
                             "context_analysis": "need one architecture constraint first",
                             "internal_emotion": "focused",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 88,
                             "action_decision": {
                                 "mode": "reply_with_plan",
                                 "will_reply": True,
@@ -561,7 +553,6 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
                             "context_analysis": "now hand this to coder",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 82,
                             "action_decision": {
                                 "mode": "reply_with_plan",
                                 "will_reply": True,
@@ -588,7 +579,6 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
                             "context_analysis": "implementation is straightforward now",
                             "internal_emotion": "ready",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 93,
                             "action_decision": {
                                 "mode": "act_directly",
                                 "will_reply": True,
@@ -659,8 +649,7 @@ async def test_discussion_limit_forces_conclusion_in_same_session() -> None:
                     "context_analysis": "still debating",
                     "internal_emotion": "engaged",
                     "biological_clock_impact": "neutral",
-                    "motivation_score": 90,
-                        "action_decision": {
+                    "action_decision": {
                             "mode": "reply_with_plan",
                             "will_reply": True,
                             "will_act": False,
@@ -694,8 +683,7 @@ async def test_discussion_limit_forces_conclusion_in_same_session() -> None:
                             "context_analysis": "must conclude now",
                             "internal_emotion": "settled",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 85,
-                        "action_decision": {
+                            "action_decision": {
                             "mode": "reply_with_plan",
                             "will_reply": True,
                             "will_act": False,
@@ -751,8 +739,7 @@ async def test_pr_review_submission_ends_session_without_extra_signoff() -> None
                             "context_analysis": "review the active PR",
                             "internal_emotion": "focused",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 88,
-                        "action_decision": {
+                            "action_decision": {
                             "mode": "act_directly",
                             "will_reply": True,
                             "will_act": True,
@@ -824,7 +811,6 @@ async def test_run_patrol_resolves_target_before_replying() -> None:
                             "context_analysis": "pr needs attention",
                             "internal_emotion": "curious",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 88,
                             "action_decision": {"will_reply": True, "target_issue_number": 77, "focus_summary": "Reply on the resolved patrol target."},
                         }
                     )
@@ -871,7 +857,6 @@ async def test_street_lurker_repo_scan_can_act_without_thread_reply() -> None:
                             "context_analysis": "clear fix",
                             "internal_emotion": "itchy",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 91,
                             "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Act directly from repo-scan without a thread reply."},
                         }
                     )
@@ -934,7 +919,6 @@ async def test_street_lurker_actions_use_street_lurker_fatigue_window() -> None:
                             "context_analysis": "clear fix",
                             "internal_emotion": "itchy",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 91,
                             "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Complete the street-lurker action on the chosen opportunity."},
                         }
                     )
@@ -994,7 +978,6 @@ async def test_street_lurker_reply_stage_exposes_full_mutation_tools_for_trusted
                             "context_analysis": "let's go",
                             "internal_emotion": "ready",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 95,
                             "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Continue the current follow-up despite fatigue."},
                         }
                     )
@@ -1057,7 +1040,6 @@ async def test_reply_executes_all_terminal_mutations_in_same_batch_before_stoppi
                             "context_analysis": "close duplicates",
                             "internal_emotion": "focused",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 92,
                             "action_decision": {
                                 "mode": "act_directly",
                                 "will_reply": True,
@@ -1123,7 +1105,6 @@ async def test_reply_executes_mixed_batch_in_order_before_terminal_stop() -> Non
                             "context_analysis": "comment then close",
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 90,
                             "action_decision": {
                                 "mode": "act_directly",
                                 "will_reply": True,
@@ -1189,7 +1170,6 @@ async def test_reply_defers_no_reply_until_after_other_batch_tools() -> None:
                             "context_analysis": "close and stop",
                             "internal_emotion": "firm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 88,
                             "action_decision": {
                                 "mode": "act_directly",
                                 "will_reply": True,
@@ -1251,8 +1231,7 @@ async def test_passive_events_ignore_fatigue_and_still_reply() -> None:
                                 "context_analysis": "would reply",
                                 "internal_emotion": "ready",
                                 "biological_clock_impact": "neutral",
-                                "motivation_score": 95,
-                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None, "focus_summary": "Acknowledge the runtime context result briefly."},
+                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "target_issue_number": None, "focus_summary": "Acknowledge the runtime context result briefly."},
                             }
                         )
                     )
@@ -1292,7 +1271,6 @@ async def test_stage_one_hides_mutating_tools_from_untrusted_authors() -> None:
                             "context_analysis": "no rights",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
                             "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                         }
                     )
@@ -1339,7 +1317,6 @@ async def test_invalid_decision_json_retries_until_valid() -> None:
                                 "context_analysis": "valid now",
                                 "internal_emotion": "settled",
                                 "biological_clock_impact": "neutral",
-                                "motivation_score": 0,
                                 "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                             }
                         )
@@ -1395,7 +1372,6 @@ async def test_invalid_decision_json_enters_json_repair_mode_without_more_tools(
                                 "context_analysis": "fixed",
                                 "internal_emotion": "steady",
                                 "biological_clock_impact": "neutral",
-                                "motivation_score": 0,
                                 "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                             }
                         )
@@ -1435,7 +1411,6 @@ async def test_run_sets_runtime_context_for_skills() -> None:
                                 "context_analysis": "done",
                                 "internal_emotion": "done",
                                 "biological_clock_impact": "neutral",
-                                "motivation_score": 0,
                                 "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "Test the context.", "context_issue_numbers": [], "target_issue_number": None},
                             }
                         )
@@ -1491,7 +1466,6 @@ async def test_decide_replays_reasoning_content_after_tool_calls() -> None:
                             "context_analysis": "after tool",
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
                             "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                         }
                     )
@@ -1546,7 +1520,6 @@ async def test_will_stage_logs_reasoning_and_tool_details(capsys: pytest.Capture
                                 "context_analysis": "done",
                                 "internal_emotion": "steady",
                                 "biological_clock_impact": "neutral",
-                                "motivation_score": 0,
                                 "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                             }
                         )
@@ -1592,7 +1565,6 @@ async def test_decision_prompt_prefers_memory_before_repo_context() -> None:
                                 "context_analysis": "checked memory first",
                                 "internal_emotion": "calm",
                                 "biological_clock_impact": "neutral",
-                                "motivation_score": 0,
                                 "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                             }
                         )
@@ -1638,7 +1610,6 @@ async def test_repo_scan_hides_read_issue_memory_from_will_tools() -> None:
                             "context_analysis": "nothing to do",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
                             "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                         }
                     )
@@ -1679,8 +1650,7 @@ async def test_decision_prompt_mentions_read_thread_meta_and_current_human_inten
                                 "context_analysis": "checked the current ask first",
                                 "internal_emotion": "calm",
                                 "biological_clock_impact": "neutral",
-                                "motivation_score": 0,
-                            "action_decision": {"mode": "reply_with_plan", "will_reply": True, "will_act": False, "target_issue_number": None, "focus_summary": "Explain the current status on the existing thread references."},
+                                "action_decision": {"mode": "reply_with_plan", "will_reply": True, "will_act": False, "target_issue_number": None, "focus_summary": "Explain the current status on the existing thread references."},
                             }
                         )
                     )
@@ -1762,7 +1732,6 @@ async def test_will_tool_budget_exhaustion_immediately_forces_json_repair() -> N
                             "context_analysis": "budget exhausted",
                             "internal_emotion": "firm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
                             "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                         }
                     )
@@ -1786,6 +1755,7 @@ async def test_will_tool_budget_exhaustion_immediately_forces_json_repair() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="reflection phase removed")
 async def test_reflection_pass_can_commit_memory_after_reply() -> None:
     plugin = FakePlugin(
         event=PluginEvent(
@@ -1811,7 +1781,6 @@ async def test_reflection_pass_can_commit_memory_after_reply() -> None:
                             "context_analysis": "worth replying",
                             "internal_emotion": "alert",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 95,
                             "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Post the public reply before reflecting on memory."},
                         }
                     )
@@ -1846,6 +1815,7 @@ async def test_reflection_pass_can_commit_memory_after_reply() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="reflection phase removed")
 async def test_reflection_stage_logs_reasoning_and_tool_details(capsys: pytest.CaptureFixture[str]) -> None:
     plugin = FakePlugin(
         event=PluginEvent(
@@ -1870,7 +1840,6 @@ async def test_reflection_stage_logs_reasoning_and_tool_details(capsys: pytest.C
                             "context_analysis": "reply once",
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 90,
                             "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Post the public reply before checking durable memory."},
                         }
                     )
@@ -1907,6 +1876,7 @@ async def test_reflection_stage_logs_reasoning_and_tool_details(capsys: pytest.C
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="reflection phase removed")
 async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
     plugin = FakePlugin()
     agent, fake_completions = build_agent(
@@ -1919,7 +1889,6 @@ async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
                             "context_analysis": "reply once",
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 90,
                             "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Post the public reply and finish without memory mutation."},
                         }
                     )
@@ -1934,12 +1903,13 @@ async def test_reflection_pass_allows_noop_without_memory_mutation() -> None:
     await agent.run(raw_event={})
 
     assert plugin.sent_replies[0][1] == "Public reply"
-    assert len(fake_completions.calls) == 3
+    assert len(fake_completions.calls) == 2
     reflection_tool_names = [tool["function"]["name"] for tool in fake_completions.calls[2]["tools"]]
     assert reflection_tool_names == ["retrieve_memory", "search_repo_memory"]
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="reflection phase removed")
 async def test_stage_specific_max_tokens_floor_for_will_and_reflection() -> None:
     plugin = FakePlugin()
     agent, fake_completions = build_agent(
@@ -1953,7 +1923,6 @@ async def test_stage_specific_max_tokens_floor_for_will_and_reflection() -> None
                             "context_analysis": "reply once",
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 90,
                             "action_decision": {
                                 "mode": "reply_brief",
                                 "will_reply": True,
@@ -2038,7 +2007,6 @@ async def test_will_stage_does_not_treat_same_tool_with_different_args_as_loop(
                             "context_analysis": "done",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
                             "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                         }
                     )
@@ -2088,7 +2056,6 @@ async def test_will_stage_forces_decision_after_repeating_same_tool_signature(
                             "context_analysis": "done",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
                             "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
                         }
                     )
@@ -2113,10 +2080,6 @@ def test_decision_and_reflection_schema_enforce_short_fields() -> None:
     assert will_fields["biological_clock_impact"].description == "生理时钟影响：极简描述，不超过 60 个字。"
     assert will_fields["biological_clock_impact"].metadata[0].max_length == 60
 
-    reflection_field = ReflectionDecision.model_fields["summary"]
-    assert reflection_field.description == "反思摘要：极简一句话，不超过 80 个字。"
-    assert reflection_field.metadata[0].max_length == 80
-
 
 def test_will_decision_accepts_short_english_bug_summaries() -> None:
     decision = WillDecision.model_validate(
@@ -2124,7 +2087,6 @@ def test_will_decision_accepts_short_english_bug_summaries() -> None:
             "context_analysis": "Ghost bikes found in starter fleet initialization; PR needs review.",
             "internal_emotion": "bug found, time to review",
             "biological_clock_impact": "Fresh catch, best timing",
-            "motivation_score": 92,
             "action_decision": {
                 "mode": "act_directly",
                 "will_reply": True,
@@ -2141,13 +2103,11 @@ def test_will_decision_accepts_short_english_bug_summaries() -> None:
 
 def test_prompts_require_short_json_fields() -> None:
     decision_prompt = prompts.build_decision_prompt(system_prompt="sys", mind_context="")
-    reflection_prompt = prompts.build_reflection_prompt(system_prompt="sys", mind_context="")
 
     assert "get_project_tree → find_file_paths/search_symbol" in decision_prompt
     assert "context_analysis 必须极短，不超过 100 个字" in decision_prompt
     assert "internal_emotion 必须一句话，不超过 60 个字" in decision_prompt
     assert "biological_clock_impact 不超过 60 个字" in decision_prompt
-    assert "summary 必须极短，不超过 80 个字" in reflection_prompt
 
 
 @pytest.mark.asyncio
@@ -2178,7 +2138,6 @@ async def test_will_stage_logs_critical_when_json_looks_truncated(capsys: pytest
                             "context_analysis": "done",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 0,
                             "action_decision": {
                                 "mode": "stay_silent",
                                 "will_reply": False,
@@ -2200,6 +2159,7 @@ async def test_will_stage_logs_critical_when_json_looks_truncated(capsys: pytest
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="reflection phase removed")
 async def test_reflection_stage_logs_critical_when_json_looks_truncated(capsys: pytest.CaptureFixture[str]) -> None:
     plugin = FakePlugin()
     agent, _ = build_agent(
@@ -2212,7 +2172,6 @@ async def test_reflection_stage_logs_critical_when_json_looks_truncated(capsys: 
                             "context_analysis": "reply once",
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
-                            "motivation_score": 90,
                             "action_decision": {
                                 "mode": "reply_brief",
                                 "will_reply": True,
@@ -2278,7 +2237,6 @@ class TestExtractSafeJson:
             "Let me think about this...\n\n"
             'I will output: ```json\n'
             '{"context_analysis":"ready","internal_emotion":"calm","biological_clock_impact":"neutral",'
-            '"motivation_score":85,'
             '"action_decision":{"mode":"act_directly","will_reply":true,"will_act":true,"execution_identity":"self",'
             '"comment_kind":"response","handoff_to":null,"handoff_reason":"","focus_summary":"fix it","context_issue_numbers":[],'
             '"continue_session":false,"done":false,"target_issue_number":null}}\n'
@@ -2286,5 +2244,4 @@ class TestExtractSafeJson:
         )
         result = _extract_safe_json(text)
         assert result["context_analysis"] == "ready"
-        assert result["motivation_score"] == 85
         assert result["action_decision"]["mode"] == "act_directly"

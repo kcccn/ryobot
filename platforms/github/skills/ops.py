@@ -80,13 +80,6 @@ class DispatchWorkflow(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
 
-        # Prevent infinite dispatch loops
-        if "workflow_dispatch" in str(context.get("event_id", "")):
-            return (
-                "Workflow dispatch is not available within a patrol-dispatched run "
-                "to prevent infinite dispatch loops."
-            )
-
         allowed_workflows = csv_env("RYOBOT_ALLOWED_WORKFLOWS")
         if not allowed_workflows:
             return "Workflow dispatch is disabled because RYOBOT_ALLOWED_WORKFLOWS is not configured."

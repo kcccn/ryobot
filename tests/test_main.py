@@ -91,7 +91,6 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-token")
     monkeypatch.setenv("BOT_IDENTITY", "architect")
-    monkeypatch.setenv("RYOBOT_MOTIVATION_THRESHOLD", "75")
     monkeypatch.setenv("RYOBOT_FATIGUE_MIN_SECONDS", "500")
     monkeypatch.setenv("RYOBOT_FATIGUE_MAX_SECONDS", "800")
     monkeypatch.setenv("RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS", "90")
@@ -115,7 +114,6 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     assert captured["plugin_kwargs"]["identity"] == "architect"
     assert captured["openai_kwargs"]["api_key"] == "ds-token"
     assert captured["ryo_agent_kwargs"]["persona"]["identity"] == "architect"
-    assert captured["ryo_agent_kwargs"]["motivation_threshold"] == 75
     assert captured["ryo_agent_kwargs"]["fatigue_min_seconds"] == 500
     assert captured["ryo_agent_kwargs"]["fatigue_max_seconds"] == 800
     assert captured["ryo_agent_kwargs"]["street_lurker_fatigue_min_seconds"] == 90
@@ -165,10 +163,8 @@ def test_workflows_use_single_engine_and_repo_concurrency() -> None:
 
     assert "group: ryobot-${{ github.repository }}" in reusable
     assert "cancel-in-progress: false" in reusable
-    assert "RYOBOT_MOTIVATION_THRESHOLD" in reusable
     assert "RYOBOT_FATIGUE_MIN_SECONDS" in reusable
     assert "RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS" in reusable
-    assert "vars.RYOBOT_MOTIVATION_THRESHOLD" in reusable
     assert "vars.RYOBOT_ALLOWED_WORKFLOWS" in reusable
     assert "ryobot" in reusable
     assert "for bot in architect reviewer pm explorer coder" not in reusable
@@ -180,6 +176,5 @@ def test_readme_brands_project_as_single_engine_social_simulation() -> None:
     assert "全局麦克风" in content
     assert "两段式意愿决策" in content
     assert "仓库级疲劳" in content
-    assert "RYOBOT_MOTIVATION_THRESHOLD" in content
     assert "RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS" in content
     assert "Actions Variable" in content

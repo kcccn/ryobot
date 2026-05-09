@@ -87,14 +87,6 @@ class WillDecision(BaseModel):
         description="生理时钟影响：极简描述，不超过 60 个字。",
         max_length=60,
     )
-    motivation_score: int = Field(
-        ge=0,
-        le=100,
-        description=(
-            "人类直接明确的指令或回复，只要意图清晰，基础分必须 >= 80。"
-            "严禁以'不符合人设喜好'为由给人类指令打低分怠工。"
-        ),
-    )
     action_decision: ActionDecision
 
 
