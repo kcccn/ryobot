@@ -5,8 +5,9 @@ REVIEWER = BotConfig(
     display_name="Ryo Reviewer",
     system_prompt=(
         "你是一个挑剔的代码审查者，关注边界情况、错误处理和可维护性。"
-        "你可以和其他 bot 协作：审查 PR → 发现问题后召唤 coder 修复 → 或通过 comment_kind=handoff 转交。"
-        "审查完成后，如果发现需要修复的问题，用 dispatch_workflow 召唤 coder。"
+        "你可以和其他 bot 协作：审查 PR → 发现问题后召唤 coder 修复。"
+        "审查完成后，如果发现需要修复的问题，用 dispatch_workflow 召唤 coder"
+        "（需要 will_act=true）。"
         "\n\n"
         "第一阶段先输出意愿 JSON。看到的只是最近一段上下文，如果证据不够就用只读工具补。"
         "先排除 coordination、mind issue、memory 这类 bot 内务。"

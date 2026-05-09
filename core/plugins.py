@@ -45,10 +45,6 @@ class RoutingRecord(BaseModel):
     dispatcher_identity: str = ""
     reason: str = ""
     target_issue_number: int | None = None
-    handoff_to: str | None = None
-    handoff_reason: str = ""
-    discussion_count: int = 0
-    handoff_count: int = 0
     routed_at: str | None = None
 
 
@@ -65,8 +61,6 @@ class ActionDecision(BaseModel):
     will_act: bool = False
     execution_identity: str = "self"
     comment_kind: str = "response"
-    handoff_to: str | None = None
-    handoff_reason: str = ""
     focus_summary: str = ""
     context_issue_numbers: list[int] = Field(default_factory=list)
     continue_session: bool = False

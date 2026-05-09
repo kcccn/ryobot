@@ -476,8 +476,7 @@ async def test_passive_final_comment_stops_session_without_second_bot() -> None:
                                 "will_act": False,
                                 "execution_identity": "self",
                                 "comment_kind": "final",
-                                "handoff_to": None,
-                                "handoff_reason": "",
+
                                 "focus_summary": "Post the final cleanup summary and end the session.",
                                 "context_issue_numbers": [],
                                 "continue_session": False,
@@ -502,7 +501,8 @@ async def test_passive_final_comment_stops_session_without_second_bot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() -> None:
+async def test_multi_round_single_bot_discussion_then_handoff_then_acts() -> None:
+    """A single bot can post discussion, then handoff comment, then act — all as the same identity."""
     plugin = FakePlugin(
         event=PluginEvent(
             event_id="evt-impl",
@@ -533,8 +533,6 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
                                 "will_act": False,
                                 "execution_identity": "self",
                                 "comment_kind": "discussion",
-                                "handoff_to": None,
-                                "handoff_reason": "",
                                 "focus_summary": "State the architecture constraint before implementation starts.",
                                 "context_issue_numbers": [],
                                 "continue_session": True,
@@ -550,44 +548,16 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
                 FakeMessage(
                     content=json.dumps(
                         {
-                            "context_analysis": "now hand this to coder",
+                            "context_analysis": "now hand off to coder via dispatch",
                             "internal_emotion": "calm",
-                            "biological_clock_impact": "neutral",
-                            "action_decision": {
-                                "mode": "reply_with_plan",
-                                "will_reply": True,
-                                "will_act": False,
-                                "execution_identity": "self",
-                                "comment_kind": "handoff",
-                                "handoff_to": "coder",
-                                "handoff_reason": "明确实现任务，下一步该直接写代码并提 PR。",
-                                "focus_summary": "Hand off the clarified implementation task to coder.",
-                                "context_issue_numbers": [],
-                                "continue_session": True,
-                                "done": False,
-                                "target_issue_number": None,
-                            },
-                        }
-                    )
-                )
-            ),
-            build_response(FakeMessage(content="@Ryo Coder 这一步已经清楚是实现任务：请直接补代码并提 PR。")),
-            build_response(
-                FakeMessage(
-                    content=json.dumps(
-                        {
-                            "context_analysis": "implementation is straightforward now",
-                            "internal_emotion": "ready",
                             "biological_clock_impact": "neutral",
                             "action_decision": {
                                 "mode": "act_directly",
                                 "will_reply": True,
                                 "will_act": True,
                                 "execution_identity": "self",
-                                "comment_kind": "final",
-                                "handoff_to": None,
-                                "handoff_reason": "",
-                                "focus_summary": "Finish the implementation and close the session.",
+                                "comment_kind": "handoff",
+                                "focus_summary": "Dispatch coder to implement the PR.",
                                 "context_issue_numbers": [],
                                 "continue_session": False,
                                 "done": True,
@@ -601,14 +571,13 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
                 FakeMessage(
                     tool_calls=[
                         FakeToolCall(
-                            id="call-pr",
-                            function=FakeFunction(name="create_pull_request", arguments='{"text":"ship it"}'),
+                            id="call-dispatch",
+                            function=FakeFunction(name="dispatch_workflow", arguments='{"bot_identity":"coder","issue_number":12}'),
                         )
                     ]
                 )
             ),
-            build_response(FakeMessage(content="PR 已经提了，我这边收口。")),
-            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+            build_response(FakeMessage(content="已召唤 coder 来实现，我这边交接完成。")),
         ],
         skills=[CreatePullRequestTestSkill()],
     )
@@ -616,99 +585,8 @@ async def test_public_discussion_then_handoff_then_coder_finishes_in_same_run() 
     await agent.run(raw_event={})
 
     assert plugin.sent_replies[0][1] == "先别急着改，接口边界要保持最小。"
-    assert "实现任务" in plugin.sent_replies[1][1]
-    assert plugin.sent_replies[2][1] == "PR 已经提了，我这边收口。"
-    assert plugin.identity_history[0][0] == "architect"
-    assert any(identity == "coder" for identity, _ in plugin.identity_history)
-    assert plugin.updated_runtime_states[-1].last_routing.handoff_count == 1
-    assert plugin.updated_runtime_states[-1].last_routing.discussion_count == 1
-
-
-@pytest.mark.asyncio
-async def test_discussion_limit_forces_conclusion_in_same_session() -> None:
-    patrol_event = PluginEvent(
-        event_id="evt-patrol",
-        message="street lurker",
-        author="system",
-        author_association="OWNER",
-        issue_id="",
-        issue_number=0,
-        comment_id=0,
-        owner="acme",
-        repo="widgets",
-        is_patrol=True,
-    )
-    plugin = FakePlugin(
-        event=patrol_event,
-        history_by_issue={0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")},
-    )
-    repeated_discussion = build_response(
-        FakeMessage(
-            content=json.dumps(
-                {
-                    "context_analysis": "still debating",
-                    "internal_emotion": "engaged",
-                    "biological_clock_impact": "neutral",
-                    "action_decision": {
-                            "mode": "reply_with_plan",
-                            "will_reply": True,
-                            "will_act": False,
-                            "execution_identity": "self",
-                            "comment_kind": "discussion",
-                            "handoff_to": None,
-                            "handoff_reason": "",
-                            "focus_summary": "Advance the public technical discussion by one focused point.",
-                            "context_issue_numbers": [],
-                            "continue_session": True,
-                            "done": False,
-                            "target_issue_number": 12,
-                    },
-                }
-            )
-        )
-    )
-    agent, _ = build_agent(
-        plugin=plugin,
-        responses=[
-            repeated_discussion,
-            build_response(FakeMessage(content="观点一。")),
-            repeated_discussion,
-            build_response(FakeMessage(content="观点二。")),
-            repeated_discussion,
-            build_response(FakeMessage(content="观点三。")),
-            build_response(
-                FakeMessage(
-                    content=json.dumps(
-                        {
-                            "context_analysis": "must conclude now",
-                            "internal_emotion": "settled",
-                            "biological_clock_impact": "neutral",
-                            "action_decision": {
-                            "mode": "reply_with_plan",
-                            "will_reply": True,
-                            "will_act": False,
-                            "execution_identity": "self",
-                            "comment_kind": "final",
-                            "handoff_to": None,
-                            "handoff_reason": "",
-                            "focus_summary": "Conclude the discussion with a final position.",
-                            "context_issue_numbers": [],
-                            "continue_session": False,
-                            "done": True,
-                            "target_issue_number": 12,
-                            },
-                        }
-                    )
-                )
-            ),
-            build_response(FakeMessage(content="讨论到此为止，当前结论已经足够了。")),
-            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
-        ],
-    )
-
-    await agent.run(raw_event={})
-
-    assert plugin.updated_runtime_states[-1].last_routing.discussion_count == 3
+    assert "交接完成" in plugin.sent_replies[1][1]
+    assert len(plugin.sent_replies) == 2
 
 
 @pytest.mark.asyncio
@@ -745,8 +623,6 @@ async def test_pr_review_submission_ends_session_without_extra_signoff() -> None
                             "will_act": True,
                             "execution_identity": "self",
                             "comment_kind": "response",
-                            "handoff_to": None,
-                            "handoff_reason": "",
                             "focus_summary": "Submit the PR review on the active target thread.",
                             "context_issue_numbers": [],
                             "continue_session": False,
@@ -1046,8 +922,7 @@ async def test_reply_executes_all_terminal_mutations_in_same_batch_before_stoppi
                                 "will_act": True,
                                 "execution_identity": "self",
                                 "comment_kind": "final",
-                                "handoff_to": None,
-                                "handoff_reason": "",
+
                                 "focus_summary": "Close all duplicate issues in one batch.",
                                 "context_issue_numbers": [],
                                 "continue_session": False,
@@ -1111,8 +986,7 @@ async def test_reply_executes_mixed_batch_in_order_before_terminal_stop() -> Non
                                 "will_act": True,
                                 "execution_identity": "self",
                                 "comment_kind": "final",
-                                "handoff_to": None,
-                                "handoff_reason": "",
+
                                 "focus_summary": "Post one note and close duplicate issues.",
                                 "context_issue_numbers": [],
                                 "continue_session": False,
@@ -1176,8 +1050,7 @@ async def test_reply_defers_no_reply_until_after_other_batch_tools() -> None:
                                 "will_act": True,
                                 "execution_identity": "self",
                                 "comment_kind": "response",
-                                "handoff_to": None,
-                                "handoff_reason": "",
+
                                 "focus_summary": "Close the issue and avoid extra public reply.",
                                 "context_issue_numbers": [],
                                 "continue_session": False,
@@ -2239,7 +2112,7 @@ class TestExtractSafeJson:
             'I will output: ```json\n'
             '{"context_analysis":"ready","internal_emotion":"calm","biological_clock_impact":"neutral",'
             '"action_decision":{"mode":"act_directly","will_reply":true,"will_act":true,"execution_identity":"self",'
-            '"comment_kind":"response","handoff_to":null,"handoff_reason":"","focus_summary":"fix it","context_issue_numbers":[],'
+            '"comment_kind":"response","focus_summary":"fix it","context_issue_numbers":[],'
             '"continue_session":false,"done":false,"target_issue_number":null}}\n'
             '```\n\nThat should work.'
         )

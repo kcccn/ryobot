@@ -281,7 +281,7 @@ def _load_config(bot: Any) -> dict[str, Any]:
     return {
         "base_url": base_url,
         "model": model,
-        "max_iterations": int(os.getenv("MAX_ITERATIONS", "100")),
+        "max_iterations": int(os.getenv("MAX_ITERATIONS", "50")),
         "fatigue_min_seconds": int(os.getenv("RYOBOT_FATIGUE_MIN_SECONDS", str(DEFAULT_FATIGUE_MIN_SECONDS))),
         "fatigue_max_seconds": int(os.getenv("RYOBOT_FATIGUE_MAX_SECONDS", str(DEFAULT_FATIGUE_MAX_SECONDS))),
         "street_lurker_fatigue_min_seconds": int(

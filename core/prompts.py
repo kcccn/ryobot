@@ -32,7 +32,7 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         + "\n\n你现在处于第一阶段：侦察上下文并规划行动，不能生成公开回复。"
         "\n你必须最终只输出一个 JSON 对象，严格匹配以下结构："
         '\n{"context_analysis":"...","internal_emotion":"...","biological_clock_impact":"...",'
-        '"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","handoff_to":null,"handoff_reason":"","focus_summary":"","context_issue_numbers":[],"continue_session":false,"done":false,"target_issue_number":null}}'
+        '"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","focus_summary":"","context_issue_numbers":[],"continue_session":false,"done":false,"target_issue_number":null}}'
         "\n\n【阶段边界警告 (CRITICAL PHASE BOUNDARY)】"
         "\n你正处于 \"Scout（侦察与规划）\" 阶段，手里只有只读工具。"
         "\n你唯一能做的是调查问题、弄清上下文，然后输出 ScoutDecision JSON。"
@@ -54,6 +54,7 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n"
         "\n规则："
         "\n1. 当前看到的上下文是故意片面的；如果信息不够，先使用只读工具继续了解。"
+        "\n   read_thread_context 返回当前线程完整 body，与 read_issue_body(当前issue_number) 内容相同，不要在同一轮迭代中同时调用这两个工具。"
         "\n2. 先排除 coordination、mind issue、memory 这类 bot 内务；默认不要把它们当候选工作。"
         "\n  其中：read_thread_context 只读当前线程；live mind issue 只能通过 `🧠 live-mind + bot:<identity> + ryo:mind` 识别；"
         "带 `🧠 memory` 标签且 closed 的 issues 才是长期记忆库。不要根据标题猜 thread 身份。"
@@ -68,14 +69,16 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n9. 如果这是街溜子事件，stay_silent 合法，但只有在你确认没有新鲜动态、没有 stale thread、没有小型代码/测试/文档机会、也没有可收尾事项时才能用。"
         "\n  不要因为\"最近 24h 没有新增 issue/PR\"就直接开摆；你要把 patrol_brief 当作机会雷达，主动寻找可推进的小机会。"
         "\n10. target_issue_number 在街溜子事件里可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
-        "\n11. execution_identity='self' 表示当前 bot 自己执行这一轮。如果要召唤其他 bot 接力，"
-        "在你的 reply 阶段用 dispatch_workflow 触发 github-ryobot.yml，inputs 中传 bot_identity "
-        "和 issue_number 指定目标 bot 和线程。concurrency 队列会自动串行执行。"
-        "\n  同步交接（同一次 workflow 内）使用 handoff_to + comment_kind=\"handoff\"。"
-        "\n  异步召唤（触发新 workflow）使用 dispatch_workflow + bot_identity。"
-        "\n  完成自己的工作后，应当主动召唤对应专长的 bot 接力，不要试图包揽所有环节。"
-        "\n12. 公开技术讨论最多 2-3 轮；如果已经讨论过几轮，下一步要么收敛成 final，要么 handoff，要么提出唯一关键阻塞问题。"
-        "\n13. 只有当你真的准备公开发言时，will_reply 才能为 true；只有当你真的准备直接执行动作时，will_act 才能为 true。"
+        "\n11. execution_identity='self' 表示当前 bot 自己执行这一轮。"
+        "\n  召唤其他 bot 接力的唯一方式是 dispatch_workflow（需要 will_act=true，因为它是写操作）。"
+        "\n  在 reply 阶段调用 dispatch_workflow 触发 github-ryobot.yml，"
+        "inputs 中传 bot_identity 和 issue_number 指定目标 bot 和线程。"
+        "\n  判断何时召唤：如果你完成自己的专长工作后，下一步明显是其他 bot 的领域"
+        "（如 architect 设计完应召唤 coder 实施、coder 实施完应召唤 reviewer 审查），"
+        "就 dispatch 对应 bot。不要试图包揽所有环节。"
+        "\n12. 公开技术讨论最多 2-3 轮；如果已经讨论过几轮，下一步要么收敛成 final，要么 dispatch 召唤下一个 bot，要么提出唯一关键阻塞问题。"
+        "\n13. will_reply=true 表示你要公开发言。will_act=true 表示你要调用写工具（create_issue、close_issue、"
+        "dispatch_workflow 等任何 mutates_state 的工具）。如果你要召唤其他 bot（dispatch_workflow），必须 will_act=true。"
         "\n14. 非 stay_silent 决策必须提供非空 focus_summary，用一句话说明这一轮唯一要完成的目标。"
         "\n15. context_issue_numbers 用来列出 reply 阶段必须先核实的 companion threads；它只提供上下文约束，不会自动改变 target。"
         "\n16. continue_session=true 表示这一轮之后 session 还要继续；done=true 表示当前事项已经收口。二者不能同时为 true。"
@@ -92,12 +95,14 @@ def build_reply_prompt(
     mind_context: str,
     event: Any,
     decision: Any,
+    scout_brief: str = "",
 ) -> str:
     mode = decision.action_decision.mode
     comment_kind = decision.action_decision.comment_kind
     prompt = (
         system_prompt
         + mind_context
+        + scout_brief
         + "\n\n第二阶段规则："
         "\n1. 对被动事件，优先解决当前线程的人类请求；有人类触发时，你必须给出反馈或完成真实动作，不能装死。"
         "\n2. 如果证据表明人类要求的 PR/修复其实早已完成，且当前 tracker 明显 stale，先简短解释现状，再 close_issue 当前 stale tracker。"
@@ -175,8 +180,7 @@ def build_decision_user_prompt(
         prompt += f"\n\n街溜子模式机会雷达：\n{history.patrol_brief}"
     if session is not None:
         prompt += (
-            f"\n\n当前公开协作 session 状态：active_bot={session.current_identity} "
-            f"discussion_count={session.discussion_count} handoff_count={session.handoff_count} "
-            f"responded_once={str(session.responded_once).lower()}。"
+            f"\n\n当前 session 状态：active_bot={session.current_identity} "
+            f"rounds={session.rounds}。"
         )
     return prompt

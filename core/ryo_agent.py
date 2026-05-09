@@ -35,8 +35,6 @@ SCOUT_MAX_TOOL_CALLS = 12
 SCOUT_CONVERGENCE_LIMIT = 3
 SCOUT_MAX_REPEAT_PER_RESOURCE = 2
 MAX_SESSION_ROUNDS = 6
-MAX_PUBLIC_DISCUSSION_COMMENTS = 3
-MAX_HANDOFFS = 3
 REPLY_MAX_READONLY_ITERATIONS = 6
 REPLY_CONVERGENCE_LIMIT = 4
 
@@ -69,7 +67,6 @@ class ExecutionOutcome:
     mutated_tool_names: set[str] = field(default_factory=set)
     continue_session: bool = False
     done: bool = False
-    next_identity: str | None = None
     visible_comment_posted: bool = False
 
     @property
@@ -87,9 +84,6 @@ class ExecutionOutcome:
 class SessionState:
     current_identity: str
     current_event: PluginEvent
-    discussion_count: int = 0
-    handoff_count: int = 0
-    responded_once: bool = False
     rounds: int = 0
     created_issue_titles: set[str] = field(default_factory=set)
     closed_issue_numbers: set[int] = field(default_factory=set)
@@ -133,17 +127,9 @@ class RyoAgent:
         self._skills_by_name = {skill.name: skill for skill in skills}
         self._control_skills_by_name = {NO_REPLY_TOOL_NAME: _NoReplySkill()}
 
-    def _activate_identity(self, identity: str) -> None:
-        persona = self.persona_registry.get(identity)
-        if persona is None:
-            raise ValueError(f"Unknown persona identity for session handoff: {identity}")
-        self.persona = dict(persona)
-        self.plugin.set_identity(str(persona["identity"]), str(persona.get("display_name") or persona["identity"]))
-
     async def run(self, raw_event: Any) -> None:
         event = self.plugin.parse_event(raw_event)
         identity = str(self.persona["identity"])
-        self._activate_identity(identity)
         history = await self.plugin.fetch_history(event)
         runtime_state = history.runtime_state.model_copy(deep=True)
 
@@ -172,10 +158,9 @@ class RyoAgent:
 
             for _ in range(MAX_SESSION_ROUNDS):
                 session.rounds += 1
-                self._activate_identity(session.current_identity)
                 active_event = session.current_event
                 active_history = await self.plugin.fetch_history(active_event)
-                decision = await self._decide(event=active_event, history=active_history, session=session)
+                decision, scout_brief = await self._decide(event=active_event, history=active_history, session=session)
                 _log("scout_decision: " + json.dumps(decision.model_dump(), ensure_ascii=False)[:LOG_TRUNCATE])
 
                 should_reply, skip_reason = self._should_reply(
@@ -199,7 +184,7 @@ class RyoAgent:
                         f"{'PR' if active_event.is_pull_request else 'Issue'} #{active_event.issue_number}"
                     )
 
-                outcome = await self._reply(event=active_event, history=active_history, decision=decision, session=session)
+                outcome = await self._reply(event=active_event, history=active_history, decision=decision, session=session, scout_brief=scout_brief)
                 final_outcome = outcome
                 final_event = active_event
                 final_target_issue_number = target_issue_number
@@ -213,38 +198,16 @@ class RyoAgent:
                         min_seconds=fatigue_min_seconds,
                         max_seconds=fatigue_max_seconds,
                     )
-                if decision.action_decision.comment_kind == "discussion" and outcome.visible_comment_posted:
-                    session.discussion_count += 1
-                if decision.action_decision.comment_kind == "handoff" and outcome.visible_comment_posted:
-                    session.handoff_count += 1
-                if outcome.visible_comment_posted:
-                    session.responded_once = True
 
                 if (
                     not active_event.is_patrol
                     and outcome.visible_comment_posted
                     and decision.action_decision.comment_kind == "final"
-                    and decision.action_decision.comment_kind not in {"discussion", "handoff"}
                 ):
                     outcome.continue_session = False
                     outcome.done = True
 
-                if outcome.kind == "handoff_posted" and outcome.next_identity:
-                    if session.handoff_count >= MAX_HANDOFFS:
-                        final_outcome = ExecutionOutcome(
-                            kind="final_posted",
-                            reason="handoff_limit_reached",
-                            done=True,
-                            visible_comment_posted=outcome.visible_comment_posted,
-                            mutated_tool_names=set(outcome.mutated_tool_names),
-                        )
-                        break
-                    session.current_identity = outcome.next_identity
-                    session.current_event = active_event
-                    continue
-
                 if outcome.continue_session and not outcome.done:
-                    session.current_identity = outcome.next_identity or session.current_identity
                     session.current_event = active_event
                     continue
 
@@ -257,10 +220,6 @@ class RyoAgent:
             runtime_state.last_routing.target_issue_number = (
                 final_event.issue_number if final_outcome.acted else final_target_issue_number
             )
-            runtime_state.last_routing.handoff_to = final_outcome.next_identity
-            runtime_state.last_routing.handoff_reason = ""
-            runtime_state.last_routing.discussion_count = session.discussion_count
-            runtime_state.last_routing.handoff_count = session.handoff_count
             runtime_state.last_routing.routed_at = _utcnow_iso()
             await self.plugin.update_runtime_state(runtime_state)
             if final_outcome.kind == "no_action":
@@ -271,7 +230,16 @@ class RyoAgent:
         finally:
             _gh_endgroup()
 
-    async def _decide(self, *, event: PluginEvent, history: Any, session: SessionState) -> ScoutDecision:
+    def _build_scout_brief(self, resource_uses: dict[tuple[str, str], int]) -> str:
+        if not resource_uses:
+            return ""
+        lines = ["【Scout 阶段已读取的资源，无需重复读取】"]
+        for (tool_name, resource_key), count in sorted(resource_uses.items()):
+            label = _scout_resource_label(tool_name, resource_key)
+            lines.append(f"- {label}")
+        return "\n".join(lines)
+
+    async def _decide(self, *, event: PluginEvent, history: Any, session: SessionState) -> tuple[ScoutDecision, str]:
         readonly_skills = self._available_skills_for_event(event, readonly_only=True)
         tools = [skill.get_tool_definition() for skill in readonly_skills]
         system_prompt = self._decision_prompt(history=history)
@@ -437,7 +405,7 @@ class RyoAgent:
                 try:
                     self._validate_decision(event=event, decision=decision, session=session)
                 except ValueError as exc:
-                    _log(f"WARN: invalid will decision constraint: {exc}")
+                    _log(f"WARN: invalid scout decision constraint: {exc}")
                     messages.append(self._assistant_message_payload(assistant_message))
                     messages.append(
                         {
@@ -446,7 +414,8 @@ class RyoAgent:
                         }
                     )
                     continue
-                return decision
+                scout_brief = self._build_scout_brief(resource_uses)
+                return decision, scout_brief
         finally:
             clear_skill_context(context_token)
 
@@ -462,7 +431,7 @@ class RyoAgent:
                 comment_kind="final",
                 done=True,
             ),
-        )
+        ), ""
 
     async def _reply(
         self,
@@ -471,8 +440,9 @@ class RyoAgent:
         history: Any,
         decision: ScoutDecision,
         session: SessionState,
+        scout_brief: str = "",
     ) -> ExecutionOutcome:
-        system_prompt = self._reply_prompt(history=history, event=event, decision=decision)
+        system_prompt = self._reply_prompt(history=history, event=event, decision=decision, scout_brief=scout_brief)
         messages: list[ChatMessage] = [
             {"role": "system", "content": system_prompt},
             *history.messages,
@@ -592,7 +562,7 @@ class RyoAgent:
                                 mutated_tool_names=set(executed_tool_names),
                                 done=decision.action_decision.done or not decision.action_decision.continue_session,
                                 continue_session=decision.action_decision.continue_session,
-                                next_identity=decision.action_decision.handoff_to,
+        
                             )
                         return ExecutionOutcome(kind="no_action", reason="no_reply")
 
@@ -636,7 +606,7 @@ class RyoAgent:
                                 mutated_tool_names=set(executed_tool_names),
                                 done=decision.action_decision.done or not decision.action_decision.continue_session,
                                 continue_session=decision.action_decision.continue_session,
-                                next_identity=decision.action_decision.handoff_to,
+        
                             )
                         _log("WARN: text produced during repo-scan without a thread target; treating as no action")
                         return ExecutionOutcome(kind="no_action", reason="no_action")
@@ -660,7 +630,7 @@ class RyoAgent:
                         done=True
                         if (not event.is_patrol and decision.action_decision.comment_kind == "final")
                         else (decision.action_decision.done or not decision.action_decision.continue_session),
-                        next_identity=decision.action_decision.handoff_to,
+
                         visible_comment_posted=True,
                     )
 
@@ -672,7 +642,7 @@ class RyoAgent:
                         mutated_tool_names=set(executed_tool_names),
                         continue_session=decision.action_decision.continue_session,
                         done=decision.action_decision.done or not decision.action_decision.continue_session,
-                        next_identity=decision.action_decision.handoff_to,
+
                     )
 
                 _log("WARN: no tool calls and no text reply, breaking")
@@ -869,12 +839,13 @@ class RyoAgent:
             mind_context=self._mind_context(history),
         )
 
-    def _reply_prompt(self, *, history: Any, event: PluginEvent, decision: ScoutDecision) -> str:
+    def _reply_prompt(self, *, history: Any, event: PluginEvent, decision: ScoutDecision, scout_brief: str = "") -> str:
         return prompts.build_reply_prompt(
             system_prompt=self.persona["system_prompt"],
             mind_context=self._mind_context(history),
             event=event,
             decision=decision,
+            scout_brief=scout_brief,
         )
 
     def _decision_user_prompt(self, *, event: PluginEvent, history: Any, session: SessionState | None = None) -> str:
@@ -919,25 +890,12 @@ class RyoAgent:
         if decision.action_decision.done and decision.action_decision.continue_session:
             raise ValueError("done and continue_session cannot both be true.")
         if decision.action_decision.comment_kind == "discussion":
-            if session.discussion_count >= MAX_PUBLIC_DISCUSSION_COMMENTS:
-                raise ValueError("discussion comment limit reached; you must conclude or hand off.")
             if decision.action_decision.done:
                 raise ValueError("discussion comments must continue the session instead of finishing it immediately.")
         if decision.action_decision.comment_kind == "final" and decision.action_decision.continue_session:
             raise ValueError("final comments must conclude the current session.")
-        if decision.action_decision.comment_kind == "handoff":
-            if not decision.action_decision.handoff_to:
-                raise ValueError("handoff comments must specify handoff_to.")
-            if decision.action_decision.handoff_to == session.current_identity:
-                raise ValueError("handoff_to must point to a different bot identity.")
-            if session.handoff_count >= MAX_HANDOFFS:
-                raise ValueError("handoff limit reached; you must conclude in the current bot.")
-        elif decision.action_decision.handoff_to:
-            raise ValueError("handoff_to is only valid when comment_kind is 'handoff'.")
         if decision.action_decision.execution_identity not in {"self", *self.persona_registry.keys()}:
             raise ValueError(f"Unknown execution_identity: {decision.action_decision.execution_identity!r}")
-        if decision.action_decision.handoff_to and decision.action_decision.handoff_to not in self.persona_registry:
-            raise ValueError(f"Unknown handoff_to identity: {decision.action_decision.handoff_to!r}")
         if event.is_patrol and mode == "stay_silent" and not decision.action_decision.done:
             decision.action_decision.done = True
 
@@ -1232,6 +1190,34 @@ def _reason_from_tools(tool_names: set[str], *, default: str) -> str:
 
 def _normalize_query_key(query: str) -> str:
     return " ".join(query.lower().split())
+
+
+def _scout_resource_label(tool_name: str, resource_key: str) -> str:
+    if tool_name == "read_issue_body":
+        return f"read_issue_body(#{resource_key})"
+    if tool_name == "read_thread_comments":
+        return f"read_thread_comments(#{resource_key})"
+    if tool_name == "read_thread_meta":
+        return f"read_thread_meta(#{resource_key})"
+    if tool_name == "get_project_tree":
+        parts = resource_key.split("|")
+        depth = parts[1] if len(parts) > 1 and parts[1] else "4"
+        return f"get_project_tree (depth={depth})"
+    if tool_name == "find_file_paths":
+        parts = resource_key.split("|")
+        keyword = parts[1] if len(parts) > 1 else ""
+        return f"find_file_paths(keyword={keyword})"
+    if tool_name == "search_symbol":
+        parts = resource_key.split("|")
+        symbol = parts[1] if len(parts) > 1 else resource_key
+        return f"search_symbol({symbol})"
+    if tool_name in {"search_issues", "search_repo_context", "retrieve_memory", "search_code"}:
+        return f"{tool_name}(query={resource_key[:60]})"
+    if tool_name == "read_thread_context":
+        return "read_thread_context (current thread body)"
+    if tool_name in {"read_file", "list_files"}:
+        return f"{tool_name}({resource_key})"
+    return f"{tool_name}({resource_key[:80]})"
 
 
 
