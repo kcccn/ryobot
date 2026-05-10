@@ -161,14 +161,22 @@ def _load_event_payload() -> dict[str, Any]:
 def _ensure_repository_context(payload: dict[str, Any]) -> dict[str, Any]:
     if "repository" in payload:
         return payload
-    if "schedule" in payload or isinstance(payload.get("inputs"), dict):
+    if "schedule" in payload:
         repo_full = os.getenv("GITHUB_REPOSITORY", "")
         if "/" not in repo_full:
-            raise ValueError("Skipping schedule/workflow_dispatch event: GITHUB_REPOSITORY not set.")
+            raise ValueError("Skipping schedule event: GITHUB_REPOSITORY not set.")
         owner, repo = repo_full.split("/", 1)
         payload = dict(payload)
         payload["repository"] = {"owner": {"login": owner}, "name": repo}
         payload["_patrol"] = True
+        return payload
+    if isinstance(payload.get("inputs"), dict):
+        repo_full = os.getenv("GITHUB_REPOSITORY", "")
+        if "/" not in repo_full:
+            raise ValueError("Skipping workflow_dispatch event: GITHUB_REPOSITORY not set.")
+        owner, repo = repo_full.split("/", 1)
+        payload = dict(payload)
+        payload["repository"] = {"owner": {"login": owner}, "name": repo}
         return payload
     raise ValueError("Skipping event without repository context.")
 

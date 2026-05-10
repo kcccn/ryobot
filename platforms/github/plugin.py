@@ -313,15 +313,15 @@ class GitHubPlugin(BasePlugin):
                 dispatcher = inputs.get("dispatcher", "system")
                 return PluginEvent(
                     event_id=f"github:{owner}/{repo}:workflow_dispatch:issue:{issue_number}",
-                    message=f"[Street Lurker dispatch from {dispatcher}: check issue #{issue_number}]",
+                    message=f"[Targeted dispatch from {dispatcher}: work on issue #{issue_number}]",
                     author="system",
                     author_association="OWNER",
                     issue_id="",
-                    issue_number=0,
+                    issue_number=issue_number,
                     comment_id=0,
                     owner=str(owner),
                     repo=str(repo),
-                    is_patrol=True,
+                    is_patrol=False,
                     is_workflow_dispatch=True,
                 )
         return PluginEvent(
