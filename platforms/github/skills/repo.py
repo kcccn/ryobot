@@ -14,6 +14,7 @@ from ._models import (
     GetProjectTreeArgs,
     ListFilesArgs,
     ReadFileArgs,
+    ReplaceInFileArgs,
     SearchCodeArgs,
     SearchSymbolArgs,
     WriteFileArgs,
@@ -358,6 +359,104 @@ class WriteFile(GitHubSkillBase):
         action = "Updated" if body.get("sha") else "Created"
         return (
             f"{action} file {args.path}\n"
+            f"Commit: {result.get('commit', {}).get('sha', '')}\n"
+            f"URL: {result.get('content', {}).get('html_url', '')}"
+        )
+
+
+class ReplaceInFile(GitHubSkillBase):
+    name = "replace_in_file"
+    description = (
+        "Replace a specific text block in a file. "
+        "Parameters: path (file path), old_str (exact text to replace — "
+        "must be unique within the file), new_str (replacement text), "
+        "message (commit message), branch (git branch to commit to). "
+        "If old_str appears multiple times the operation will fail — "
+        "include more surrounding context to make it unique. "
+        "Writing directly to the default branch is not allowed — use "
+        "create_branch first, write to it, then create_pull_request."
+    )
+    args_model = ReplaceInFileArgs
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        import base64
+
+        args = self.args_model.model_validate(kwargs)
+        context = self._require_context()
+
+        repo_info = await self._api.get_json(
+            f"/repos/{context['owner']}/{context['repo']}",
+        )
+        default_branch = repo_info.get("default_branch", "main")
+        effective_branch = args.branch or default_branch
+        if effective_branch == default_branch:
+            return (
+                f"Refusing to write directly to the default branch '{default_branch}'. "
+                "All code changes must go through the PR workflow:\n"
+                "1. Use create_branch to create a feature branch\n"
+                "2. Use replace_in_file with branch=<your-branch> to commit changes\n"
+                "3. Use create_pull_request to open a PR for review\n"
+                "You must never commit directly to the default branch."
+            )
+
+        try:
+            existing = await self._api.get_json(
+                f"/repos/{context['owner']}/{context['repo']}/contents/{args.path}",
+                params={"ref": effective_branch},
+            )
+        except httpx.HTTPStatusError as exc:
+            return f"Failed to read file '{args.path}': {exc.response.text[:500]}"
+
+        if not isinstance(existing, dict) or not existing.get("sha"):
+            return (
+                f"File '{args.path}' does not exist on branch '{effective_branch}'. "
+                "Use write_file to create it first."
+            )
+
+        original_content = base64.b64decode(existing["content"]).decode("utf-8")
+        count = original_content.count(args.old_str)
+        if count == 0:
+            return (
+                f"Error: old_str not found in '{args.path}'. "
+                "The text you provided does not appear in the file. "
+                "Check for whitespace differences, indentation, or use read_file to verify the current content."
+            )
+        if count > 1:
+            lines = original_content.split("\n")
+            occurrences: list[str] = []
+            for i, line in enumerate(lines, start=1):
+                if args.old_str in line:
+                    occurrences.append(f"  L{i}: {line.strip()[:120]}")
+            return (
+                f"Error: old_str appears {count} times in '{args.path}'. "
+                "Include more surrounding context in old_str to make it unique. Occurrences:\n"
+                + "\n".join(occurrences[:5])
+            )
+
+        new_content = original_content.replace(args.old_str, args.new_str, 1)
+        if new_content == original_content:
+            return "Error: replacement produced no change to the file."
+
+        body: dict[str, Any] = {
+            "message": args.message,
+            "content": base64.b64encode(new_content.encode("utf-8")).decode("ascii"),
+            "branch": effective_branch,
+            "sha": existing["sha"],
+        }
+
+        try:
+            result = await self._api.put_json(
+                f"/repos/{context['owner']}/{context['repo']}/contents/{args.path}",
+                json_body=body,
+            )
+        except httpx.HTTPStatusError as exc:
+            return (
+                f"GitHub API error ({exc.response.status_code}): "
+                f"{exc.response.text[:1000]}"
+            )
+        return (
+            f"Updated file {args.path}\n"
             f"Commit: {result.get('commit', {}).get('sha', '')}\n"
             f"URL: {result.get('content', {}).get('html_url', '')}"
         )

@@ -185,6 +185,14 @@ class WriteFileArgs(BaseModel):
     branch: str = Field(default="", description="Branch to commit to (empty for default branch)")
 
 
+class ReplaceInFileArgs(BaseModel):
+    path: str = Field(description="File path relative to repo root")
+    old_str: str = Field(description="Exact text to find and replace — must be unique in the file")
+    new_str: str = Field(description="Replacement text")
+    message: str = Field(default="Replace text in file", description="Commit message")
+    branch: str = Field(default="", description="Branch to commit to (empty for default branch)")
+
+
 class CreateBranchArgs(BaseModel):
     branch: str = Field(description="Name of the new branch")
     base_branch: str = Field(default="", description="Branch to create from (empty for repo default)")

@@ -38,6 +38,7 @@ from platforms.github.skills import (
     ReadWorkflowRun,
     RefineMemory,
     ReopenIssue,
+    ReplaceInFile,
     RetrieveMemory,
     RunCommand,
     SearchCode,
@@ -1999,6 +2000,139 @@ async def test_write_file_refuses_default_branch() -> None:
     try:
         result = await skill.execute(
             path="foo.py", content="bar", message="Should fail", branch="main",
+        )
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Refusing to write directly to the default branch" in result
+
+
+# ---- replace_in_file ----
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_succeeds() -> None:
+    import base64
+
+    original = base64.b64encode(b"hello world\nthis is a test\n").decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/contents/" not in str(request.url):
+            return httpx.Response(200, json={"default_branch": "main"})
+        if request.method == "GET" and "/contents/" in str(request.url):
+            return httpx.Response(200, json={
+                "sha": "oldsha", "type": "file", "content": original, "encoding": "base64",
+            })
+        return httpx.Response(
+            200,
+            json={
+                "content": {"html_url": "https://github.test/acme/widgets/blob/feat/fix/test.py"},
+                "commit": {"sha": "newsha"},
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReplaceInFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(
+            path="test.py",
+            old_str="hello world",
+            new_str="goodbye world",
+            message="Replace greeting",
+            branch="feat/fix",
+        )
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "Updated file" in result
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_old_str_not_found() -> None:
+    import base64
+
+    original = base64.b64encode(b"some content\n").decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/contents/" not in str(request.url):
+            return httpx.Response(200, json={"default_branch": "main"})
+        if request.method == "GET" and "/contents/" in str(request.url):
+            return httpx.Response(200, json={
+                "sha": "oldsha", "type": "file", "content": original, "encoding": "base64",
+            })
+        return httpx.Response(500)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReplaceInFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(
+            path="test.py",
+            old_str="nonexistent text",
+            new_str="replacement",
+            message="Should fail",
+            branch="feat/fix",
+        )
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "old_str not found" in result
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_old_str_not_unique() -> None:
+    import base64
+
+    original = base64.b64encode(b"dup line\ndup line\nunique\n").decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and "/contents/" not in str(request.url):
+            return httpx.Response(200, json={"default_branch": "main"})
+        if request.method == "GET" and "/contents/" in str(request.url):
+            return httpx.Response(200, json={
+                "sha": "oldsha", "type": "file", "content": original, "encoding": "base64",
+            })
+        return httpx.Response(500)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReplaceInFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(
+            path="test.py",
+            old_str="dup line",
+            new_str="replaced",
+            message="Should fail",
+            branch="feat/fix",
+        )
+    finally:
+        clear_skill_context(token)
+        await client.aclose()
+
+    assert "appears 2 times" in result
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_refuses_default_branch() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(500)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api.github.test")
+    skill = ReplaceInFile(token="secret-token", client=client, api_base_url="https://api.github.test")
+    token = with_context()
+    try:
+        result = await skill.execute(
+            path="foo.py",
+            old_str="x",
+            new_str="y",
+            message="Should fail",
+            branch="main",
         )
     finally:
         clear_skill_context(token)
