@@ -311,14 +311,18 @@ class GitHubPlugin(BasePlugin):
             issue_number = int(inputs.get("issue_number", "0") or "0")
             if issue_number > 0:
                 dispatcher = inputs.get("dispatcher", "system")
+                mission = inputs.get("mission", "").strip()
+                message_parts = [f"[DISPATCH MISSION] {dispatcher} 委派你处理 #{issue_number}。"]
+                if mission:
+                    message_parts.append(f"任务目标：{mission}")
+                    message_parts.append("请读取该线程内容，完成上述目标。")
+                else:
+                    message_parts.append("请读取该线程最新 handoff 评论，其中包含你的首要任务指令。")
+                message_parts.append("完成任务后必须在对应线程发布评论说明执行结果，")
+                message_parts.append("不允许静默 merge/push/close。")
                 return PluginEvent(
                     event_id=f"github:{owner}/{repo}:workflow_dispatch:issue:{issue_number}",
-                    message=(
-                        f"[DISPATCH MISSION] {dispatcher} 委派你处理 #{issue_number}。"
-                        "请读取该线程最新 handoff 评论，其中包含你的首要任务指令。"
-                        "完成任务后必须在对应线程发布评论说明执行结果，"
-                        "不允许静默 merge/push/close。"
-                    ),
+                    message="".join(message_parts),
                     author="system",
                     author_association="OWNER",
                     issue_id="",
@@ -328,6 +332,7 @@ class GitHubPlugin(BasePlugin):
                     repo=str(repo),
                     is_patrol=False,
                     is_workflow_dispatch=True,
+                    mission=mission,
                 )
         return PluginEvent(
             event_id=f"github:{owner}/{repo}:schedule:{datetime.now(timezone.utc).isoformat()}",

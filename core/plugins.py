@@ -21,6 +21,7 @@ class PluginEvent(BaseModel):
     is_pull_request: bool = False
     is_patrol: bool = False
     is_workflow_dispatch: bool = False
+    mission: str = ""
     head_ref: str = ""
 
 
