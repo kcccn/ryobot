@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
 from ..utils import is_internal_issue_artifact, max_chars_from_env, sanitize_mentions, truncate_text
 from ._base import GitHubSkillBase
 from ._models import (
@@ -121,10 +123,19 @@ class ReopenIssue(GitHubSkillBase):
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
         issue_number = args.issue_number if args.issue_number else context["issue_number"]
-        await self._api.patch_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}",
-            json_body={"state": "open"},
-        )
+        try:
+            await self._api.patch_json(
+                f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}",
+                json_body={"state": "open"},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 422:
+                await self._api.patch_json(
+                    f"/repos/{context['owner']}/{context['repo']}/pulls/{issue_number}",
+                    json_body={"state": "open"},
+                )
+            else:
+                raise
         return f"Reopened issue #{issue_number}"
 
 

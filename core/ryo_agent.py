@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from typing import Any, TypedDict
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from . import prompts
 from .plugins import ActionDecision, BasePlugin, PluginEvent, RepoRuntimeState, ScoutDecision
@@ -227,7 +227,7 @@ class RyoAgent:
         if not api_items:
             return ""
         lines = ["【Scout 阶段已读取的 GitHub API 资源，无需重复调用 API】"]
-        for (tool_name, resource_key), count in sorted(api_items.items()):
+        for (tool_name, resource_key), _count in sorted(api_items.items()):
             label = _scout_resource_label(tool_name, resource_key)
             lines.append(f"- {label}")
             lines.append(f"<!-- ryo:scout_key:{tool_name}:{resource_key} -->")
@@ -253,6 +253,7 @@ class RyoAgent:
         total_tool_calls = 0
         json_repair_only = False
         resource_uses: dict[tuple[str, str], int] = {}
+        self._scout_results: dict[tuple[str, str], str] = {}
         try:
             for i in range(scout_iterations):
                 _log(f"--- scout iteration {i + 1}/{scout_iterations} ---")
@@ -488,11 +489,15 @@ class RyoAgent:
                         if tool_result is None and tool_name in _GITHUB_READ_TOOLS:
                             resource_key = self._scout_resource_key(tool_name, args_raw)
                             if resource_key is not None and resource_key in scout_read_keys:
-                                tool_result = (
-                                    f"Tool skipped: resource {resource_key[0]}({resource_key[1]}) "
-                                    "was already read during the Scout phase. "
-                                    "Use the scout brief above instead of re-reading."
-                                )
+                                cached = getattr(self, '_scout_results', {}).get(resource_key)
+                                if cached is not None:
+                                    tool_result = cached
+                                else:
+                                    tool_result = (
+                                        f"Tool skipped: resource {resource_key[0]}({resource_key[1]}) "
+                                        "was already read during the Scout phase. "
+                                        "Use the scout brief above instead of re-reading."
+                                    )
                         if tool_result is None:
                             tool_result = await self._execute_tool_call(tool_call, event=event)
                         if tool_name == NO_REPLY_TOOL_NAME:
@@ -813,7 +818,10 @@ class RyoAgent:
                 per_iteration_read_keys.add(resource_key)
                 for sibling in sibling_keys:
                     per_iteration_read_keys.add(sibling)
-        return await self._execute_tool_call(tool_call, event=event)
+        result = await self._execute_tool_call(tool_call, event=event)
+        if resource_key is not None and tool_name in _GITHUB_READ_TOOLS and not isinstance(result, _NoReplyResult):
+            self._scout_results[resource_key] = result
+        return result
 
     async def _execute_validated_skill(self, skill: BaseSkill, tool_call: Any) -> str | _NoReplyResult:
         tool_name = skill.name
@@ -1146,8 +1154,8 @@ class RyoAgent:
             args = self._parse_tool_arguments(args_raw)
         except JSONDecodeError:
             return None
-        if tool_name in {"read_issue_body", "read_thread_comments", "read_thread_meta"}:
-            return (tool_name, str(args.get("issue_number", 0) or 0))
+        if tool_name in {"read_issue_body", "read_thread_comments", "read_thread_meta", "read_code_diff"}:
+            return (tool_name, str(args.get("issue_number", args.get("pr_number", 0)) or 0))
         if tool_name in {"read_file", "list_files"}:
             return (tool_name, str(args.get("path", "")).strip())
         if tool_name == "get_project_tree":
@@ -1195,6 +1203,8 @@ def _scout_resource_label(tool_name: str, resource_key: str) -> str:
         return f"read_issue_body(#{resource_key})"
     if tool_name == "read_thread_comments":
         return f"read_thread_comments(#{resource_key})"
+    if tool_name == "read_code_diff":
+        return f"read_code_diff(PR #{resource_key})"
     if tool_name == "read_thread_meta":
         return f"read_thread_meta(#{resource_key})"
     if tool_name == "get_project_tree":

@@ -15,6 +15,7 @@ DEFAULT_ALLOWED_COMMANDS = frozenset({
     "pyright",
     "python -m pip install",
     "pip install",
+    "git",
 })
 SHELL_METACHARS = frozenset({"|", "&", ";", "<", ">", "`", "$", "\n", "\r"})
 SAFE_ENV_KEYS = frozenset({
