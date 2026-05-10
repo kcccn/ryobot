@@ -1,3 +1,7 @@
+from .browser import (
+    InspectFrontend,
+    StartDevServer,
+)
 from .issues import (
     AddLabels,
     CloseIssue,
@@ -65,6 +69,7 @@ __all__ = [
     "DispatchWorkflow",
     "FindFilePaths",
     "GetProjectTree",
+    "InspectFrontend",
     "ListFiles",
     "ListOpenIssues",
     "ListOpenPullRequests",
@@ -88,6 +93,7 @@ __all__ = [
     "SearchIssues",
     "SearchRepoContext",
     "SearchRepoMemory",
+    "StartDevServer",
     "UpdateIssue",
     "WriteFile",
 ]

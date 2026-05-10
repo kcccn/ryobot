@@ -237,6 +237,32 @@ class RunCommandArgs(BaseModel):
     command: str = Field(..., description="Shell command to execute. Working directory is the repository root.")
 
 
+class BrowserStartServerArgs(BaseModel):
+    command: str = Field(
+        default="uvicorn app.main:app --host 0.0.0.0 --port 8000",
+        description="Shell command to launch the dev server.",
+    )
+    cwd: str = Field(
+        default="backend",
+        description="Working directory relative to repo root for the server process.",
+    )
+    port: int = Field(default=8000, description="TCP port to poll for readiness.")
+    timeout_seconds: int = Field(
+        default=30, description="Maximum seconds to wait for the port to be ready."
+    )
+
+
+class BrowserInspectArgs(BaseModel):
+    url: str = Field(
+        default="http://localhost:8000",
+        description="Full URL to inspect (e.g. http://localhost:8000).",
+    )
+    wait_ms: int = Field(
+        default=3000,
+        description="Extra milliseconds to wait after page load for dynamic content.",
+    )
+
+
 # --- constants ---
 
 DEFAULT_MAX_DIFF_CHARS = 50000

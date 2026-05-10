@@ -29,6 +29,7 @@ from platforms.github import (
     FindFilePaths,
     GetProjectTree,
     GitHubPlugin,
+    InspectFrontend,
     ListFiles,
     ListOpenIssues,
     ListOpenPullRequests,
@@ -52,6 +53,7 @@ from platforms.github import (
     SearchRepoContext,
     SearchRepoMemory,
     SearchSymbol,
+    StartDevServer,
     UpdateIssue,
     WriteFile,
 )
@@ -318,6 +320,8 @@ def _build_persona_registry(
 
 def _build_github_skills(token: str, client: httpx.AsyncClient) -> list[Any]:
     skills: list[Any] = [
+        StartDevServer(token=token, client=client),
+        InspectFrontend(token=token, client=client),
         ReadThreadContext(token=token, client=client),
         ReadIssueMemory(token=token, client=client),
         ReadIssueBody(token=token, client=client),

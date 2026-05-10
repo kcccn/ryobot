@@ -14,6 +14,7 @@ from .skills import (
     DispatchWorkflow,
     FindFilePaths,
     GetProjectTree,
+    InspectFrontend,
     ListFiles,
     ListOpenIssues,
     ListOpenPullRequests,
@@ -37,6 +38,7 @@ from .skills import (
     SearchRepoContext,
     SearchRepoMemory,
     SearchSymbol,
+    StartDevServer,
     UpdateIssue,
     WriteFile,
 )
@@ -57,6 +59,7 @@ __all__ = [
     "FindFilePaths",
     "GitHubPlugin",
     "GetProjectTree",
+    "InspectFrontend",
     "ListFiles",
     "ListOpenIssues",
     "ListOpenPullRequests",
@@ -80,6 +83,7 @@ __all__ = [
     "SearchRepoContext",
     "SearchRepoMemory",
     "SearchSymbol",
+    "StartDevServer",
     "UpdateIssue",
     "WriteFile",
 ]
