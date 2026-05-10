@@ -18,7 +18,13 @@ from core.plugins import (
     RepoRuntimeState,
     ScoutDecision,
 )
-from core.ryo_agent import RyoAgent, _extract_safe_json, _looks_like_truncated_json, _patrol_due
+from core.ryo_agent import (
+    RyoAgent,
+    _extract_result_summary,
+    _extract_safe_json,
+    _looks_like_truncated_json,
+    _patrol_due,
+)
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
 
@@ -241,6 +247,49 @@ class SearchRepoMemoryTestSkill(EchoSkill):
 class ReadThreadMetaTestSkill(EchoSkill):
     name = "read_thread_meta"
     description = "Read precise issue or PR metadata."
+
+
+class ReadThreadMetaFakeSkill(BaseSkill):
+    """A read_thread_meta that returns realistic Thread #N output and accepts issue_number args."""
+    name = "read_thread_meta"
+    description = "Read precise issue or PR metadata."
+    args_model = IssueNumberArgs
+
+    async def execute(self, **kwargs: Any) -> str:
+        args = self.args_model.model_validate(kwargs)
+        n = args.issue_number
+        return (
+            f"Thread #{n}: Test Issue #{n} title\n"
+            f"Type: Issue\nState: open\nAuthor: bot\n"
+            f"Labels: test\n"
+            f"Created: 2026-05-10T00:00:00Z\n"
+            f"Updated: 2026-05-10T00:00:00Z\n"
+            f"Closed: N/A\nMerged: False\n"
+        )
+
+
+class UpdateIssueFakeSkill(BaseSkill):
+    """A mutating update_issue that accepts issue_number and body args."""
+    name = "update_issue"
+    description = "Update an existing issue body."
+    args_model = BaseModel
+    mutates_state = True
+    calls: list[dict[str, Any]] = []
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        return f"updated:#{kwargs.get('issue_number', 0)}"
+
+
+class AddLabelsFakeSkill(BaseSkill):
+    """A mutating add_labels that accepts issue_number and labels args."""
+    name = "add_labels"
+    description = "Add labels to an issue."
+    args_model = BaseModel
+    mutates_state = True
+
+    async def execute(self, **kwargs: Any) -> str:
+        return f"labeled:#{kwargs.get('issue_number', 0)}"
 
 
 class ReadIssueMemoryTestSkill(EchoSkill):
@@ -1308,7 +1357,7 @@ async def test_scout_stage_logs_reasoning_and_tool_details(capsys: pytest.Captur
     stderr = capsys.readouterr().err
     assert "scout available tools: echo" in stderr
     assert "scout reasoning" in stderr
-    assert "tool calls: ['echo']" in stderr
+    assert "tool calls: [echo]" in stderr
     assert '-> echo({"text":"probe"})' in stderr
     assert "<- result: echo:probe" in stderr
 
@@ -1645,7 +1694,7 @@ async def test_reflection_stage_logs_reasoning_and_tool_details(capsys: pytest.C
     stderr = capsys.readouterr().err
     assert "reflection available tools: retrieve_memory" in stderr
     assert "reflection reasoning" in stderr
-    assert "tool calls: ['retrieve_memory']" in stderr
+    assert "tool calls: [retrieve_memory]" in stderr
     assert '-> retrieve_memory({"text": "durable fact"})' in stderr
     assert "<- result: echo:durable fact" in stderr
 
@@ -2114,3 +2163,330 @@ class TestExtractSafeJson:
         result = _extract_safe_json(text)
         assert result["context_analysis"] == "ready"
         assert result["action_decision"]["mode"] == "act_directly"
+
+
+class TestExtractResultSummary:
+    def test_read_thread_meta_closed_pr(self) -> None:
+        result = (
+            "Thread #98: [Cleanup] Remove stale async stub classes from services/__init__.py\n"
+            "Type: PR\n"
+            "State: closed\n"
+            "Author: github-actions[bot]\n"
+            "Labels: cleanup\n"
+            "Created: 2026-05-09T12:12:52Z\n"
+            "Updated: 2026-05-10T11:04:39Z\n"
+            "Closed: 2026-05-10T11:04:39Z\n"
+            "URL: https://github.com/kcccn/sharedBikes/pull/98\n"
+            "Draft: False\n"
+            "Merged: True\n"
+            "Merged at: 2026-05-10T11:04:39Z\n"
+            "Base: main\n"
+            "Head: cleanup/remove-stub-classes-init"
+        )
+        summary = _extract_result_summary("read_thread_meta", result)
+        assert "[Cleanup] Remove stale async stub classes" in summary
+        assert "closed" in summary
+        assert "pr" in summary.lower()
+
+    def test_read_thread_meta_open_issue(self) -> None:
+        result = (
+            "Thread #114: Phase 5 Frontend: Leaflet map init + popup from WS bootstrap\n"
+            "Type: Issue\n"
+            "State: open\n"
+            "Author: github-actions[bot]\n"
+            "Labels: enhancement, frontend, phase5\n"
+            "Created: 2026-05-10T11:15:13Z\n"
+            "Updated: 2026-05-10T11:15:13Z\n"
+            "Closed: N/A\n"
+            "URL: https://github.com/kcccn/sharedBikes/issues/114\n"
+            "Draft: False\n"
+            "Merged: False"
+        )
+        summary = _extract_result_summary("read_thread_meta", result)
+        assert "Phase 5 Frontend" in summary
+        assert "open" in summary
+
+    def test_read_thread_comments_with_comments(self) -> None:
+        result = (
+            "Comments for issue/PR #106:\n"
+            "github-actions[bot] at 2026-05-09T20:28:46Z: ## Architect review\n\nOption A is correct.\n"
+            "\n---\n"
+            "user123 at 2026-05-10T08:15:00Z: LGTM"
+        )
+        summary = _extract_result_summary("read_thread_comments", result)
+        assert "2 comment" in summary
+        assert "user123" in summary
+
+    def test_read_thread_comments_empty(self) -> None:
+        result = "No comments found for issue/PR #114."
+        summary = _extract_result_summary("read_thread_comments", result)
+        assert "no comments" in summary
+
+    def test_read_code_diff(self) -> None:
+        result = (
+            "diff --git a/backend/app/core/city.py b/backend/app/core/city.py\n"
+            "+station_id: str\n"
+            "+position: LatLng\n"
+            "diff --git a/backend/app/ws/handler.py b/backend/app/ws/handler.py\n"
+            "+await ws.send_json(bootstrap)\n"
+            "-pass\n"
+        )
+        summary = _extract_result_summary("read_code_diff", result)
+        assert "2 file" in summary
+
+    def test_read_issue_body(self) -> None:
+        result = "# Roadmap\n\n## Phase 5\n\nContent here..."
+        summary = _extract_result_summary("read_issue_body", result)
+        assert "Roadmap" in summary
+
+
+class TestScoutBriefWithSummaries:
+    """Verify that _build_scout_brief includes result summaries, not just labels."""
+
+    @pytest.fixture
+    def agent(self) -> RyoAgent:
+        plugin = FakePlugin()
+        llm_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions([])))
+        agent = RyoAgent(
+            persona={"identity": "pm", "system_prompt": "test", "model": "test"},
+            persona_registry={},
+            skills=[EchoSkill()],
+            llm_client=llm_client,
+            plugin=plugin,
+        )
+        return agent
+
+    def test_brief_includes_summary_when_cached_result_exists(self, agent: RyoAgent) -> None:
+        agent._scout_results = {
+            ("read_thread_meta", "98"): (
+                "Thread #98: [Cleanup] Remove stale async stub classes\n"
+                "Type: PR\nState: closed\nMerged: True\n"
+                "Merged at: 2026-05-10T11:04:39Z\n"
+            ),
+            ("read_thread_meta", "114"): (
+                "Thread #114: Phase 5 Frontend: Leaflet map init\n"
+                "Type: Issue\nState: open\nMerged: False\n"
+            ),
+        }
+        resource_uses: dict = {
+            ("read_thread_meta", "98"): 1,
+            ("read_thread_meta", "114"): 1,
+        }
+        brief = agent._build_scout_brief(resource_uses)
+        # Should contain actual data, not just labels
+        assert "[Cleanup] Remove stale async stub" in brief
+        assert "Phase 5 Frontend" in brief
+        assert "closed" in brief
+        assert "open" in brief
+        # Should still contain cache markers for code-level dedup fallback
+        assert "<!-- ryo:scout_key:read_thread_meta:98 -->" in brief
+        assert "<!-- ryo:scout_key:read_thread_meta:114 -->" in brief
+
+    def test_brief_falls_back_to_label_when_no_cached_result(self, agent: RyoAgent) -> None:
+        agent._scout_results = {}
+        resource_uses: dict = {
+            ("read_thread_meta", "42"): 1,
+        }
+        brief = agent._build_scout_brief(resource_uses)
+        # Should still include the label even without cached data
+        assert "read_thread_meta(#42)" in brief
+        assert "<!-- ryo:scout_key:read_thread_meta:42 -->" in brief
+
+    def test_brief_excludes_non_github_tools(self, agent: RyoAgent) -> None:
+        agent._scout_results = {
+            ("read_file", "src/main.py"): "print('hello')",
+        }
+        resource_uses: dict = {
+            ("read_file", "src/main.py"): 1,
+            ("read_thread_meta", "1"): 1,
+        }
+        brief = agent._build_scout_brief(resource_uses)
+        # read_file should NOT appear (not in _GITHUB_READ_TOOLS)
+        assert "read_file" not in brief
+        # read_thread_meta SHOULD appear
+        assert "read_thread_meta" in brief
+
+
+async def test_reply_cache_hit_returns_cached_result(capsys: pytest.CaptureFixture[str]) -> None:
+    """Reply phase returns cached scout result instead of calling API for a re-read."""
+    event = PluginEvent(
+        event_id="evt-cache",
+        message="test cache",
+        author="octocat",
+        issue_id="1",
+        issue_number=1,
+        comment_id=0,
+        owner="test-owner",
+        repo="test-repo",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=event,
+        history_by_issue={
+            1: HistorySnapshot(
+                messages=[],
+                has_own_state=True,
+                subconscious={},
+                runtime_state=RepoRuntimeState(next_patrol_after="2026-05-10T12:00:00Z"),
+                patrol_brief="",
+            ),
+        },
+    )
+
+    # Scout phase will call read_thread_meta(1) and cache the result
+    scout_response = build_response(
+        FakeMessage(
+            reasoning_content="scout thinking",
+            tool_calls=[
+                FakeToolCall(id="t1", function=FakeFunction(name="read_thread_meta", arguments='{"issue_number": 1}')),
+            ],
+        )
+    )
+    # Then immediately return a decision
+    decision_response = build_response(
+        FakeMessage(
+            content='{"context_analysis":"done","internal_emotion":"calm","biological_clock_impact":"ready","action_decision":{"mode":"act_directly","will_reply":false,"will_act":true,"execution_identity":"self","comment_kind":"response","focus_summary":"update roadmap","context_issue_numbers":[],"target_issue_number":1}}',
+        )
+    )
+
+    # Reply phase: model tries to re-read #1, should get cached result
+    reply_response = build_response(
+        FakeMessage(
+            reasoning_content="reply thinking",
+            tool_calls=[
+                FakeToolCall(id="t2", function=FakeFunction(name="read_thread_meta", arguments='{"issue_number": 1}')),
+            ],
+        )
+    )
+    # Then model acts
+    reply_act_response = build_response(
+        FakeMessage(
+            reasoning_content="acting now",
+            tool_calls=[
+                FakeToolCall(id="t3", function=FakeFunction(name="update_issue", arguments='{"issue_number": 1, "body": "updated"}')),
+            ],
+        )
+    )
+    # Model finishes with text reply (no more tool calls)
+    reply_done_response = build_response(
+        FakeMessage(
+            content="Roadmap updated successfully.",
+        )
+    )
+
+    fake_completions = FakeCompletions([
+        scout_response,
+        decision_response,
+        reply_response,
+        reply_act_response,
+        reply_done_response,
+    ])
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+
+    agent = RyoAgent(
+        persona={"identity": "pm", "system_prompt": "test", "model": "test"},
+        persona_registry={"pm": {"identity": "pm", "system_prompt": "test", "model": "test"}},
+        skills=[ReadThreadMetaFakeSkill(), UpdateIssueFakeSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+        max_iterations=5,
+    )
+
+    await agent.run({"event": "test"})
+
+    stderr = capsys.readouterr().err
+    # Should log cache HIT for the re-read
+    assert "cache HIT: read_thread_meta(1)" in stderr
+    # Should log scout brief with summary
+    assert "scout brief:" in stderr
+    # Should log reply caching info
+    assert "reply caching:" in stderr
+    # Should log run total time
+    assert "run completed in" in stderr
+
+
+async def test_reply_cache_miss_logs_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    """When reply reads a resource not in scout, log cache MISS with reason."""
+    event = PluginEvent(
+        event_id="evt-miss",
+        message="test miss",
+        author="octocat",
+        issue_id="1",
+        issue_number=1,
+        comment_id=0,
+        owner="test-owner",
+        repo="test-repo",
+        is_patrol=True,
+    )
+    plugin = FakePlugin(
+        event=event,
+        history_by_issue={
+            1: HistorySnapshot(
+                messages=[],
+                has_own_state=True,
+                subconscious={},
+                runtime_state=RepoRuntimeState(next_patrol_after="2026-05-10T12:00:00Z"),
+                patrol_brief="",
+            ),
+        },
+    )
+
+    # Scout reads #1 and caches it
+    scout_read = build_response(
+        FakeMessage(
+            reasoning_content="scout",
+            tool_calls=[
+                FakeToolCall(id="s1", function=FakeFunction(name="read_thread_meta", arguments='{"issue_number": 1}')),
+            ],
+        )
+    )
+    # Scout decides to act on #2 (which was NOT in scout), switching the active event
+    scout_decide = build_response(
+        FakeMessage(
+            content='{"context_analysis":"done","internal_emotion":"calm","biological_clock_impact":"ready","action_decision":{"mode":"act_directly","will_reply":false,"will_act":true,"execution_identity":"self","comment_kind":"response","focus_summary":"check #2","context_issue_numbers":[],"target_issue_number":2}}',
+        )
+    )
+    # Reply tries to read #2 which was NOT scouted → cache MISS
+    reply_read = build_response(
+        FakeMessage(
+            reasoning_content="reply",
+            tool_calls=[
+                FakeToolCall(id="r1", function=FakeFunction(name="read_thread_meta", arguments='{"issue_number": 2}')),
+            ],
+        )
+    )
+    reply_act = build_response(
+        FakeMessage(
+            tool_calls=[
+                FakeToolCall(id="r2", function=FakeFunction(name="add_labels", arguments='{"issue_number": 2, "labels": ["test"]}')),
+            ],
+        )
+    )
+    reply_done = build_response(
+        FakeMessage(content="Labels added."),
+    )
+
+    fake_completions = FakeCompletions([
+        scout_read,
+        scout_decide,
+        reply_read,
+        reply_act,
+        reply_done,
+    ])
+    llm_client = SimpleNamespace(chat=SimpleNamespace(completions=fake_completions))
+
+    agent = RyoAgent(
+        persona={"identity": "pm", "system_prompt": "test", "model": "test"},
+        persona_registry={"pm": {"identity": "pm", "system_prompt": "test", "model": "test"}},
+        skills=[ReadThreadMetaFakeSkill(), AddLabelsFakeSkill()],
+        llm_client=llm_client,
+        plugin=plugin,
+        max_iterations=5,
+    )
+
+    await agent.run({"event": "test"})
+
+    stderr = capsys.readouterr().err
+    # #2 was not scouted, should show cache MISS with "not in scout_read_keys"
+    assert "cache MISS: read_thread_meta(2)" in stderr
+    assert "not in scout_read_keys" in stderr

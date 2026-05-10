@@ -26,7 +26,8 @@ DEFAULT_FATIGUE_MAX_SECONDS = 720
 DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS = 60
 DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS = 180
 NO_REPLY_TOOL_NAME = "no_reply"
-LOG_TRUNCATE = 500
+LOG_TRUNCATE = 3000
+LOG_TRUNCATE_REASONING = 0  # 0 = no truncation for reasoning text
 PASSIVE_EXECUTION_MODES = frozenset({"reply_brief", "reply_with_plan", "ask_clarifying_question", "act_directly"})
 ALL_EXECUTION_MODES = PASSIVE_EXECUTION_MODES | {"stay_silent"}
 VISIBLE_COMMENT_KINDS = frozenset({"response", "discussion", "handoff", "final"})
@@ -131,6 +132,7 @@ class RyoAgent:
         self._control_skills_by_name = {NO_REPLY_TOOL_NAME: _NoReplySkill()}
 
     async def run(self, raw_event: Any) -> None:
+        t0 = time.monotonic()
         event = self.plugin.parse_event(raw_event)
         identity = str(self.persona["identity"])
         history = await self.plugin.fetch_history(event)
@@ -215,6 +217,8 @@ class RyoAgent:
                 else:
                     _log(f"SKIP: {skip_reason or final_outcome.reason}")
         finally:
+            elapsed = time.monotonic() - t0
+            _log(f"run completed in {elapsed:.1f}s")
             _gh_endgroup()
 
     def _build_scout_brief(self, resource_uses: dict[tuple[str, str], int]) -> str:
@@ -226,10 +230,16 @@ class RyoAgent:
         }
         if not api_items:
             return ""
-        lines = ["【Scout 阶段已读取的 GitHub API 资源，无需重复调用 API】"]
+        cached = getattr(self, '_scout_results', {})
+        lines = ["【Scout 阶段已读取的资源 — 结果摘要，无需重新查询 API】"]
         for (tool_name, resource_key), _count in sorted(api_items.items()):
             label = _scout_resource_label(tool_name, resource_key)
-            lines.append(f"- {label}")
+            result_text = cached.get((tool_name, resource_key), "")
+            summary = _extract_result_summary(tool_name, result_text) if result_text else ""
+            if summary:
+                lines.append(f"- {label}: {summary}")
+            else:
+                lines.append(f"- {label}")
             lines.append(f"<!-- ryo:scout_key:{tool_name}:{resource_key} -->")
         return "\n".join(lines)
 
@@ -412,6 +422,9 @@ class RyoAgent:
                     )
                     continue
                 scout_brief = self._build_scout_brief(resource_uses)
+                if scout_brief:
+                    keys_count = len([k for k in resource_uses if k[0] in _GITHUB_READ_TOOLS])
+                    _log(f"scout brief: {keys_count} resources, {len(scout_brief)} chars")
                 return decision, scout_brief
         finally:
             clear_skill_context(context_token)
@@ -449,6 +462,8 @@ class RyoAgent:
         subconscious = dict(history.subconscious)
         context_token = set_skill_context(event=event, subconscious=subconscious)
         scout_read_keys: set[tuple[str, str]] = _parse_scout_brief_keys(scout_brief)
+        if scout_read_keys:
+            _log(f"reply caching: {len(scout_read_keys)} scout keys available, {len(getattr(self, '_scout_results', {}))} results cached")
         executed_tool_names: set[str] = set()
 
         self._log_available_tools("reply", tools)
@@ -491,13 +506,17 @@ class RyoAgent:
                             if resource_key is not None and resource_key in scout_read_keys:
                                 cached = getattr(self, '_scout_results', {}).get(resource_key)
                                 if cached is not None:
+                                    _log(f"  cache HIT: {tool_name}({resource_key[1]}) — returning cached scout result")
                                     tool_result = cached
                                 else:
+                                    _log(f"  cache MISS: {tool_name}({resource_key[1]}) — in scout_keys but not cached")
                                     tool_result = (
                                         f"Tool skipped: resource {resource_key[0]}({resource_key[1]}) "
                                         "was already read during the Scout phase. "
                                         "Use the scout brief above instead of re-reading."
                                     )
+                            elif resource_key is not None and scout_read_keys:
+                                _log(f"  cache MISS: {tool_name}({resource_key[1]}) — not in scout_read_keys")
                         if tool_result is None:
                             tool_result = await self._execute_tool_call(tool_call, event=event)
                         if tool_name == NO_REPLY_TOOL_NAME:
@@ -1104,13 +1123,34 @@ class RyoAgent:
     def _log_stage_response(self, stage: str, assistant_message: Any, *, elapsed_seconds: float) -> None:
         reasoning = getattr(assistant_message, "reasoning_content", None) or None
         if reasoning:
-            _log(f"{stage} reasoning ({elapsed_seconds:.1f}s): {reasoning[:LOG_TRUNCATE]}")
+            if LOG_TRUNCATE_REASONING > 0 and len(reasoning) > LOG_TRUNCATE_REASONING:
+                omitted = len(reasoning) - LOG_TRUNCATE_REASONING
+                reasoning = f"{reasoning[:LOG_TRUNCATE_REASONING]}\n[truncated: {omitted} chars omitted]"
+            _log(f"{stage} reasoning ({elapsed_seconds:.1f}s): {reasoning}")
         else:
             _log(f"{stage} LLM response ({elapsed_seconds:.1f}s)")
 
     def _log_tool_calls(self, tool_calls: list[Any]) -> None:
-        tool_names = [getattr(getattr(tc, "function", None), "name", "?") for tc in tool_calls]
-        _log(f"tool calls: {tool_names}")
+        parts: list[str] = []
+        for tc in tool_calls:
+            name = getattr(getattr(tc, "function", None), "name", "?")
+            args_raw = getattr(getattr(tc, "function", None), "arguments", "{}")
+            try:
+                args = json.loads(args_raw)
+                key = (
+                    args.get("issue_number")
+                    or args.get("pr_number")
+                    or args.get("thread_number")
+                    or args.get("path")
+                    or args.get("query", "")
+                )
+                if key:
+                    parts.append(f"{name}({key})")
+                else:
+                    parts.append(name)
+            except Exception:
+                parts.append(name)
+        _log(f"tool calls: [{', '.join(parts)}]")
 
     @staticmethod
     def _tool_call_details(tool_call: Any) -> tuple[str, str]:
@@ -1229,6 +1269,48 @@ def _scout_resource_label(tool_name: str, resource_key: str) -> str:
     if tool_name in {"read_file", "list_files"}:
         return f"{tool_name}({resource_key})"
     return f"{tool_name}({resource_key[:80]})"
+
+
+_THREAD_META_TITLE_RE = re.compile(r"Thread #\d+: (.+)")
+_THREAD_META_STATE_RE = re.compile(r"^(?:State|Merged|Type):\s*(.+)$", re.MULTILINE)
+_THREAD_COMMENTS_COUNT_RE = re.compile(r"at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z:")
+
+
+def _extract_result_summary(tool_name: str, result_text: str) -> str:
+    """从 tool result 中提取一行摘要，用于 scout_brief。"""
+    first_line = result_text.split("\n")[0].strip() if result_text else ""
+    if tool_name == "read_thread_meta":
+        title_m = _THREAD_META_TITLE_RE.search(result_text)
+        title = title_m.group(1).strip()[:100] if title_m else first_line[:100]
+        states: list[str] = []
+        for m in _THREAD_META_STATE_RE.finditer(result_text):
+            val = m.group(1).strip()
+            if val.lower() in ("true", "false"):
+                if val.lower() == "true" and "merged" in m.group(0).lower():
+                    states.append("merged")
+                continue
+            states.append(val.lower())
+        state_str = " — ".join(states) if states else ""
+        state_str = state_str[:60]
+        return f"{title}{' — ' + state_str if state_str else ''}"
+    if tool_name == "read_thread_comments":
+        count = len(_THREAD_COMMENTS_COUNT_RE.findall(result_text))
+        if count == 0:
+            return "(no comments)"
+        authors = re.findall(r"(\S+)\s+at\s+\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z:", result_text)
+        author = authors[-1] if authors else "?"
+        return f"{count} comment{'s' if count > 1 else ''}, last by {author}"
+    if tool_name == "read_issue_body":
+        return first_line[:120] if first_line else "(empty body)"
+    if tool_name == "read_code_diff":
+        diff_lines = result_text.split("\n")
+        files = [ln for ln in diff_lines if ln.startswith("diff --git")]
+        added = sum(1 for ln in diff_lines if ln.startswith("+") and not ln.startswith("+++"))
+        removed = sum(1 for ln in diff_lines if ln.startswith("-") and not ln.startswith("---"))
+        return f"{len(files)} file(s), +{added}/-{removed} lines"
+    if tool_name == "read_thread_context":
+        return first_line[:120] if first_line else "(current thread)"
+    return first_line[:120] if first_line else "(no summary)"
 
 
 
