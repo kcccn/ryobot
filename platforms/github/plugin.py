@@ -322,6 +322,7 @@ class GitHubPlugin(BasePlugin):
                     owner=str(owner),
                     repo=str(repo),
                     is_patrol=True,
+                    is_workflow_dispatch=True,
                 )
         return PluginEvent(
             event_id=f"github:{owner}/{repo}:schedule:{datetime.now(timezone.utc).isoformat()}",

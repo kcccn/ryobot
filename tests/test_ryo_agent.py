@@ -18,7 +18,7 @@ from core.plugins import (
     RepoRuntimeState,
     ScoutDecision,
 )
-from core.ryo_agent import RyoAgent, _extract_safe_json, _looks_like_truncated_json
+from core.ryo_agent import RyoAgent, _extract_safe_json, _looks_like_truncated_json, _patrol_due
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
 
@@ -1883,6 +1883,71 @@ def test_terminal_visible_mutation_rejects_error_results() -> None:
         skill=skill,
         tool_result="GitHub API error (404): Not Found",
     )
+
+
+def test_workflow_dispatch_bypasses_patrol_gate() -> None:
+    dispatch_event = PluginEvent(
+        event_id="github:kcccn/sharedBikes:workflow_dispatch:issue:98",
+        message="[Street Lurker dispatch from coder: check issue #98]",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="kcccn",
+        repo="sharedBikes",
+        is_patrol=True,
+        is_workflow_dispatch=True,
+    )
+    schedule_event = PluginEvent(
+        event_id="github:kcccn/sharedBikes:schedule:2026-05-10T10:00:00",
+        message="Street lurker mode: inspect the repo...",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="kcccn",
+        repo="sharedBikes",
+        is_patrol=True,
+    )
+    # Close the gate: set next_patrol_after to 1 hour in the future
+    closed_state = RepoRuntimeState(
+        next_patrol_after=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+    )
+    # Gate is closed: _patrol_due returns False
+    assert not _patrol_due(closed_state)
+    # workflow_dispatch bypasses the gate (ryo_agent L149 logic)
+    should_skip_dispatch = (
+        dispatch_event.is_patrol
+        and not dispatch_event.is_workflow_dispatch
+        and not _patrol_due(closed_state)
+    )
+    assert not should_skip_dispatch
+    # schedule does NOT bypass the gate
+    should_skip_schedule = (
+        schedule_event.is_patrol
+        and not schedule_event.is_workflow_dispatch
+        and not _patrol_due(closed_state)
+    )
+    assert should_skip_schedule
+
+
+def test_schedule_respects_patrol_gate() -> None:
+    schedule_event = PluginEvent(
+        event_id="github:kcccn/sharedBikes:schedule:2026-05-10T10:00:00",
+        message="Street lurker mode: inspect the repo...",
+        author="system",
+        author_association="OWNER",
+        issue_id="",
+        issue_number=0,
+        comment_id=0,
+        owner="kcccn",
+        repo="sharedBikes",
+        is_patrol=True,
+    )
+    assert schedule_event.is_patrol
+    assert not schedule_event.is_workflow_dispatch
 
 
 def test_scout_decision_accepts_short_english_bug_summaries() -> None:

@@ -146,11 +146,11 @@ class RyoAgent:
         _log(f"event message: {event.message[:LOG_TRUNCATE]}")
 
         try:
-            if event.is_patrol and not _patrol_due(runtime_state):
+            if event.is_patrol and not event.is_workflow_dispatch and not _patrol_due(runtime_state):
                 _log(f"SKIP: street-lurker gate closed until {runtime_state.next_patrol_after}")
                 return
 
-            if event.is_patrol:
+            if event.is_patrol and not event.is_workflow_dispatch:
                 runtime_state.next_patrol_after = _next_patrol_after_iso()
             session = SessionState(current_identity=identity, current_event=event)
             session.rounds += 1
