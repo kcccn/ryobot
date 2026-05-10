@@ -313,7 +313,12 @@ class GitHubPlugin(BasePlugin):
                 dispatcher = inputs.get("dispatcher", "system")
                 return PluginEvent(
                     event_id=f"github:{owner}/{repo}:workflow_dispatch:issue:{issue_number}",
-                    message=f"[Targeted dispatch from {dispatcher}: work on issue #{issue_number}]",
+                    message=(
+                        f"[DISPATCH MISSION] {dispatcher} 委派你处理 #{issue_number}。"
+                        "请读取该线程最新 handoff 评论，其中包含你的首要任务指令。"
+                        "完成任务后必须在对应线程发布评论说明执行结果，"
+                        "不允许静默 merge/push/close。"
+                    ),
                     author="system",
                     author_association="OWNER",
                     issue_id="",

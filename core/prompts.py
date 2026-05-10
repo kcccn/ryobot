@@ -143,6 +143,12 @@ def build_reply_prompt(
     else:
         prompt += "\n8. 当前 comment_kind=response：这是对当前线程的直接公开回应。"
     prompt += "\n9. 不允许偏离本轮唯一焦点去做无关评论；如果发现新话题，只有在它直接影响当前焦点时才能提及。"
+    if event.is_workflow_dispatch:
+        prompt += (
+            "\n10. 本轮是被 dispatch 到该线程执行委派任务。"
+            "完成任务后必须在对应线程发布评论说明执行结果（做了什么、为什么），"
+            "不允许静默 merge、静默 push、静默 close。"
+        )
     prompt += (
         "\n\n【绝对最高优先级任务 (MISSION OVERRIDE)】\n"
         f"前序决策摘要：{decision.context_analysis}\n"

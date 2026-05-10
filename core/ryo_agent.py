@@ -229,6 +229,13 @@ class RyoAgent:
         readonly_skills = self._available_skills_for_event(event, readonly_only=True)
         tools = [skill.get_tool_definition() for skill in readonly_skills]
         system_prompt = self._decision_prompt(history=history)
+        if event.is_workflow_dispatch:
+            system_prompt += (
+                "\n\n【Dispatch 任务聚焦】你被 dispatch 到指定线程执行任务。"
+                "handoff 评论中的指令是你的首要任务。按以下顺序执行："
+                "1) 读取 handoff 指令 → 2) 精确完成指令 → 3) 评论报告结果。"
+                "在首要任务完成前，不要跳到其他工作或启动新功能。"
+            )
         user_prompt = self._decision_user_prompt(event=event, history=history, session=session)
         messages: list[ChatMessage] = [
             {"role": "system", "content": system_prompt},
