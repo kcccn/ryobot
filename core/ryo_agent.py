@@ -23,8 +23,6 @@ TRUSTED_MUTATION_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORAT
 DEFAULT_MAX_TOOL_RESULT_CHARS = 20000
 DEFAULT_FATIGUE_MIN_SECONDS = 480
 DEFAULT_FATIGUE_MAX_SECONDS = 720
-DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS = 60
-DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS = 180
 NO_REPLY_TOOL_NAME = "no_reply"
 LOG_TRUNCATE = 3000
 LOG_TRUNCATE_REASONING = 0  # 0 = no truncation for reasoning text
@@ -108,8 +106,6 @@ class RyoAgent:
         max_tokens: int = 4096,
         fatigue_min_seconds: int = DEFAULT_FATIGUE_MIN_SECONDS,
         fatigue_max_seconds: int = DEFAULT_FATIGUE_MAX_SECONDS,
-        street_lurker_fatigue_min_seconds: int = DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS,
-        street_lurker_fatigue_max_seconds: int = DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS,
     ) -> None:
         if "model" not in persona or "system_prompt" not in persona or "identity" not in persona:
             raise ValueError("persona must include 'model', 'identity', and 'system_prompt'.")
@@ -123,11 +119,6 @@ class RyoAgent:
         self.max_tokens = max_tokens
         self.fatigue_min_seconds = max(0, fatigue_min_seconds)
         self.fatigue_max_seconds = max(self.fatigue_min_seconds, fatigue_max_seconds)
-        self.street_lurker_fatigue_min_seconds = max(0, street_lurker_fatigue_min_seconds)
-        self.street_lurker_fatigue_max_seconds = max(
-            self.street_lurker_fatigue_min_seconds,
-            street_lurker_fatigue_max_seconds,
-        )
         self._skills_by_name = {skill.name: skill for skill in skills}
         self._control_skills_by_name = {NO_REPLY_TOOL_NAME: _NoReplySkill()}
 
@@ -148,12 +139,6 @@ class RyoAgent:
         _log(f"event message: {event.message[:LOG_TRUNCATE]}")
 
         try:
-            if event.is_patrol and not event.is_workflow_dispatch and not _patrol_due(runtime_state):
-                _log(f"SKIP: street-lurker gate closed until {runtime_state.next_patrol_after}")
-                return
-
-            if event.is_patrol and not event.is_workflow_dispatch:
-                runtime_state.next_patrol_after = _next_patrol_after_iso()
             session = SessionState(current_identity=identity, current_event=event)
             session.rounds += 1
             final_outcome = ExecutionOutcome(kind="no_action", reason="no_action")
@@ -170,8 +155,6 @@ class RyoAgent:
             should_reply, skip_reason = self._should_reply(
                 event=active_event,
                 decision=decision,
-                runtime_state=runtime_state,
-                ignore_fatigue=False,
             )
             if not should_reply:
                 final_outcome = ExecutionOutcome(kind="no_action", reason=skip_reason)
@@ -193,13 +176,12 @@ class RyoAgent:
                 final_target_issue_number = target_issue_number
                 final_dispatcher_identity = session.current_identity
 
-                if outcome.acted:
-                    fatigue_min_seconds, fatigue_max_seconds = self._fatigue_window_for_event(active_event)
+                if outcome.acted and not active_event.is_patrol:
                     runtime_state = _mark_bot_fatigue(
                         runtime_state,
                         identity=session.current_identity,
-                        min_seconds=fatigue_min_seconds,
-                        max_seconds=fatigue_max_seconds,
+                        min_seconds=self.fatigue_min_seconds,
+                        max_seconds=self.fatigue_max_seconds,
                     )
 
             runtime_state.last_routing.event_id = event.event_id
@@ -931,27 +913,9 @@ class RyoAgent:
         *,
         event: PluginEvent,
         decision: ScoutDecision,
-        runtime_state: RepoRuntimeState,
-        ignore_fatigue: bool = False,
     ) -> tuple[bool, str]:
         if decision.action_decision.mode == "stay_silent":
             return False, "bot chose silence"
-        if not event.is_patrol:
-            return True, "passive event requires response"
-        if not (decision.action_decision.will_reply or decision.action_decision.will_act):
-            return False, "street-lurker found no concrete action"
-
-        if ignore_fatigue:
-            return True, "session continuation approved"
-
-        fatigue_state = runtime_state.bot_fatigue.get(str(self.persona["identity"]))
-        if fatigue_state and fatigue_state.next_available_at:
-            try:
-                next_available = datetime.fromisoformat(fatigue_state.next_available_at.replace("Z", "+00:00"))
-            except ValueError:
-                next_available = None
-            if next_available and datetime.now(timezone.utc) < next_available:
-                return False, f"fatigue cooldown active until {fatigue_state.next_available_at}"
         return True, "reply approved"
 
     def _comment_reason(self, *, decision: ScoutDecision, executed_tool_names: set[str]) -> str:
@@ -1107,14 +1071,6 @@ class RyoAgent:
         if tool_calls:
             message["tool_calls"] = [self._serialize_tool_call(call) for call in tool_calls]
         return message
-
-    def _fatigue_window_for_event(self, event: PluginEvent) -> tuple[int, int]:
-        if event.is_patrol:
-            return (
-                self.street_lurker_fatigue_min_seconds,
-                self.street_lurker_fatigue_max_seconds,
-            )
-        return (self.fatigue_min_seconds, self.fatigue_max_seconds)
 
     def _log_available_tools(self, stage: str, tools: list[dict[str, Any]]) -> None:
         tool_names = [tool["function"]["name"] for tool in tools]
@@ -1326,19 +1282,6 @@ def _parse_scout_brief_keys(scout_brief: str) -> set[tuple[str, str]]:
         (match.group(1), match.group(2).strip())
         for match in _SCOUT_KEY_RE.finditer(scout_brief)
     }
-
-
-def _patrol_due(runtime_state: RepoRuntimeState) -> bool:
-    if not runtime_state.next_patrol_after:
-        return True
-    try:
-        return datetime.now(timezone.utc) >= datetime.fromisoformat(runtime_state.next_patrol_after.replace("Z", "+00:00"))
-    except ValueError:
-        return True
-
-
-def _next_patrol_after_iso() -> str:
-    return (datetime.now(timezone.utc) + timedelta(minutes=random.randint(30, 50))).isoformat()
 
 
 def _mark_bot_fatigue(

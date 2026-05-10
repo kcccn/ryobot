@@ -93,8 +93,6 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("BOT_IDENTITY", "architect")
     monkeypatch.setenv("RYOBOT_FATIGUE_MIN_SECONDS", "500")
     monkeypatch.setenv("RYOBOT_FATIGUE_MAX_SECONDS", "800")
-    monkeypatch.setenv("RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS", "90")
-    monkeypatch.setenv("RYOBOT_STREET_LURKER_FATIGUE_MAX_SECONDS", "210")
     monkeypatch.setattr(main.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(main, "AsyncOpenAI", FakeAsyncOpenAI)
     monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
@@ -116,8 +114,6 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     assert captured["ryo_agent_kwargs"]["persona"]["identity"] == "architect"
     assert captured["ryo_agent_kwargs"]["fatigue_min_seconds"] == 500
     assert captured["ryo_agent_kwargs"]["fatigue_max_seconds"] == 800
-    assert captured["ryo_agent_kwargs"]["street_lurker_fatigue_min_seconds"] == 90
-    assert captured["ryo_agent_kwargs"]["street_lurker_fatigue_max_seconds"] == 210
     assert captured["skill_count"] == 28
     assert captured["http_client_closed"] is True
 
@@ -164,7 +160,6 @@ def test_workflows_use_single_engine_and_repo_concurrency() -> None:
     assert "group: ryobot-${{ github.repository }}" in reusable
     assert "cancel-in-progress: false" in reusable
     assert "RYOBOT_FATIGUE_MIN_SECONDS" in reusable
-    assert "RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS" in reusable
     assert "vars.RYOBOT_ALLOWED_WORKFLOWS" in reusable
     assert "ryobot" in reusable
     assert "for bot in architect reviewer pm explorer coder" not in reusable

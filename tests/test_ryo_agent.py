@@ -23,7 +23,6 @@ from core.ryo_agent import (
     _extract_result_summary,
     _extract_safe_json,
     _looks_like_truncated_json,
-    _patrol_due,
 )
 from core.skills import BaseSkill, clear_skill_context, get_skill_context
 
@@ -366,8 +365,6 @@ def build_agent(
     plugin: FakePlugin,
     responses: list[FakeResponse],
     skills: list[BaseSkill] | None = None,
-    street_lurker_fatigue_min_seconds: int = 60,
-    street_lurker_fatigue_max_seconds: int = 180,
     max_tokens: int = 4096,
 ) -> tuple[RyoAgent, FakeCompletions]:
     fake_completions = FakeCompletions(responses)
@@ -390,8 +387,6 @@ def build_agent(
         max_tokens=max_tokens,
         fatigue_min_seconds=480,
         fatigue_max_seconds=480,
-        street_lurker_fatigue_min_seconds=street_lurker_fatigue_min_seconds,
-        street_lurker_fatigue_max_seconds=street_lurker_fatigue_max_seconds,
     )
     return agent, fake_completions
 
@@ -657,7 +652,6 @@ async def test_run_patrol_resolves_target_before_replying() -> None:
 
     assert plugin.resolved_targets == [77]
     assert plugin.sent_replies[0][0].issue_number == 77
-    assert plugin.updated_runtime_states[-1].next_patrol_after is not None
 
 
 @pytest.mark.asyncio
@@ -718,67 +712,6 @@ async def test_street_lurker_repo_scan_can_act_without_thread_reply() -> None:
 
     assert plugin.sent_replies == []
     assert plugin.updated_runtime_states[-1].last_routing.reason == "created_pr"
-    fatigue = plugin.updated_runtime_states[-1].bot_fatigue["architect"]
-    assert fatigue.last_spoke_at is not None
-
-
-@pytest.mark.asyncio
-async def test_street_lurker_actions_use_street_lurker_fatigue_window() -> None:
-    patrol_event = PluginEvent(
-        event_id="evt-patrol",
-        message="street lurker",
-        author="system",
-        author_association="OWNER",
-        issue_id="",
-        issue_number=0,
-        comment_id=0,
-        owner="acme",
-        repo="widgets",
-        is_patrol=True,
-    )
-    plugin = FakePlugin(
-        event=patrol_event,
-        history_by_issue={
-            0: HistorySnapshot(messages=[], subconscious={}, runtime_state=RepoRuntimeState(), patrol_brief="brief")
-        },
-    )
-    agent, _ = build_agent(
-        plugin=plugin,
-        responses=[
-            build_response(
-                FakeMessage(
-                    content=json.dumps(
-                        {
-                            "context_analysis": "clear fix",
-                            "internal_emotion": "itchy",
-                            "biological_clock_impact": "neutral",
-                            "action_decision": {"will_reply": True, "target_issue_number": None, "focus_summary": "Complete the street-lurker action on the chosen opportunity."},
-                        }
-                    )
-                )
-            ),
-            build_response(
-                FakeMessage(
-                    tool_calls=[
-                        FakeToolCall(
-                            id="call-pr",
-                            function=FakeFunction(name="create_pull_request", arguments='{"text":"ship it"}'),
-                        )
-                    ]
-                )
-            ),
-            build_response(FakeMessage(content="")),
-            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
-        ],
-        skills=[CreatePullRequestTestSkill()],
-        street_lurker_fatigue_min_seconds=0,
-        street_lurker_fatigue_max_seconds=0,
-    )
-
-    await agent.run(raw_event={})
-
-    fatigue = plugin.updated_runtime_states[-1].bot_fatigue["architect"]
-    assert fatigue.last_spoke_at == fatigue.next_available_at
 
 
 @pytest.mark.asyncio
@@ -1932,71 +1865,6 @@ def test_terminal_visible_mutation_rejects_error_results() -> None:
         skill=skill,
         tool_result="GitHub API error (404): Not Found",
     )
-
-
-def test_workflow_dispatch_bypasses_patrol_gate() -> None:
-    dispatch_event = PluginEvent(
-        event_id="github:kcccn/sharedBikes:workflow_dispatch:issue:98",
-        message="[Street Lurker dispatch from coder: check issue #98]",
-        author="system",
-        author_association="OWNER",
-        issue_id="",
-        issue_number=0,
-        comment_id=0,
-        owner="kcccn",
-        repo="sharedBikes",
-        is_patrol=True,
-        is_workflow_dispatch=True,
-    )
-    schedule_event = PluginEvent(
-        event_id="github:kcccn/sharedBikes:schedule:2026-05-10T10:00:00",
-        message="Street lurker mode: inspect the repo...",
-        author="system",
-        author_association="OWNER",
-        issue_id="",
-        issue_number=0,
-        comment_id=0,
-        owner="kcccn",
-        repo="sharedBikes",
-        is_patrol=True,
-    )
-    # Close the gate: set next_patrol_after to 1 hour in the future
-    closed_state = RepoRuntimeState(
-        next_patrol_after=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-    )
-    # Gate is closed: _patrol_due returns False
-    assert not _patrol_due(closed_state)
-    # workflow_dispatch bypasses the gate (ryo_agent L149 logic)
-    should_skip_dispatch = (
-        dispatch_event.is_patrol
-        and not dispatch_event.is_workflow_dispatch
-        and not _patrol_due(closed_state)
-    )
-    assert not should_skip_dispatch
-    # schedule does NOT bypass the gate
-    should_skip_schedule = (
-        schedule_event.is_patrol
-        and not schedule_event.is_workflow_dispatch
-        and not _patrol_due(closed_state)
-    )
-    assert should_skip_schedule
-
-
-def test_schedule_respects_patrol_gate() -> None:
-    schedule_event = PluginEvent(
-        event_id="github:kcccn/sharedBikes:schedule:2026-05-10T10:00:00",
-        message="Street lurker mode: inspect the repo...",
-        author="system",
-        author_association="OWNER",
-        issue_id="",
-        issue_number=0,
-        comment_id=0,
-        owner="kcccn",
-        repo="sharedBikes",
-        is_patrol=True,
-    )
-    assert schedule_event.is_patrol
-    assert not schedule_event.is_workflow_dispatch
 
 
 def test_scout_decision_accepts_short_english_bug_summaries() -> None:

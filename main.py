@@ -61,8 +61,6 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_MARKER_AUTHOR_LOGINS = frozenset({"github-actions[bot]"})
 DEFAULT_FATIGUE_MIN_SECONDS = 480
 DEFAULT_FATIGUE_MAX_SECONDS = 720
-DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS = 60
-DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS = 180
 _TRUSTED_AUTHOR_ASSOCIATIONS: frozenset[str] = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 
@@ -142,8 +140,6 @@ async def _run(
             max_tokens=bot.max_tokens,
             fatigue_min_seconds=config["fatigue_min_seconds"],
             fatigue_max_seconds=config["fatigue_max_seconds"],
-            street_lurker_fatigue_min_seconds=config["street_lurker_fatigue_min_seconds"],
-            street_lurker_fatigue_max_seconds=config["street_lurker_fatigue_max_seconds"],
         )
         await ryo_agent.run(payload)
     finally:
@@ -282,18 +278,6 @@ def _load_config(bot: Any) -> dict[str, Any]:
         "max_iterations": 50,
         "fatigue_min_seconds": int(os.getenv("RYOBOT_FATIGUE_MIN_SECONDS", str(DEFAULT_FATIGUE_MIN_SECONDS))),
         "fatigue_max_seconds": int(os.getenv("RYOBOT_FATIGUE_MAX_SECONDS", str(DEFAULT_FATIGUE_MAX_SECONDS))),
-        "street_lurker_fatigue_min_seconds": int(
-            os.getenv(
-                "RYOBOT_STREET_LURKER_FATIGUE_MIN_SECONDS",
-                str(DEFAULT_STREET_LURKER_FATIGUE_MIN_SECONDS),
-            )
-        ),
-        "street_lurker_fatigue_max_seconds": int(
-            os.getenv(
-                "RYOBOT_STREET_LURKER_FATIGUE_MAX_SECONDS",
-                str(DEFAULT_STREET_LURKER_FATIGUE_MAX_SECONDS),
-            )
-        ),
     }
 
 
