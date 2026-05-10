@@ -40,7 +40,7 @@ on:
 jobs:
   run-ryobot:
     concurrency:
-      group: ryobot-${{ github.repository }}
+      group: ryobot-${{ github.repository }}-${{ github.event_name }}
       cancel-in-progress: false
     permissions:
       issues: write
