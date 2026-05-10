@@ -571,6 +571,17 @@ class RyoAgent:
                             )
                             continue
                         if executed_tool_names:
+                            if not event.is_patrol:
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "你已完成代码变更。现在必须生成一条可见评论，"
+                                            "简要说明做了什么、为什么。不要静默结束。"
+                                        ),
+                                    }
+                                )
+                                continue
                             return ExecutionOutcome(
                                 kind="acted_without_thread_reply",
                                 reason=_reason_from_tools(executed_tool_names, default="acted_without_comment"),

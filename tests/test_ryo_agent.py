@@ -905,7 +905,7 @@ async def test_reply_executes_mixed_batch_in_order_before_terminal_stop() -> Non
 
 
 @pytest.mark.asyncio
-async def test_reply_defers_no_reply_until_after_other_batch_tools() -> None:
+async def test_passive_events_force_visible_report_after_mutations() -> None:
     close_skill = RecordingCloseIssueSkill()
     plugin = FakePlugin(
         event=PluginEvent(
@@ -927,7 +927,7 @@ async def test_reply_defers_no_reply_until_after_other_batch_tools() -> None:
                 FakeMessage(
                     content=json.dumps(
                         {
-                            "context_analysis": "close and stop",
+                            "context_analysis": "close and report",
                             "internal_emotion": "firm",
                             "biological_clock_impact": "neutral",
                             "action_decision": {
@@ -936,8 +936,7 @@ async def test_reply_defers_no_reply_until_after_other_batch_tools() -> None:
                                 "will_act": True,
                                 "execution_identity": "self",
                                 "comment_kind": "response",
-
-                                "focus_summary": "Close the issue and avoid extra public reply.",
+                                "focus_summary": "Close the issue and report to the thread.",
                                 "context_issue_numbers": [],
                                 "target_issue_number": None,
                             },
@@ -953,7 +952,7 @@ async def test_reply_defers_no_reply_until_after_other_batch_tools() -> None:
                     ]
                 )
             ),
-            build_response(FakeMessage(content='{"action":"noop","summary":"done"}')),
+            build_response(FakeMessage(content="Closed as duplicate.")),
         ],
         skills=[close_skill],
     )
@@ -962,6 +961,8 @@ async def test_reply_defers_no_reply_until_after_other_batch_tools() -> None:
 
     assert close_skill.calls == [81]
     assert plugin.updated_runtime_states[-1].last_routing.reason == "closed_issue"
+    assert len(plugin.sent_replies) == 1
+    assert plugin.sent_replies[0][1] == "Closed as duplicate."
 
 
 @pytest.mark.asyncio
