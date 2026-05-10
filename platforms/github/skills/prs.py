@@ -66,6 +66,7 @@ class CreatePRReview(GitHubSkillBase):
     )
     args_model = CreatePRReviewArgs
     mutates_state = True
+    terminal_mutation = True
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)

@@ -533,8 +533,7 @@ class RyoAgent:
                         )
                         if self._is_terminal_visible_mutation(
                             event=event,
-                            tool_name=tool_name,
-                            decision=decision,
+                            skill=self._skills_by_name.get(tool_name),
                             tool_result=str(tool_result),
                         ):
                             has_terminal_mutation = True
@@ -995,20 +994,24 @@ class RyoAgent:
                 session.closed_issue_numbers.add(issue_number)
 
     @staticmethod
+    def _is_tool_error_result(tool_result: str) -> bool:
+        return (
+            tool_result.startswith("Tool error:")
+            or tool_result.startswith("GitHub API error")
+        )
+
+    @staticmethod
     def _is_terminal_visible_mutation(
         *,
         event: PluginEvent,
-        tool_name: str,
-        decision: ScoutDecision,
+        skill: BaseSkill | None,
         tool_result: str = "",
     ) -> bool:
-        if event.is_patrol:
-            if tool_name != "create_pr_review":
-                return False
-            if tool_result.startswith("GitHub API error"):
-                return False
-            return True
-        return False
+        if not event.is_patrol:
+            return False
+        if skill is None or not skill.terminal_mutation:
+            return False
+        return not RyoAgent._is_tool_error_result(tool_result)
 
     @staticmethod
     def _log_possible_json_truncation(*, stage: str, raw_text: str, exc: Exception) -> bool:

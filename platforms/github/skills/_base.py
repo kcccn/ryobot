@@ -134,7 +134,10 @@ class GitHubSkillBase(BaseSkill):
         return decoded
 
     async def _current_authenticated_login(self) -> str:
-        profile = await self._api.get_json("/user")
+        try:
+            profile = await self._api.get_json("/user")
+        except httpx.HTTPStatusError:
+            return ""
         return str(profile.get("login") or "")
 
     async def _fetch_paginated(self, path: str, *, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:

@@ -59,6 +59,7 @@ class BaseSkill(ABC):
     args_model: ClassVar[type[BaseModel]] = BaseModel
     mutates_state: ClassVar[bool] = False
     requires_trusted_author: ClassVar[bool] = False
+    terminal_mutation: ClassVar[bool] = False
 
     def get_json_schema(self) -> dict[str, Any]:
         """Expose a vendor-neutral JSON Schema derived from Pydantic."""
