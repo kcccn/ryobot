@@ -72,7 +72,7 @@ class RepoRuntimeState(BaseModel):
 
 
 class ActionDecision(BaseModel):
-    mode: str = "stay_silent"
+    mode: str = "reply_brief"
     will_reply: bool
     will_act: bool = False
     execution_identity: str = "self"

@@ -111,16 +111,6 @@ def build_patrol_brief_summary(
         pr for pr in pulls
         if not _iso_at_or_after(str(pr.get("updated_at") or ""), since)
     ]
-    opportunity_issues = []
-    for item in external_issues:
-        labels = {str(lb.get("name") or "").lower() for lb in item.get("labels", [])}
-        title = str(item.get("title") or "").lower()
-        if (
-            labels & {"enhancement", "documentation", "rfc", "phase-2"}
-            or "tracker" in title
-            or "roadmap" in title
-        ):
-            opportunity_issues.append(item)
     overlapping_issue_pairs = _find_overlapping_issue_pairs(external_issues)
 
     lines: list[str] = ["Street-lurker opportunity radar:"]
@@ -148,14 +138,31 @@ def build_patrol_brief_summary(
             )
     else:
         lines.append("- No stale open PRs.")
-    lines.append("3. Small actionable opportunities:")
-    if opportunity_issues:
-        for item in opportunity_issues[:5]:
+    lines.append("3. Ranked open issues (you decide which are actionable):")
+    if external_issues:
+        def _sort_key(item: dict[str, Any]) -> tuple[int, float]:
+            labels = {str(lb.get("name") or "").lower() for lb in item.get("labels", [])}
+            if "p0" in labels:
+                priority = 0
+            elif "p1" in labels:
+                priority = 1
+            elif "p2" in labels:
+                priority = 2
+            else:
+                priority = 3
+            dt = _parse_iso_datetime(str(item.get("updated_at") or ""))
+            epoch = dt.timestamp() if dt else 0.0
+            return (priority, -epoch)  # newer first within same priority
+
+        ranked = sorted(external_issues, key=_sort_key)
+        for item in ranked[:10]:
+            labels = {str(lb.get("name") or "").lower() for lb in item.get("labels", [])}
+            priority = "P0" if "p0" in labels else "P1" if "p1" in labels else "P2" if "p2" in labels else "—"
             lines.append(
-                f"- Issue #{item['number']}: {item['title']} labels={_issue_labels(item)}"
+                f"  [{priority}] Issue #{item['number']}: {item['title']} labels={_issue_labels(item)} updated={item.get('updated_at', '')}"
             )
     else:
-        lines.append("- No obvious tracker/RFC/doc opportunities from open issues.")
+        lines.append("- No open external issues.")
     lines.append("4. Potential overlapping threads:")
     if overlapping_issue_pairs:
         for left, right in overlapping_issue_pairs[:5]:
@@ -166,5 +173,5 @@ def build_patrol_brief_summary(
     lines.append("- Check whether old trackers/RFCs should be closed, clarified, split, or advanced.")
     lines.append("- Look for doc/test drift, obvious TODO/stub follow-ups, or prerequisites that seem complete but unconnected.")
     lines.append("- If multiple open threads appear to overlap, verify the relationship before deciding to keep, close, cross-link, or ignore them.")
-    lines.append("- 'No new issues/PRs in 24h' is not sufficient by itself to stay silent.")
+    lines.append("- 'No new issues/PRs in 24h' is not sufficient to do nothing.")
     return "\n".join(lines)

@@ -355,7 +355,7 @@ async def test_build_patrol_brief_excludes_internal_issues() -> None:
     assert "Human-facing tracker" in brief
     assert "RyoBot Coordination" not in brief
     assert "🧠 Ryo Coder" not in brief
-    assert "not sufficient by itself to stay silent" in brief
+    assert "not sufficient to do nothing" in brief
 
 
 @pytest.mark.asyncio

@@ -362,7 +362,7 @@ class RyoAgent:
                                     "One or more of your tool calls were rejected because you hit the resource "
                                     "probe limit. You have already read the same information more than once. "
                                     "You MUST output your ScoutDecision JSON NOW — no more tools. "
-                                    "If you fail to produce valid JSON, you will fall back to stay_silent "
+                                    "If you fail to produce valid JSON, you will fall back to reply_brief "
                                     "and all your analysis will be lost."
                                 ),
                             }
@@ -382,7 +382,7 @@ class RyoAgent:
                                         "You have been looping without discovering new information. "
                                         "You MUST output your ScoutDecision JSON NOW. "
                                         "If you fail to produce valid JSON this iteration, you will fall back to "
-                                        '"stay_silent" and all your analysis will be lost. '
+                                        '"reply_brief" and all your analysis will be lost. '
                                         "No more tool calls."
                                     ),
                                 }
@@ -444,8 +444,8 @@ class RyoAgent:
             internal_emotion="Quiet",
             biological_clock_impact="Prefer silence.",
             action_decision=ActionDecision(
-                mode="stay_silent",
-                will_reply=False,
+                mode="reply_brief",
+                will_reply=True,
                 will_act=False,
                 target_issue_number=None,
                 comment_kind="final",
@@ -937,11 +937,7 @@ class RyoAgent:
                 f"comment_kind must be one of {sorted(VISIBLE_COMMENT_KINDS)}, got {decision.action_decision.comment_kind!r}"
             )
         if mode == "stay_silent":
-            if decision.action_decision.will_reply or decision.action_decision.will_act:
-                raise ValueError("stay_silent decisions cannot also set will_reply or will_act true.")
-            if not event.is_patrol:
-                raise ValueError("Passive human-triggered events may not choose stay_silent.")
-            return
+            raise ValueError("stay_silent is not allowed — patrol must act, passive events must respond.")
         if not (decision.action_decision.will_reply or decision.action_decision.will_act):
             raise ValueError("Non-silent decisions must set will_reply or will_act.")
         if not decision.action_decision.focus_summary.strip():
@@ -1163,7 +1159,7 @@ class RyoAgent:
         *,
         reason: str,
         output_name: str = "ScoutDecision",
-        fallback_name: str = "stay_silent",
+        fallback_name: str = "reply_brief",
     ) -> None:
         """Append a user message explaining that tool calls were rejected.
 

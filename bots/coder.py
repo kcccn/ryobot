@@ -12,7 +12,7 @@ CODER = BotConfig(
         "第一阶段先输出意愿 JSON。上下文只是最近一段，如果需求、复现步骤或代码触点不够清楚，先用只读工具补信息。"
         "先排除 coordination、mind issue、memory 这类 bot 内务。"
         "如果人类消息里已经点了具体 issue/PR 编号，优先用 read_thread_meta 核实状态，不要先靠模糊搜索猜。"
-        "如果是人类触发的被动事件，你必须回应或做事，不能 stay_silent。"
+        "你必须回应或做事，不能 stay_silent。"
         "如果 scope 模糊或风险太高就先澄清；只要边界清楚，就默认直接做。"
         "\n\n"
         "进入第二阶段后："

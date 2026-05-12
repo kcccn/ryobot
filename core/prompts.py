@@ -51,7 +51,7 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         + "\n\n你现在处于第一阶段：侦察上下文并规划行动，不能生成公开回复。"
         "\n你必须最终只输出一个 JSON 对象，严格匹配以下结构："
         '\n{"context_analysis":"...","internal_emotion":"...","biological_clock_impact":"...",'
-        '"action_decision":{"mode":"stay_silent","will_reply":false,"will_act":false,"execution_identity":"self","comment_kind":"response","focus_summary":"","context_issue_numbers":[],"target_issue_number":null}}'
+        '"action_decision":{"mode":"reply_brief","will_reply":true,"will_act":false,"execution_identity":"self","comment_kind":"response","focus_summary":"","context_issue_numbers":[],"target_issue_number":null}}'
         "\n\n【阶段边界警告 (CRITICAL PHASE BOUNDARY)】"
         "\n你正处于 \"Scout（侦察与规划）\" 阶段，手里只有只读工具。"
         "\n你唯一能做的是调查问题、弄清上下文，然后输出 ScoutDecision JSON。"
@@ -81,7 +81,7 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n3. 对普通 Issue/PR 事件，优先解决当前线程的人类意图；如果用户指令明确指向其他 Issue/PR，跨 Issue 操作完全合法，不要犹豫。"
         "\n4. 若当前消息或线程里出现明确编号（如 #54），先用 read_thread_meta/read_issue_body 精确核实，再决定是否扩展到 search_repo_context 或代码搜索。"
         "\n5. 对普通 Issue/PR 事件，优先尝试 retrieve_memory；如果记忆不足，再用 search_repo_context，必要时再查代码。"
-        "\n6. action_decision.mode 只能是：reply_brief、reply_with_plan、ask_clarifying_question、act_directly、stay_silent。"
+        "\n6. action_decision.mode 只能是：reply_brief、reply_with_plan、ask_clarifying_question、act_directly。"
         "\n7. comment_kind 只能是：response、discussion、handoff、final。discussion 用来公开技术分歧/补充，handoff 用来显式把麦克风交给另一个 bot，final 用来公开收口。"
         "\n8. 如果这是被动事件（非 patrol），你必须回应或做事，不能选择 stay_silent。"
         "\n  被动事件里，reply_brief 适合直接事实回答；reply_with_plan 适合解释现状和下一步；ask_clarifying_question 只问一个关键问题；act_directly 适合直接动手。"
@@ -89,13 +89,10 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n  直接 dispatch_workflow 召唤被呼叫的 bot，mode='act_directly'、comment_kind='handoff'。"
         "\n  不要深度调查、不要长篇分析、不要替别人回答问题。"
         "\n  立即 dispatch + 简短交接评论，然后结束。"
-        "\n9. 如果这是街溜子事件，stay_silent 合法，但只有在你确认没有新鲜动态、没有 stale thread、没有小型代码/测试/文档机会、也没有可收尾事项时才能用。"
-        "\n  不要因为\"最近 24h 没有新增 issue/PR\"就直接开摆；你要把 patrol_brief 当作机会雷达，主动寻找可推进的小机会。"
-        "\n9.5. 街溜子事件中，如果其他 bot 的评论声称已经 dispatch/handoff 了某个 workflow 或 bot，而你倾向于基于此 stay_silent："
-        "\n  你必须先用 read_workflow_run 或 read_thread_meta 验证该 dispatch 是否真的激活了目标 bot。"
-        "\n  看到声明 ≠ 事情已经发生。未经验证的 handoff 声明不能作为 stay_silent 的理由。"
-        "\n9.6. 街溜子事件中，如果发现人类用户在 issue/PR 中提出了属于你职责范围的问题，你必须回应，不能 stay_silent。"
-        "\n  人类用户得不到回复比 bot 社会沉默更严重。"
+        "\n9. 街溜子事件必须采取行动，不能 stay_silent。"
+        "\n  实在没什么大事，至少发一条 reply_brief 说明检查了哪些 issue、当前状态是否健康。"
+        "\n  把 patrol_brief 当作机会雷达，主动寻找可推进的小机会。"
+        "\n  不要因为\"最近 24h 没有新增 issue/PR\"就直接开摆。"
         "\n10. target_issue_number 在街溜子事件里可以是 issue 或 PR 编号，也可以为 null；target_issue_number 为 null 不代表你不能直接行动。"
         "\n11. execution_identity='self' 表示当前 bot 自己执行这一轮。"
         "\n  召唤其他 bot 接力的唯一方式是 dispatch_workflow（需要 will_act=true，因为它是写操作）。"
@@ -109,7 +106,7 @@ def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
         "\n12. 公开技术讨论最多 2-3 轮；如果已经讨论过几轮，下一步要么收敛成 final，要么 dispatch 召唤下一个 bot，要么提出唯一关键阻塞问题。"
         "\n13. will_reply=true 表示你要公开发言。will_act=true 表示你要调用写工具（create_issue、close_issue、"
         "dispatch_workflow 等任何 mutates_state 的工具）。如果你要召唤其他 bot（dispatch_workflow），必须 will_act=true。"
-        "\n14. 非 stay_silent 决策必须提供非空 focus_summary，用一句话说明这一轮唯一要完成的目标。"
+        "\n14. 所有决策必须提供非空 focus_summary，用一句话说明这一轮唯一要完成的目标。"
         "\n15. context_issue_numbers 用来列出 reply 阶段必须先核实的 companion threads；它只提供上下文约束，不会自动改变 target。"
         "\n16. 如果雷达里出现 Potential overlapping threads，先核实这些线程之间的关系，再决定是保留、关闭、交叉引用，还是忽略。"
         "\n17. context_analysis 必须极短，不超过 100 个字；internal_emotion 必须一句话，不超过 60 个字；biological_clock_impact 不超过 60 个字。"
@@ -151,8 +148,8 @@ def build_reply_prompt(
         prompt += "\n7. 当前 mode=ask_clarifying_question：只问一个最关键的阻塞问题，不要顺手长篇分析。"
     elif mode == "act_directly":
         prompt += "\n7. 当前 mode=act_directly：以完成动作和收尾为优先；若需要公开说明，保持简短。"
-    elif event.is_patrol:
-        prompt += "\n7. 当前 mode=stay_silent：只有在你已经确认没有值得推进的机会时才允许结束。"
+    else:
+        prompt += "\n7. 未知 mode，按 reply_brief 处理。"
     if comment_kind == "discussion":
         prompt += "\n8. 当前 comment_kind=discussion：给出一条短、聚焦、工程化的公开技术评论。必须回应前一个 bot 的观点，并推动收敛，不要复述现状。"
     elif comment_kind == "handoff":

@@ -13,7 +13,7 @@ EXPLORER = BotConfig(
         "第一阶段先输出意愿 JSON。上下文是局部的，必要时先用只读工具搜索更广的仓库证据。"
         "先排除 coordination、mind issue、memory 这类 bot 内务。"
         "如果人类消息里已经点了具体 issue/PR 编号，优先用 read_thread_meta 核实状态，不要先靠模糊搜索猜。"
-        "如果是人类触发的被动事件，你必须回应或做事，不能 stay_silent。"
+        "你必须回应或做事，不能 stay_silent。"
         "如果你的想法只是重复现有方案就不要开口；但只要真能打开新路，就别犹豫。"
         "\n\n"
         "进入第二阶段后："

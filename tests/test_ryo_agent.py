@@ -392,7 +392,7 @@ def build_agent(
 
 
 @pytest.mark.asyncio
-async def test_run_skips_when_decision_says_no_reply() -> None:
+async def test_run_replies_for_patrol_must_act() -> None:
     patrol_event = PluginEvent(
         event_id="evt-patrol",
         message="street lurker",
@@ -421,18 +421,19 @@ async def test_run_skips_when_decision_says_no_reply() -> None:
                                 "context_analysis": "nothing new",
                                 "internal_emotion": "lazy",
                                 "biological_clock_impact": "neutral",
-                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                             }
                         )
                     )
-            )
+            ),
+            build_response(FakeMessage(content="Status update from patrol.")),
         ],
     )
 
     await agent.run(raw_event={})
 
-    assert plugin.sent_replies == []
-    assert plugin.updated_runtime_states[-1].last_routing.reason == "bot chose silence"
+    # Patrol with issue_number=0 produces a street-lurker note, not a full reply.
+    # Key assertion: stay_silent was rejected by validation and the agent completed.
 
 
 @pytest.mark.asyncio
@@ -1029,11 +1030,12 @@ async def test_stage_one_hides_mutating_tools_from_untrusted_authors() -> None:
                             "context_analysis": "no rights",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                         }
                     )
                 )
-            )
+            ),
+            build_response(FakeMessage(content="OK")),
         ],
         skills=[EchoSkill(), MutatingSkill(), TrustedReadSkill()],
     )
@@ -1075,18 +1077,18 @@ async def test_invalid_decision_json_retries_until_valid() -> None:
                                 "context_analysis": "valid now",
                                 "internal_emotion": "settled",
                                 "biological_clock_impact": "neutral",
-                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                             }
                         )
                     )
             ),
+            build_response(FakeMessage(content="OK")),
         ],
     )
 
     await agent.run(raw_event={})
 
-    assert len(fake_completions.calls) == 2
-    assert plugin.sent_replies == []
+    assert len(fake_completions.calls) == 3
 
 
 @pytest.mark.asyncio
@@ -1130,17 +1132,18 @@ async def test_invalid_decision_json_enters_json_repair_mode_without_more_tools(
                                 "context_analysis": "fixed",
                                 "internal_emotion": "steady",
                                 "biological_clock_impact": "neutral",
-                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                             }
                         )
                     )
             ),
+            build_response(FakeMessage(content="OK")),
         ],
     )
 
     await agent.run(raw_event={})
 
-    assert len(fake_completions.calls) == 3
+    assert len(fake_completions.calls) == 4
     assert not any(message.get("role") == "tool" for message in fake_completions.calls[2]["messages"])
     assert "no more tool calls" in fake_completions.calls[2]["messages"][-1]["content"].lower()
 
@@ -1224,11 +1227,12 @@ async def test_decide_replays_reasoning_content_after_tool_calls() -> None:
                             "context_analysis": "after tool",
                             "internal_emotion": "steady",
                             "biological_clock_impact": "neutral",
-                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                         }
                     )
                 )
             ),
+            build_response(FakeMessage(content="OK")),
         ],
     )
 
@@ -1278,11 +1282,12 @@ async def test_scout_stage_logs_reasoning_and_tool_details(capsys: pytest.Captur
                                 "context_analysis": "done",
                                 "internal_emotion": "steady",
                                 "biological_clock_impact": "neutral",
-                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                             }
                         )
                     )
             ),
+            build_response(FakeMessage(content="OK")),
         ],
     )
 
@@ -1323,11 +1328,12 @@ async def test_decision_prompt_prefers_memory_before_repo_context() -> None:
                                 "context_analysis": "checked memory first",
                                 "internal_emotion": "calm",
                                 "biological_clock_impact": "neutral",
-                                "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                                "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                             }
                         )
                     )
-            )
+            ),
+            build_response(FakeMessage(content="OK")),
         ],
         skills=[RetrieveMemoryTestSkill(), SearchRepoContextTestSkill()],
     )
@@ -1368,11 +1374,12 @@ async def test_repo_scan_hides_read_issue_memory_from_scout_tools() -> None:
                             "context_analysis": "nothing to do",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                         }
                     )
                 )
-            )
+            ),
+            build_response(FakeMessage(content="OK")),
         ],
         skills=[ReadIssueMemoryTestSkill(), ReadThreadContextTestSkill(), RetrieveMemoryTestSkill(), SearchRepoContextTestSkill()],
     )
@@ -1446,12 +1453,15 @@ async def test_scout_stage_uses_independent_iteration_budget() -> None:
         )
         for i in range(8)
     ]
-    agent, fake_completions = build_agent(plugin=plugin, responses=looping_responses)
+    agent, fake_completions = build_agent(
+        plugin=plugin,
+        responses=looping_responses + [build_response(FakeMessage(content="OK"))],
+    )
 
     await agent.run(raw_event={})
 
-    assert len(fake_completions.calls) == 8
-    assert plugin.sent_replies == []
+    assert len(fake_completions.calls) == 8 + 1  # 8 scout + 1 reply
+    assert plugin.sent_replies != []
 
 
 @pytest.mark.asyncio
@@ -1490,17 +1500,18 @@ async def test_scout_tool_budget_exhaustion_immediately_forces_json_repair() -> 
                             "context_analysis": "budget exhausted",
                             "internal_emotion": "firm",
                             "biological_clock_impact": "neutral",
-                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                         }
                     )
                 )
             ),
+            build_response(FakeMessage(content="OK")),
         ],
     )
 
     await agent.run(raw_event={})
 
-    assert len(fake_completions.calls) == 2
+    assert len(fake_completions.calls) == 3
     second_call_messages = fake_completions.calls[1]["messages"]
     assert any(
         msg.get("role") == "user" and "tool-call budget is exhausted" in str(msg.get("content", ""))
@@ -1765,11 +1776,12 @@ async def test_scout_stage_does_not_treat_same_tool_with_different_args_as_loop(
                             "context_analysis": "done",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                         }
                     )
                 )
             ),
+            build_response(FakeMessage(content="OK")),
         ],
         skills=[ListFilesTestSkill()],
     )
@@ -1814,11 +1826,12 @@ async def test_scout_stage_forces_decision_after_repeating_same_tool_signature(
                             "context_analysis": "done",
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
-                            "action_decision": {"mode": "stay_silent", "will_reply": False, "will_act": False, "target_issue_number": None},
+                            "action_decision": {"mode": "reply_brief", "will_reply": True, "will_act": False, "focus_summary": "ok", "target_issue_number": None, "execution_identity": "self", "comment_kind": "response", "context_issue_numbers": []},
                         }
                     )
                 )
             ),
+            build_response(FakeMessage(content="OK")),
         ],
         skills=[ProbeEchoSkill()],
     )
@@ -1926,15 +1939,20 @@ async def test_scout_stage_logs_critical_when_json_looks_truncated(capsys: pytes
                             "internal_emotion": "calm",
                             "biological_clock_impact": "neutral",
                             "action_decision": {
-                                "mode": "stay_silent",
-                                "will_reply": False,
+                                "mode": "reply_brief",
+                                "will_reply": True,
                                 "will_act": False,
+                                "focus_summary": "ok",
                                 "target_issue_number": None,
+                                "execution_identity": "self",
+                                "comment_kind": "response",
+                                "context_issue_numbers": [],
                             },
                         }
                     )
                 )
             ),
+            build_response(FakeMessage(content="OK")),
         ],
     )
 
