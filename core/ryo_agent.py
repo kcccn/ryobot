@@ -15,7 +15,7 @@ from typing import Any, TypedDict
 from pydantic import BaseModel, ValidationError
 
 from . import prompts
-from .plugins import ActionDecision, BasePlugin, PluginEvent, RepoRuntimeState, ScoutDecision
+from .plugins import ActionDecision, BasePlugin, OplogEntry, PluginEvent, RepoRuntimeState, ScoutDecision
 from .skills import BaseSkill, clear_skill_context, set_skill_context
 
 DEFAULT_FALLBACK_MESSAGE = "I'm sorry, but I couldn't complete your request right now."
@@ -29,6 +29,7 @@ LOG_TRUNCATE_REASONING = 0  # 0 = no truncation for reasoning text
 PASSIVE_EXECUTION_MODES = frozenset({"reply_brief", "reply_with_plan", "ask_clarifying_question", "act_directly"})
 ALL_EXECUTION_MODES = PASSIVE_EXECUTION_MODES | {"stay_silent"}
 VISIBLE_COMMENT_KINDS = frozenset({"response", "discussion", "handoff", "final"})
+_MAX_OPLOG_ENTRIES = 15
 SCOUT_MAX_ITERATIONS = 8
 SCOUT_MAX_TOOL_CALLS = 12
 SCOUT_CONVERGENCE_LIMIT = 3
@@ -192,6 +193,21 @@ class RyoAgent:
                 final_event.issue_number if final_outcome.acted else final_target_issue_number
             )
             runtime_state.last_routing.routed_at = _utcnow_iso()
+
+            # Record operational log entry for cross-patrol handoff
+            oplog_result = "success" if final_outcome.acted else "silent"
+            oplog_entry = OplogEntry(
+                ts=_utcnow_iso(),
+                bot=session.current_identity,
+                action=final_outcome.reason,
+                result=oplog_result,
+                blocked_by="",
+                issue=final_event.issue_number,
+            )
+            runtime_state.oplog.append(oplog_entry)
+            if len(runtime_state.oplog) > _MAX_OPLOG_ENTRIES:
+                runtime_state.oplog = runtime_state.oplog[-_MAX_OPLOG_ENTRIES:]
+
             await self.plugin.update_runtime_state(runtime_state)
             if final_outcome.kind == "no_action":
                 if event.is_patrol and final_target_issue_number is None:
@@ -900,6 +916,10 @@ class RyoAgent:
         return prompts.build_mind_context(
             mind_body=history.mind_body,
             mind_issue_number=history.mind_issue_number,
+            memory_index=getattr(history, "memory_index", ""),
+            operational_context=_format_operational_log(
+                getattr(history, "operational_log", [])
+            ),
         )
 
     def _validate_decision(self, *, event: PluginEvent, decision: ScoutDecision, session: SessionState) -> None:
@@ -1305,6 +1325,31 @@ def _parse_scout_brief_keys(scout_brief: str) -> set[tuple[str, str]]:
         (match.group(1), match.group(2).strip())
         for match in _SCOUT_KEY_RE.finditer(scout_brief)
     }
+
+
+def _format_operational_log(entries: list[Any]) -> str:
+    if not entries:
+        return ""
+    lines: list[str] = []
+    for entry in entries:
+        ts = getattr(entry, "ts", "") or ""
+        bot = getattr(entry, "bot", "") or ""
+        action = getattr(entry, "action", "") or ""
+        result = getattr(entry, "result", "") or ""
+        blocked_by = getattr(entry, "blocked_by", "") or ""
+        issue = getattr(entry, "issue", 0) or 0
+        if ts:
+            try:
+                ts = ts[:16].replace("T", " ")
+            except Exception:
+                pass
+        parts = [ts, bot, action, result.upper()]
+        if blocked_by:
+            parts.append(blocked_by)
+        if issue:
+            parts.append(f"#{issue}")
+        lines.append(" | ".join(str(p) for p in parts if p))
+    return "\n".join(f"- {line}" for line in lines)
 
 
 def _mark_bot_fatigue(

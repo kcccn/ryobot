@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -46,6 +47,7 @@ _MIND_MARKER_PATTERN = re.compile(
     re.DOTALL,
 )
 _EMPTY_SECTION_TOKENS = {"", "(empty)"}
+_MAX_OPLOG_ENTRIES = 15
 
 
 class GitHubPlugin(BasePlugin):
@@ -109,6 +111,8 @@ class GitHubPlugin(BasePlugin):
         patrol_brief = ""
         if event.is_patrol:
             patrol_brief = await self._build_patrol_brief(event.owner, event.repo)
+        memory_index = await self._fetch_memory_index(event.owner, event.repo)
+        operational_log = list(runtime_state.oplog[-_MAX_OPLOG_ENTRIES:])
 
         if event.issue_number == 0:
             return HistorySnapshot(
@@ -118,6 +122,8 @@ class GitHubPlugin(BasePlugin):
                 mind_issue_number=mind_issue_number,
                 runtime_state=runtime_state,
                 patrol_brief=patrol_brief,
+                memory_index=memory_index,
+                operational_log=operational_log,
             )
 
         comments = await self._fetch_thread_comments(
@@ -135,6 +141,8 @@ class GitHubPlugin(BasePlugin):
             mind_issue_number=mind_issue_number,
             runtime_state=runtime_state,
             patrol_brief=patrol_brief,
+            memory_index=memory_index,
+            operational_log=operational_log,
         )
 
     async def resolve_target_event(self, event: PluginEvent, issue_number: int) -> PluginEvent:
@@ -484,6 +492,18 @@ class GitHubPlugin(BasePlugin):
         if isinstance(result, dict):
             return int(result.get("number", 0)), str(result.get("body") or body)
         return 0, body
+
+    async def _fetch_memory_index(self, owner: str, repo: str) -> str:
+        try:
+            resp = await self._api.get_json(
+                f"/repos/{owner}/{repo}/contents/memory/INDEX.md"
+            )
+            raw = resp.get("content", "")
+            if raw:
+                return base64.b64decode(raw).decode("utf-8")
+        except Exception:
+            pass
+        return ""
 
     async def _build_patrol_brief(self, owner: str, repo: str) -> str:
         since = datetime.now(timezone.utc) - timedelta(hours=24)

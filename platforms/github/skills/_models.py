@@ -13,33 +13,46 @@ class ReadThreadContextArgs(BaseModel):
     pass
 
 
+class StoreMemoryArgs(BaseModel):
+    slug: str = Field(description="Short kebab-case slug for the memory file (e.g. 'dual-ledger-pattern')")
+    title: str = Field(description="Memory title (one line)")
+    summary: str = Field(description="Detailed markdown body of the memory record")
+    type: str = Field(default="knowledge", description="Memory type: 'knowledge' or 'blocker'")
+    tags: list[str] = Field(default_factory=list)
+
+
+class RetrieveMemoryArgs(BaseModel):
+    query: str = Field(description="Keywords for searching the memory index")
+    limit: int = Field(default=3, ge=1, le=10)
+
+
+class RefineMemoryArgs(BaseModel):
+    slug: str = Field(description="Memory slug to refine (e.g. 'dual-ledger-pattern')")
+    title: str = Field(default="", description="Replacement title, empty to keep unchanged")
+    summary: str = Field(default="", description="Replacement markdown body, empty to keep unchanged")
+    tags: list[str] = Field(default_factory=list, description="Replacement tag list, empty to keep unchanged")
+    action: str = Field(default="update", description="'update' to refine, 'archive' to mark deleted")
+
+
+# --- deprecated memory args (kept for backward compat during migration) ---
+
 class SearchRepoMemoryArgs(BaseModel):
+    """[DEPRECATED] Use retrieve_memory instead. File-based memory replaced the issue database."""
     query: str
     limit: int = Field(default=5, ge=1, le=10)
 
 
 class CommitMemoryArgs(BaseModel):
-    title: str = Field(description="Memory issue title")
-    summary: str = Field(description="Human-readable summary of the durable memory")
-    tags: list[str] = Field(default_factory=list, description="Optional memory tags such as user:alice or module:api")
-
-
-class RetrieveMemoryArgs(BaseModel):
-    query: str = Field(description="Keywords for searching the memory issue database")
-    candidate_limit: int = Field(default=20, ge=1, le=20)
-    limit: int = Field(default=3, ge=1, le=10)
-
-
-class RefineMemoryArgs(BaseModel):
-    memory_issue_number: int = Field(ge=1, description="Closed memory issue number to update")
-    title: str = Field(default="", description="Replacement memory title, empty to keep unchanged")
-    summary: str = Field(default="", description="Replacement human-readable summary, empty to keep unchanged")
-    tags: list[str] = Field(default_factory=list, description="Replacement tag list, empty to keep unchanged")
+    """[DEPRECATED] Use store_memory instead."""
+    title: str = Field(default="", description="Memory title")
+    summary: str = Field(default="", description="Memory summary")
+    tags: list[str] = Field(default_factory=list)
 
 
 class ArchiveMemoryArgs(BaseModel):
-    memory_issue_number: int = Field(ge=1, description="Memory issue number to archive")
-    reason: str = Field(default="", description="Why this memory is being archived")
+    """[DEPRECATED] Use refine_memory with action='archive' instead."""
+    memory_issue_number: int = Field(default=0, ge=0)
+    reason: str = Field(default="")
 
 
 class SearchRepoContextArgs(BaseModel):

@@ -25,6 +25,17 @@ class PluginEvent(BaseModel):
     head_ref: str = ""
 
 
+class OplogEntry(BaseModel):
+    """A single patrol action record stored in RepoRuntimeState.oplog."""
+
+    ts: str = ""
+    bot: str = ""
+    action: str = ""
+    result: str = ""  # success | failed | blocked | silent
+    blocked_by: str = ""
+    issue: int = 0
+
+
 class HistorySnapshot(BaseModel):
     """Conversation history plus persisted subconscious state."""
 
@@ -34,6 +45,8 @@ class HistorySnapshot(BaseModel):
     mind_issue_number: int = 0
     runtime_state: RepoRuntimeState = Field(default_factory=lambda: RepoRuntimeState())
     patrol_brief: str = ""
+    memory_index: str = ""
+    operational_log: list[OplogEntry] = Field(default_factory=list)
 
 
 class BotFatigueState(BaseModel):
@@ -55,6 +68,7 @@ class RepoRuntimeState(BaseModel):
     bot_fatigue: dict[str, BotFatigueState] = Field(default_factory=dict)
     last_routing: RoutingRecord = Field(default_factory=RoutingRecord)
     coordination_issue_number: int = 0
+    oplog: list[OplogEntry] = Field(default_factory=list)
 
 
 class ActionDecision(BaseModel):

@@ -13,16 +13,35 @@ def _mentioned_issue_refs(text: str) -> list[int]:
     return seen
 
 
-def build_mind_context(*, mind_body: str, mind_issue_number: int) -> str:
-    if not mind_body:
-        return ""
-    return (
-        f"\n\n---\n"
-        f"## Your Live Working-Memory Thread (#{mind_issue_number})\n"
-        f"This is your current bot working-memory thread, not the `🧠 memory` long-term memory DB. Read it before acting.\n"
-        f"Use update_issue with issue_number={mind_issue_number} when you need to "
-        f"update your live state. Use memory CRUD tools for long-term memory.\n\n{mind_body}\n---\n"
-    )
+def build_mind_context(
+    *,
+    mind_body: str,
+    mind_issue_number: int,
+    memory_index: str = "",
+    operational_context: str = "",
+) -> str:
+    parts: list[str] = []
+    if mind_body:
+        parts.append(
+            f"\n\n---\n"
+            f"## Your Live Working-Memory Thread (#{mind_issue_number})\n"
+            f"This is your current bot working-memory thread, not the long-term memory DB. Read it before acting.\n"
+            f"Use update_issue with issue_number={mind_issue_number} when you need to "
+            f"update your live state. Use memory CRUD tools for long-term memory.\n\n{mind_body}\n---\n"
+        )
+    if memory_index:
+        parts.append(
+            f"\n\n## Bot Memory Index\n"
+            f"下面是项目的长期记忆索引。执行任务前先检查是否有相关记录。\n\n"
+            f"{memory_index}\n"
+        )
+    if operational_context:
+        parts.append(
+            f"\n\n## Recent Patrol Activity\n"
+            f"最近 patrol 的操作记录，用于避免重复撞死在同一个问题上：\n\n"
+            f"{operational_context}\n"
+        )
+    return "".join(parts)
 
 
 def build_decision_prompt(*, system_prompt: str, mind_context: str) -> str:
@@ -170,14 +189,14 @@ def build_reply_prompt(
         "- 如果前 3 个迭代没有产生任何进度，直接执行 focus_summary 声明的核心动作"
     )
     prompt += (
-        "\n\n【记忆沉淀】\n"
-        "在完成本轮任务后，顺手判断是否有值得沉淀的长期知识。\n"
-        "不要用 commit_memory 存储：\n"
-        "- 代码实现细节（属于 git commit，不属于记忆）\n"
-        "- 单次运行的技术决策（应写在 PR/issue 描述里）\n"
-        "- 可以通过 git log/grep 获取的信息\n"
-        "值得记的：学到的模式、踩过的坑、发现的仓库约定、非显而易见的架构决策。\n"
-        "如果没特别值得记的，不用勉强。这不是硬任务，是顺手做的软提醒。"
+        "\n\n【记忆存储规则】\n"
+        "使用 store_memory 存储长期知识。不要存储：\n"
+        "- 代码实现细节（属于 git commit）\n"
+        "- 可通过 git log / code search 获取的信息\n"
+        "- 调试过程或临时修复方案\n"
+        "值得存储：项目特有的模式、踩过的坑、不可违反的约束、关键决策理由。\n"
+        "存储前先通过 retrieve_memory 检查是否有类似记录，优先 refine 而非新建。\n"
+        "如果没特别值得记的，不用勉强。"
     )
     prompt += (
         "\n\n【Session 终止规则】\n"

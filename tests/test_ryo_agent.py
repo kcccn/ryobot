@@ -222,8 +222,8 @@ class ContextAwareSkill(BaseSkill):
         }
 
 
-class CommitMemoryTestSkill(EchoSkill):
-    name = "commit_memory"
+class StoreMemoryTestSkill(EchoSkill):
+    name = "store_memory"
     description = "Store long-term memory."
     mutates_state = True
 
@@ -239,7 +239,7 @@ class SearchRepoContextTestSkill(EchoSkill):
 
 
 class SearchRepoMemoryTestSkill(EchoSkill):
-    name = "search_repo_memory"
+    name = "retrieve_memory"
     description = "Search repository memory."
 
 
@@ -1528,7 +1528,7 @@ async def test_reflection_pass_can_commit_memory_after_reply() -> None:
             repo="widgets",
         )
     )
-    memory_skill = CommitMemoryTestSkill()
+    memory_skill = StoreMemoryTestSkill()
     agent, fake_completions = build_agent(
         plugin=plugin,
         responses=[

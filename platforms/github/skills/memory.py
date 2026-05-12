@@ -1,243 +1,384 @@
 from __future__ import annotations
 
-import asyncio
+import base64
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 from ._base import GitHubSkillBase
 from ._models import (
-    DELETED_MEMORY_LABEL,
-    MEMORY_LABEL,
-    MEMORY_SCHEMA_VERSION,
-    ArchiveMemoryArgs,
-    CommitMemoryArgs,
     RefineMemoryArgs,
     RetrieveMemoryArgs,
-    SearchRepoMemoryArgs,
+    StoreMemoryArgs,
 )
 
-
-class SearchRepoMemory(GitHubSkillBase):
-    name = "search_repo_memory"
-    description = "Search the closed long-term memory issue database in the current GitHub repository."
-    args_model = SearchRepoMemoryArgs
-
-    async def execute(self, **kwargs: Any) -> str:
-        args = self.args_model.model_validate(kwargs)
-        context = self._require_context()
-        query = (
-            f'repo:{context["owner"]}/{context["repo"]} is:issue is:closed '
-            f'label:"{MEMORY_LABEL}" {args.query}'
-        )
-        result = await self._api.get_json(
-            "/search/issues",
-            params={"q": query, "per_page": max(args.limit + 5, 5), "sort": "updated", "order": "desc"},
-        )
-        issue_numbers = [
-            int(item["number"])
-            for item in result.get("items", [])
-            if int(item["number"]) != int(context["issue_number"])
-        ]
-        if not issue_numbers:
-            return "No similar memory records found."
-        detailed_items = await asyncio.gather(
-            *[
-                self._api.get_json(f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}")
-                for issue_number in issue_numbers
-            ]
-        )
-        lines: list[str] = []
-        for item in detailed_items:
-            try:
-                self._validated_memory_record(item)
-            except RuntimeError:
-                continue
-            lines.append(f"#{item['number']}: {item['title']} ({item['html_url']})")
-            if len(lines) >= args.limit:
-                break
-        return "\n".join(lines) if lines else "No similar memory records found."
+_MEMORY_DIR = "memory"
+_INDEX_PATH = f"{_MEMORY_DIR}/INDEX.md"
+_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
+_MAX_OPLOG_ENTRIES = 15
 
 
-class CommitMemory(GitHubSkillBase):
-    name = "commit_memory"
+class StoreMemory(GitHubSkillBase):
+    name = "store_memory"
     description = (
-        "Commit a durable repo memory into the closed GitHub issue memory database. "
-        "Use this only for long-lived facts worth remembering later."
+        "Store a durable memory record as a file in the memory/ directory. "
+        "Use this for long-lived project patterns, lessons, invariants, and decisions. "
+        "Check the memory index first to avoid duplicates; prefer refine over creating new."
     )
-    args_model = CommitMemoryArgs
+    args_model = StoreMemoryArgs
     mutates_state = True
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
-        await self._ensure_repo_label(
-            owner=context["owner"],
-            repo=context["repo"],
-            name=MEMORY_LABEL,
-            color="5319e7",
-            description="RyoBot long-term memory records",
+        owner = context["owner"]
+        repo = context["repo"]
+        slug = args.slug.strip()
+        if not slug:
+            return "Error: slug must be non-empty."
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        tags_yaml = "[" + ", ".join(args.tags) + "]" if args.tags else "[]"
+        frontmatter = (
+            f"---\n"
+            f"name: {slug}\n"
+            f"description: {args.title}\n"
+            f"metadata:\n"
+            f"  type: {args.type}\n"
+            f"  tags: {tags_yaml}\n"
+            f"  status: active\n"
+            f"  created: {now}\n"
+            f"  updated: {now}\n"
+            f"---"
         )
-        now = datetime.now(timezone.utc).isoformat()
-        metadata = {
-            "schema_version": MEMORY_SCHEMA_VERSION,
-            "status": "active",
-            "tags": self._normalize_tags(args.tags),
-            "source": self._memory_source(context),
-            "created_at": now,
-            "updated_at": now,
+        content = f"{frontmatter}\n\n# {args.title}\n\n{args.summary}\n"
+        file_path = f"{_MEMORY_DIR}/{slug}.md"
+
+        existing_sha = None
+        try:
+            existing = await self._api.get_json(
+                f"/repos/{owner}/{repo}/contents/{file_path}"
+            )
+            existing_sha = existing.get("sha")
+        except Exception:
+            pass
+
+        encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        put_body: dict[str, Any] = {
+            "message": f"store memory: {slug}",
+            "content": encoded,
         }
-        created = await self._api.post_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues",
-            json_body={
-                "title": args.title.strip(),
-                "body": self._memory_body(args.summary, metadata),
-                "labels": [MEMORY_LABEL],
-            },
+        if existing_sha:
+            put_body["sha"] = existing_sha
+
+        await self._api.put_json(
+            f"/repos/{owner}/{repo}/contents/{file_path}",
+            json_body=put_body,
         )
-        issue_number = int(created["number"])
-        await self._api.patch_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}",
-            json_body={"state": "closed"},
+
+        await self._upsert_index(owner, repo, slug, args.title)
+
+        return f"Stored memory '{slug}': {args.title}"
+
+    async def _upsert_index(self, owner: str, repo: str, slug: str, title: str) -> None:
+        index_line = f"- [{slug}]({slug}.md) — {title}"
+
+        existing_content = ""
+        existing_sha = None
+        try:
+            resp = await self._api.get_json(
+                f"/repos/{owner}/{repo}/contents/{_INDEX_PATH}"
+            )
+            existing_sha = resp.get("sha")
+            raw = resp.get("content", "")
+            if raw:
+                existing_content = base64.b64decode(raw).decode("utf-8")
+        except Exception:
+            pass
+
+        lines = existing_content.split("\n") if existing_content else []
+        new_lines: list[str] = []
+        found = False
+        slug_pattern = re.compile(rf"^-?\s*\[{re.escape(slug)}\]")
+        for line in lines:
+            if slug_pattern.match(line.strip()):
+                new_lines.append(index_line)
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append(index_line)
+
+        new_content = "\n".join(line for line in new_lines if line.strip() or new_lines.index(line) == len(new_lines) - 1).strip()
+        # Keep non-empty lines
+        clean_lines = [ln for ln in new_lines if ln.strip()]
+        new_content = "\n".join(clean_lines) + "\n"
+        encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+        put_body: dict[str, Any] = {
+            "message": f"update memory index: {slug}",
+            "content": encoded,
+        }
+        if existing_sha:
+            put_body["sha"] = existing_sha
+
+        await self._api.put_json(
+            f"/repos/{owner}/{repo}/contents/{_INDEX_PATH}",
+            json_body=put_body,
         )
-        return f"Committed memory issue #{issue_number}: {args.title.strip()}"
 
 
 class RetrieveMemory(GitHubSkillBase):
     name = "retrieve_memory"
     description = (
-        "Search the closed GitHub issue memory database for durable prior knowledge. "
-        "Uses keyword search plus lightweight reranking over memory tags and recency."
+        "Search the memory/INDEX.md for relevant records and return matching entries. "
+        "Uses keyword matching against slug and title."
     )
     args_model = RetrieveMemoryArgs
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
-        query = (
-            f'repo:{context["owner"]}/{context["repo"]} is:issue is:closed '
-            f'label:"{MEMORY_LABEL}" {args.query}'
-        )
-        result = await self._api.get_json(
-            "/search/issues",
-            params={"q": query, "per_page": args.candidate_limit, "sort": "updated", "order": "desc"},
-        )
-        items = result.get("items", []) if isinstance(result, dict) else []
-        if not items:
-            return f"No memory results for: {args.query}"
+        owner = context["owner"]
+        repo = context["repo"]
 
-        issue_numbers = [int(item["number"]) for item in items]
-        detailed_items = await asyncio.gather(
-            *[
-                self._api.get_json(f"/repos/{context['owner']}/{context['repo']}/issues/{issue_number}")
-                for issue_number in issue_numbers
-            ]
-        )
+        index_md = await self._fetch_file_content(owner, repo, _INDEX_PATH)
+        if not index_md:
+            return "(no memories yet)"
 
-        ranked: list[tuple[int, dict[str, Any], str, dict[str, Any]]] = []
-        for issue in detailed_items:
-            try:
-                summary, metadata, _labels = self._validated_memory_record(issue)
-            except RuntimeError:
+        query_lower = args.query.lower()
+        terms = [t for t in query_lower.split() if t]
+        scored: list[tuple[int, str, str]] = []
+        link_re = re.compile(r"^-?\s*\[([^\]]+)\]\(([^)]+)\)\s*—\s*(.*)")
+
+        for line in index_md.split("\n"):
+            stripped = line.strip()
+            # Skip strikethrough (archived) lines
+            if stripped.startswith("~~"):
                 continue
-            score = self._score_memory_candidate(args.query, issue, summary, metadata)
-            ranked.append((score, issue, summary, metadata))
+            m = link_re.match(stripped)
+            if not m:
+                continue
+            slug = m.group(1)
+            title = m.group(3)
+            haystack = f"{slug} {title}".lower()
+            score = 0
+            if query_lower and query_lower in haystack:
+                score += 50
+            score += sum(8 for term in terms if term in haystack)
+            if score > 0:
+                scored.append((score, slug, stripped))
 
-        if not ranked:
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        if not scored:
             return f"No memory results for: {args.query}"
 
-        ranked.sort(
-            key=lambda item: (
-                item[0],
-                str(item[1].get("updated_at") or item[1].get("created_at") or ""),
-            ),
-            reverse=True,
-        )
-        lines = [f"Memory results for '{args.query}' ({len(ranked)} candidates):"]
-        for score, issue, summary, metadata in ranked[: args.limit]:
-            tags = ", ".join(str(tag) for tag in metadata.get("tags", [])) or "none"
-            lines.append(
-                f"  #{issue['number']} score={score} title={issue['title']} "
-                f"tags={tags} updated={issue.get('updated_at', '')} "
-                f"url={issue.get('html_url', '')}\n    {summary}"
+        results: list[str] = []
+        results.append(f"Memory results for '{args.query}':")
+        for _score, slug, _line in scored[:args.limit]:
+            file_path = f"{_MEMORY_DIR}/{slug}.md"
+            content = await self._fetch_file_content(owner, repo, file_path)
+            if content:
+                body = _strip_frontmatter(content)
+                results.append(f"  [{slug}] {body[:500]}")
+            else:
+                results.append(f"  [{slug}] (file not found)")
+
+        return "\n".join(results) if len(results) > 1 else f"No memory results for: {args.query}"
+
+    async def _fetch_file_content(self, owner: str, repo: str, path: str) -> str:
+        try:
+            resp = await self._api.get_json(
+                f"/repos/{owner}/{repo}/contents/{path}"
             )
-        return "\n".join(lines)
+            raw = resp.get("content", "")
+            if raw:
+                return base64.b64decode(raw).decode("utf-8")
+        except Exception:
+            pass
+        return ""
 
 
 class RefineMemory(GitHubSkillBase):
     name = "refine_memory"
-    description = "Refine an existing closed memory issue when the stored long-term memory is incomplete or inaccurate."
+    description = (
+        "Update or archive an existing memory record. "
+        "Use action='update' to refine content, or action='archive' to mark as deleted."
+    )
     args_model = RefineMemoryArgs
     mutates_state = True
 
     async def execute(self, **kwargs: Any) -> str:
         args = self.args_model.model_validate(kwargs)
         context = self._require_context()
-        await self._ensure_repo_label(
-            owner=context["owner"],
-            repo=context["repo"],
-            name=MEMORY_LABEL,
-            color="5319e7",
-            description="RyoBot long-term memory records",
+        owner = context["owner"]
+        repo = context["repo"]
+        slug = args.slug.strip()
+        if not slug:
+            return "Error: slug must be non-empty."
+
+        file_path = f"{_MEMORY_DIR}/{slug}.md"
+
+        existing = None
+        try:
+            existing = await self._api.get_json(
+                f"/repos/{owner}/{repo}/contents/{file_path}"
+            )
+        except Exception:
+            return f"Error: memory '{slug}' not found at {file_path}"
+
+        existing_sha = existing.get("sha")
+        raw = existing.get("content", "")
+        existing_content = base64.b64decode(raw).decode("utf-8") if raw else ""
+
+        if args.action == "archive":
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            new_content = _update_frontmatter(existing_content, status="deleted", updated=now)
+            encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+            await self._api.put_json(
+                f"/repos/{owner}/{repo}/contents/{file_path}",
+                json_body={
+                    "message": f"archive memory: {slug}",
+                    "content": encoded,
+                    "sha": existing_sha,
+                },
+            )
+            await self._update_index_line(owner, repo, slug, archived=True)
+            return f"Archived memory '{slug}'."
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        new_title = args.title.strip() or None
+        new_summary = args.summary.strip() or None
+        new_tags = args.tags if args.tags else None
+
+        new_content = _update_frontmatter(
+            existing_content,
+            title=new_title,
+            summary=new_summary,
+            tags=new_tags,
+            updated=now,
         )
-        issue = await self._api.get_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}"
-        )
-        existing_summary, metadata, labels = self._validated_memory_record(issue)
-        if DELETED_MEMORY_LABEL in labels:
-            raise RuntimeError("Archived memory records cannot be refined. Create a new memory instead.")
-        metadata["schema_version"] = MEMORY_SCHEMA_VERSION
-        metadata["status"] = "active"
-        metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
-        if args.tags:
-            metadata["tags"] = self._normalize_tags(args.tags)
-        new_title = args.title.strip() or str(issue.get("title") or "")
-        new_summary = args.summary.strip() or existing_summary
-        updated = await self._api.patch_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}",
+
+        encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+        await self._api.put_json(
+            f"/repos/{owner}/{repo}/contents/{file_path}",
             json_body={
-                "title": new_title,
-                "body": self._memory_body(new_summary, metadata),
-                "state": "closed",
-                "labels": labels,
+                "message": f"refine memory: {slug}",
+                "content": encoded,
+                "sha": existing_sha,
             },
         )
-        return f"Refined memory issue #{updated['number']}: {updated['title']}"
+
+        display_title = new_title or _extract_title_from_content(existing_content) or slug
+        await self._update_index_line(owner, repo, slug, new_title=display_title, archived=False)
+
+        return f"Refined memory '{slug}'."
+
+    async def _update_index_line(
+        self, owner: str, repo: str, slug: str, *,
+        new_title: str | None = None,
+        archived: bool = False,
+    ) -> None:
+        try:
+            resp = await self._api.get_json(
+                f"/repos/{owner}/{repo}/contents/{_INDEX_PATH}"
+            )
+            existing_sha = resp.get("sha")
+            raw = resp.get("content", "")
+            existing_content = base64.b64decode(raw).decode("utf-8") if raw else ""
+        except Exception:
+            return
+
+        lines = existing_content.split("\n")
+        slug_pattern = re.compile(rf"^-?\s*\[{re.escape(slug)}\]")
+        new_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if slug_pattern.match(stripped):
+                if archived:
+                    # Remove strikethrough wrapper if already there, then add
+                    inner = stripped.removeprefix("~~").removesuffix("~~")
+                    new_lines.append(f"~~{inner}~~")
+                elif new_title:
+                    new_lines.append(f"- [{slug}]({slug}.md) — {new_title}")
+                else:
+                    new_lines.append(line)
+            else:
+                new_lines.append(line)
+
+        clean_lines = [ln for ln in new_lines if ln.strip()]
+        new_content = "\n".join(clean_lines) + "\n"
+        encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+        put_body: dict[str, Any] = {
+            "message": f"update memory index: {slug}",
+            "content": encoded,
+            "sha": existing_sha,
+        }
+        await self._api.put_json(
+            f"/repos/{owner}/{repo}/contents/{_INDEX_PATH}",
+            json_body=put_body,
+        )
 
 
-class ArchiveMemory(GitHubSkillBase):
-    name = "archive_memory"
-    description = "Archive a noisy or stale memory issue by removing the memory label and marking it deleted."
-    args_model = ArchiveMemoryArgs
-    mutates_state = True
+def _strip_frontmatter(content: str) -> str:
+    m = _FRONTMATTER_RE.match(content)
+    if m:
+        return content[m.end():].strip()
+    return content.strip()
 
-    async def execute(self, **kwargs: Any) -> str:
-        args = self.args_model.model_validate(kwargs)
-        context = self._require_context()
-        await self._ensure_repo_label(
-            owner=context["owner"],
-            repo=context["repo"],
-            name=DELETED_MEMORY_LABEL,
-            color="8c8c8c",
-            description="Archived or deleted memory records",
-        )
-        issue = await self._api.get_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}"
-        )
-        summary, metadata, labels = self._validated_memory_record(issue)
-        metadata["schema_version"] = MEMORY_SCHEMA_VERSION
-        metadata["status"] = "archived"
-        metadata["updated_at"] = datetime.now(timezone.utc).isoformat()
-        if args.reason.strip():
-            metadata["archive_reason"] = args.reason.strip()
-        labels = [label for label in labels if label != MEMORY_LABEL and label != DELETED_MEMORY_LABEL]
-        labels.append(DELETED_MEMORY_LABEL)
-        updated = await self._api.patch_json(
-            f"/repos/{context['owner']}/{context['repo']}/issues/{args.memory_issue_number}",
-            json_body={
-                "title": str(issue.get("title") or ""),
-                "body": self._memory_body(summary, metadata),
-                "state": "closed",
-                "labels": labels,
-            },
-        )
-        return f"Archived memory issue #{updated['number']}: {updated['title']}"
+
+def _update_frontmatter(
+    content: str,
+    *,
+    title: str | None = None,
+    summary: str | None = None,
+    tags: list[str] | None = None,
+    status: str | None = None,
+    updated: str | None = None,
+) -> str:
+    m = _FRONTMATTER_RE.match(content)
+    if not m:
+        return content
+
+    fm_text = m.group(1)
+    body = content[m.end():]
+
+    new_fm_lines: list[str] = []
+    for line in fm_text.split("\n"):
+        stripped = line.strip()
+        if title is not None and stripped.startswith("description:"):
+            new_fm_lines.append(f"description: {title}")
+        elif updated is not None and stripped.startswith("updated:"):
+            indent = line[:len(line) - len(line.lstrip())]
+            new_fm_lines.append(f"{indent}updated: {updated}")
+        elif status is not None and stripped.startswith("status:"):
+            indent = line[:len(line) - len(line.lstrip())]
+            new_fm_lines.append(f"{indent}status: {status}")
+        elif tags is not None and stripped.startswith("tags:"):
+            indent = line[:len(line) - len(line.lstrip())]
+            tags_yaml = "[" + ", ".join(tags) + "]"
+            new_fm_lines.append(f"{indent}tags: {tags_yaml}")
+        else:
+            new_fm_lines.append(line)
+
+    new_fm = "\n".join(new_fm_lines)
+
+    if summary is not None:
+        # Find the first heading line and keep it, replace the rest
+        body_stripped = body.strip()
+        heading_end = body_stripped.find("\n")
+        if heading_end > 0 and body_stripped.startswith("# "):
+            heading = body_stripped[:heading_end]
+            return f"---\n{new_fm}\n---\n\n{heading}\n\n{summary}\n"
+        return f"---\n{new_fm}\n---\n\n{summary}\n"
+
+    return f"---\n{new_fm}\n---{body}"
+
+
+def _extract_title_from_content(content: str) -> str:
+    body = _strip_frontmatter(content)
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return ""

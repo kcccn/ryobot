@@ -97,7 +97,7 @@ def test_main_constructs_runtime_and_runs_ryobot(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(main, "AsyncOpenAI", FakeAsyncOpenAI)
     monkeypatch.setattr(main, "GitHubPlugin", FakeGitHubPlugin)
     for name in (
-        "ReadThreadContext", "ReadIssueMemory", "SearchRepoMemory", "ListOpenIssues", "ListOpenPullRequests",
+        "ReadThreadContext", "ReadIssueMemory", "StoreMemory", "ListOpenIssues", "ListOpenPullRequests",
         "ListRepoLabels", "MergePullRequest", "ReadThreadComments", "ListFiles", "ReadFile",
         "SearchCode", "ReadCodeDiff", "ReadThreadMeta", "CreateIssue", "WriteFile", "CreateBranch",
         "DeleteBranch", "CreatePullRequest", "CreatePRReview", "AddLabels", "CloseIssue", "ReopenIssue",

@@ -1,11 +1,9 @@
 from .plugin import GitHubPlugin
 from .skills import (
     AddLabels,
-    ArchiveMemory,
     CloseIssue,
     CommentOnPR,
     CommentOnThread,
-    CommitMemory,
     CreateBranch,
     CreateIssue,
     CreatePRReview,
@@ -36,20 +34,18 @@ from .skills import (
     SearchCode,
     SearchIssues,
     SearchRepoContext,
-    SearchRepoMemory,
     SearchSymbol,
     StartDevServer,
+    StoreMemory,
     UpdateIssue,
     WriteFile,
 )
 
 __all__ = [
     "AddLabels",
-    "ArchiveMemory",
     "CloseIssue",
     "CommentOnPR",
     "CommentOnThread",
-    "CommitMemory",
     "CreateBranch",
     "CreateIssue",
     "CreatePRReview",
@@ -81,9 +77,9 @@ __all__ = [
     "SearchCode",
     "SearchIssues",
     "SearchRepoContext",
-    "SearchRepoMemory",
     "SearchSymbol",
     "StartDevServer",
+    "StoreMemory",
     "UpdateIssue",
     "WriteFile",
 ]
